@@ -1369,6 +1369,24 @@ impl VaultContract {
         })
     }
 
+    /// Read-only arithmetic mean staked amount across all active positions.
+    ///
+    /// Returns `total_staked / total_stakers` using the aggregate counters in
+    /// instance storage, so the call is **O(1)** and never iterates individual
+    /// positions. No authentication is required and no state is modified.
+    ///
+    /// Integer division truncates toward zero. When there are no active stakers
+    /// the function returns `0`.
+    pub fn get_average_stake_amount(env: Env) -> i128 {
+        let total_staked = balance::get_total_deposited(&env);
+        let total_stakers = balance::get_total_stakers(&env);
+        if total_stakers == 0 {
+            0
+        } else {
+            total_staked / (total_stakers as i128)
+        }
+    }
+
     /// Per-user statistics: position size, pending reward, stake age, last claim ledger.
     pub fn user_stats(env: Env, user: Address) -> Result<UserStats, VaultError> {
         let _ = admin::get_admin(&env)?;
