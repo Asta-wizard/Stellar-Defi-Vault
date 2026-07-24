@@ -1405,6 +1405,24 @@ impl VaultContract {
         })
     }
 
+    /// Read-only arithmetic mean staked amount across all active positions.
+    ///
+    /// Returns `total_staked / total_stakers` using the aggregate counters in
+    /// instance storage, so the call is **O(1)** and never iterates individual
+    /// positions. No authentication is required and no state is modified.
+    ///
+    /// Integer division truncates toward zero. When there are no active stakers
+    /// the function returns `0`.
+    pub fn get_average_stake_amount(env: Env) -> i128 {
+        let total_staked = balance::get_total_deposited(&env);
+        let total_stakers = balance::get_total_stakers(&env);
+        if total_stakers == 0 {
+            0
+        } else {
+            total_staked / (total_stakers as i128)
+        }
+    }
+
     /// Per-user statistics: position size, pending reward, stake age, last claim ledger.
     pub fn user_stats(env: Env, user: Address) -> Result<UserStats, VaultError> {
         let _ = admin::get_admin(&env)?;
@@ -2506,6 +2524,8 @@ impl VaultContract {
         events::deposit(env, staker, amount, shares, env.ledger().sequence());
         balance::set_last_updated_ledger(env, env.ledger().sequence()); // Issue #69
 
+        Self::record_activity(env, "stake");
+
         Ok(shares)
     }
 
@@ -2671,6 +2691,8 @@ impl VaultContract {
 
         // Issue #129: auto-pause if reward balance drops below threshold
         Self::check_auto_pause(env)?;
+
+        Self::record_activity(env, "unstake");
 
         Ok(amount_returned)
     }
@@ -3306,6 +3328,67 @@ impl VaultContract {
         env.storage().persistent().set(&key, &history);
     }
 
+    /// Increment the appropriate counter in the current day bucket of the
+    /// rolling 7-day activity log. Creates a new bucket when the ledger
+    /// crosses a day boundary and drops the oldest bucket when the log
+    /// exceeds 7 entries.
+    fn record_activity(env: &Env, action: &str) {
+        let current_day = env.ledger().sequence() / LEDGERS_PER_DAY;
+        let mut log = balance::get_activity_log(env);
+
+        if log.len() > 0 {
+            let last_idx = log.len() - 1;
+            let mut last = log.get(last_idx).unwrap();
+            if last.day_index == current_day {
+                // Same day — increment the relevant counter in-place.
+                match action {
+                    "stake" => last.stake_count += 1,
+                    "unstake" => last.unstake_count += 1,
+                    "claim" => last.claim_count += 1,
+                    _ => {}
+                }
+                log.set(last_idx, last);
+            } else {
+                // New day — push a fresh bucket.
+                let mut bucket = DayBucket {
+                    day_index: current_day,
+                    stake_count: 0,
+                    unstake_count: 0,
+                    claim_count: 0,
+                };
+                match action {
+                    "stake" => bucket.stake_count = 1,
+                    "unstake" => bucket.unstake_count = 1,
+                    "claim" => bucket.claim_count = 1,
+                    _ => {}
+                }
+                log.push_back(bucket);
+            }
+        } else {
+            // First entry ever.
+            let mut bucket = DayBucket {
+                day_index: current_day,
+                stake_count: 0,
+                unstake_count: 0,
+                claim_count: 0,
+            };
+            match action {
+                "stake" => bucket.stake_count = 1,
+                "unstake" => bucket.unstake_count = 1,
+                "claim" => bucket.claim_count = 1,
+                _ => {}
+            }
+            log.push_back(bucket);
+        }
+
+        // Cap at 7 entries.
+        while log.len() > 7 {
+            let _ = log.pop_front();
+        }
+
+        balance::set_activity_log(env, &log);
+    }
+
     // ── Inner claim helper (no require_auth) ──────────────────────────────────
 
     /// Core claim logic shared by `claim` and `stake_and_claim`.
@@ -3404,6 +3487,8 @@ impl VaultContract {
 
         // Reward refill alert: emit if runway < 30 days, rate-limited to once per day
         Self::check_refill_alert(env);
+
+        Self::record_activity(env, "claim");
 
         Ok(reward)
     }
@@ -3779,6 +3864,17 @@ impl VaultContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Read-only: returns the rolling 7-day activity heatmap data.
+    ///
+    /// Each `DayBucket` entry contains `day_index` (= `ledger / LEDGERS_PER_DAY`)
+    /// and the counts of stake, unstake, and claim actions that occurred in that
+    /// day. The vector contains at most 7 entries, ordered oldest-first.
+    ///
+    /// No auth required. Returns an empty vec when no activity has been recorded.
+    pub fn staker_activity_heatmap_data(env: Env) -> Vec<DayBucket> {
+        balance::get_activity_log(&env)
     }
 
     pub fn set_vesting_period(env: Env, admin: Address, ledgers: u32) -> Result<(), VaultError> {
