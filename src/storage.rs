@@ -69,7 +69,6 @@ pub enum DataKey {
     EpochLedgers,
     EpochRewardPerEpoch,
     EpochRewardFactor(u32),
-
 }
 
 /// Storage key for an individual epoch snapshot.
@@ -306,6 +305,16 @@ pub struct UserSummary {
     pub pool_share_bps: i128,
 }
 
+/// Result of `get_boost_tier_progress`: how far a user is toward the next boost tier.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoostTierProgress {
+    pub current_tier: u32,
+    pub current_multiplier_bps: i128,
+    pub next_tier_in_ledgers: Option<u32>,
+    pub next_multiplier_bps: Option<i128>,
+}
+
 // ── Issue #105: stake/unstake history ────────────────────────────────────────
 
 /// Discriminant for a stake history entry.
@@ -377,7 +386,6 @@ pub struct VestingEntry {
     pub amount: i128,
     pub claimable_at_ledger: u32,
 }
-
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
