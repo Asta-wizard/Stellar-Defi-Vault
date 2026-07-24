@@ -400,3 +400,10 @@ pub fn refill_alert(env: &Env, reward_balance: i128, ledgers_until_empty: u32, l
     env.events()
         .publish(topics, (reward_balance, ledgers_until_empty, ledger));
 }
+
+/// Emitted when the admin sets or updates the emergency contact string.
+pub fn emergency_contact_updated(env: &Env, admin: &Address, contact: &soroban_sdk::String) {
+    let topics = (symbol_short!("emg_cnt"), admin);
+    env.events()
+        .publish(topics, (contact.clone(), env.ledger().sequence()));
+}
