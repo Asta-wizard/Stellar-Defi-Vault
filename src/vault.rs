@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Symbol, Vec, symbol_short};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Symbol, Vec};
 
 use crate::{
     admin, balance,
@@ -7,10 +7,10 @@ use crate::{
     nft::StakeReceiptNFTClient,
     storage::{
         BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses,
-        ContractMetadata, DataKey, DayBucket, InterfaceId, LeaderboardEntry, PoolConfig,
+        ContractMetadata, DataKey, EpochState, InterfaceId, LeaderboardEntry, PoolConfig,
         PoolHealthReport, PoolStats, RateHistoryEntry, ReferralLeaderboardEntry, StakeAction,
         StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, TotalStakedSnapshot,
-        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry, EpochState,
+        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -600,8 +600,7 @@ impl VaultContract {
         // Referral tracking: keep total_referred_stake in sync with actual stake.
         if let Some(referrer) = balance::get_referrer_of(&env, &user) {
             let mut stats = balance::get_referral_stats(&env, &referrer);
-            stats.total_referred_stake =
-                stats.total_referred_stake.saturating_sub(amount_removed);
+            stats.total_referred_stake = stats.total_referred_stake.saturating_sub(amount_removed);
             balance::set_referral_stats(&env, &referrer, &stats);
         }
 
@@ -821,6 +820,39 @@ impl VaultContract {
         Ok(balance::get_pool_cap(&env))
     }
 
+    /// Admin: set a short contact string (email, Discord handle, URL) that
+    /// users can query during emergencies such as pauses or exploits.
+    ///
+    /// Maximum length is 100 characters. Reverts with `DescriptionTooLong` if exceeded.
+    /// Emits `emergency_contact_updated` on every change.
+    pub fn set_emergency_contact(env: Env, contact: String) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        if contact.len() > 100 {
+            return Err(VaultError::DescriptionTooLong);
+        }
+        let key = Symbol::new(&env, "emg_contact");
+        env.storage().instance().set(&key, &contact);
+        let admin = admin::get_admin(&env)?;
+        events::emergency_contact_updated(&env, &admin, &contact);
+        balance::increment_admin_action_count(&env);
+        Self::append_changelog(
+            &env,
+            &admin,
+            String::from_str(&env, "emergency_contact_set"),
+            0,
+            0,
+        );
+        Ok(())
+    }
+
+    /// Read-only query for the emergency contact string.
+    ///
+    /// Returns `None` if no contact has been set yet.
+    pub fn get_emergency_contact(env: Env) -> Option<String> {
+        let key = Symbol::new(&env, "emg_contact");
+        env.storage().instance().get(&key)
+    }
+
     /// Return all pool-level configuration in a single call.
     ///
     /// Reduces frontend RPC overhead by aggregating `admin`, `stake_token`,
@@ -883,7 +915,11 @@ impl VaultContract {
     /// Returns the maturity ledger even if already past (lets frontends
     /// distinguish "no lock" from "lock already expired").
     pub fn get_position_maturity_ledger(env: Env, user: Address) -> Option<u32> {
-        let lock_period: u32 = env.storage().instance().get(&DataKey::LockPeriod).unwrap_or(0);
+        let lock_period: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LockPeriod)
+            .unwrap_or(0);
         if lock_period == 0 {
             return None;
         }
@@ -4080,7 +4116,11 @@ impl VaultContract {
                 let staker_staked =
                     balance::shares_to_amount(total_shares, total_deposited, shares).unwrap_or(0);
                 env.storage().persistent().set(
-                    &(soroban_sdk::Symbol::new(&env, "uep_snp"), staker, state.epoch_number),
+                    &(
+                        soroban_sdk::Symbol::new(&env, "uep_snp"),
+                        staker,
+                        state.epoch_number,
+                    ),
                     &staker_staked,
                 );
             }
@@ -4118,7 +4158,11 @@ impl VaultContract {
         let user_staked: i128 = env
             .storage()
             .persistent()
-            .get(&(soroban_sdk::Symbol::new(&env, "uep_snp"), user.clone(), epoch_number))
+            .get(&(
+                soroban_sdk::Symbol::new(&env, "uep_snp"),
+                user.clone(),
+                epoch_number,
+            ))
             .unwrap_or(0);
 
         user_staked
@@ -4962,5 +5006,4 @@ impl VaultContract {
             .and_then(|v| v.checked_div(STELLAR_LEDGERS_PER_YEAR as i128))
             .unwrap_or(0)
     }
-
 }

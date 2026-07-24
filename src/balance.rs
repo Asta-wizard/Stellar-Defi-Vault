@@ -723,14 +723,10 @@ pub fn remove_approved_relayer(env: &Env, user: &Address) {
     env.storage().persistent().remove(&key);
 }
 
-
 // ── Issue #126: yield source whitelist ───────────────────────────────────────
 pub fn is_yield_source(env: &Env, source: &Address) -> bool {
     let key = (Symbol::new(env, "y_source"), source.clone());
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or(false)
+    env.storage().persistent().get(&key).unwrap_or(false)
 }
 
 pub fn set_yield_source(env: &Env, source: &Address, approved: bool) {
