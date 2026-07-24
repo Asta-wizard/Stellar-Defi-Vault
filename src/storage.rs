@@ -255,6 +255,16 @@ pub struct ReferralStats {
     pub referral_count: u32,
 }
 
+/// Result of `get_boost_tier_progress` showing where a user is toward the next boost tier.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoostTierProgress {
+    pub current_tier: u32,
+    pub current_multiplier_bps: i128,
+    pub next_tier_in_ledgers: Option<u32>,
+    pub next_multiplier_bps: Option<i128>,
+}
+
 /// One entry in the referral leaderboard returned by `referral_leaderboard`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]

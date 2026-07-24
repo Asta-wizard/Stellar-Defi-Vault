@@ -3519,3 +3519,47 @@ fn test_get_next_epoch_start_and_until() {
     let until_1200 = f.vault.ledgers_until_next_epoch();
     assert_eq!(until_1200, 0);
 }
+
+// ── get_average_stake_amount ────────────────────────────────────────────────
+
+#[test]
+fn test_average_stake_no_stakers_returns_zero() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_average_stake_amount(), 0);
+}
+
+#[test]
+fn test_average_stake_single_staker_returns_own_amount() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &5_000);
+    assert_eq!(f.vault.get_average_stake_amount(), 5_000);
+}
+
+#[test]
+fn test_average_stake_two_stakers_correct_average() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &3_000);
+    f.vault.stake(&f.bob, &7_000);
+    // (3000 + 7000) / 2 = 5000
+    assert_eq!(f.vault.get_average_stake_amount(), 5_000);
+}
+
+#[test]
+fn test_average_stake_unequal_amounts_truncates() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &10_000);
+    f.vault.stake(&f.bob, &10_001);
+    // (10000 + 10001) / 2 = 10000 (integer truncation)
+    assert_eq!(f.vault.get_average_stake_amount(), 10_000);
+}
+
+#[test]
+fn test_average_stake_after_partial_unstake() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &4_000);
+    f.vault.stake(&f.bob, &6_000);
+    // Alice unstakes 1000, leaving 3000
+    f.vault.unstake(&f.alice, &1_000);
+    // total_staked = 3000 + 6000 = 9000, stakers = 2
+    assert_eq!(f.vault.get_average_stake_amount(), 4_500);
+}

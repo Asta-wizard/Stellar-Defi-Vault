@@ -6,7 +6,7 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey, InterfaceId,
+        BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey, InterfaceId,
         LeaderboardEntry, PoolConfig, PoolHealthReport, PoolStats, RateHistoryEntry,
         ReferralLeaderboardEntry, StakeAction, StakeHistoryEntry, StakePosition, StakeStreak,
         StakingEfficiencyScore, TotalStakedSnapshot, UnbondingPosition, UnstakeCheckResult,
@@ -1367,6 +1367,24 @@ impl VaultContract {
             paused: Self::paused(&env),
             total_rewards_paid: balance::get_total_rewards_paid(&env),
         })
+    }
+
+    /// Read-only arithmetic mean staked amount across all active positions.
+    ///
+    /// Returns `total_staked / total_stakers` using the aggregate counters in
+    /// instance storage, so the call is **O(1)** and never iterates individual
+    /// positions. No authentication is required and no state is modified.
+    ///
+    /// Integer division truncates toward zero. When there are no active stakers
+    /// the function returns `0`.
+    pub fn get_average_stake_amount(env: Env) -> i128 {
+        let total_staked = balance::get_total_deposited(&env);
+        let total_stakers = balance::get_total_stakers(&env);
+        if total_stakers == 0 {
+            0
+        } else {
+            total_staked / (total_stakers as i128)
+        }
     }
 
     /// Per-user statistics: position size, pending reward, stake age, last claim ledger.
