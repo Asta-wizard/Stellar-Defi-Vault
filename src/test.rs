@@ -10,7 +10,7 @@ use soroban_sdk::{
 use crate::{
     errors::VaultError,
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
-    storage::{ChangelogEntry, PoolHealthReport, ReferralLeaderboardEntry, UnstakeCheckResult},
+    storage::{ChangelogEntry, DayBucket, PoolHealthReport, ReferralLeaderboardEntry, UnstakeCheckResult},
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
         CONTRACT_VERSION, LEDGERS_PER_DAY, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
@@ -3518,4 +3518,133 @@ fn test_get_next_epoch_start_and_until() {
     set_ledger(&f.env, 1200);
     let until_1200 = f.vault.ledgers_until_next_epoch();
     assert_eq!(until_1200, 0);
+}
+
+// ── activity heatmap (7-day rolling buckets) ──────────────────────────────
+
+#[test]
+fn test_activity_heatmap_empty_initially() {
+    let f = VaultFixture::new();
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 0);
+}
+
+#[test]
+fn test_stake_increments_stake_count() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 1);
+    let bucket = log.get(0).unwrap();
+    assert_eq!(bucket.day_index, 0 / LEDGERS_PER_DAY);
+    assert_eq!(bucket.stake_count, 1);
+    assert_eq!(bucket.unstake_count, 0);
+    assert_eq!(bucket.claim_count, 0);
+}
+
+#[test]
+fn test_unstake_increments_unstake_count() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    f.vault.unstake(&f.alice, &50_000);
+
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 1);
+    let bucket = log.get(0).unwrap();
+    assert_eq!(bucket.stake_count, 1);
+    assert_eq!(bucket.unstake_count, 1);
+}
+
+#[test]
+fn test_claim_increments_claim_count() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.admin, &5_000_000);
+    f.vault.fund_reward_pool(&f.admin, &5_000_000);
+    f.vault.set_reward_rate_bps(&1000_u32);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Advance within the same day so stake + claim share a bucket.
+    set_ledger(&f.env, 100);
+    f.vault.claim(&f.alice);
+
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 1);
+    let bucket = log.get(0).unwrap();
+    assert_eq!(bucket.stake_count, 1);
+    assert_eq!(bucket.claim_count, 1);
+}
+
+#[test]
+fn test_day_rollover_creates_new_bucket() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+
+    // Move to a new day boundary.
+    set_ledger(&f.env, LEDGERS_PER_DAY);
+    f.vault.stake(&f.bob, &100_000);
+
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 2);
+
+    let b0 = log.get(0).unwrap();
+    assert_eq!(b0.day_index, 0);
+    assert_eq!(b0.stake_count, 1);
+
+    let b1 = log.get(1).unwrap();
+    assert_eq!(b1.day_index, 1);
+    assert_eq!(b1.stake_count, 1);
+}
+
+#[test]
+fn test_same_day_increments_existing_bucket() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    f.vault.stake(&f.bob, &200_000);
+
+    // Still on day 0 — should be a single bucket with stake_count = 2.
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log.get(0).unwrap().stake_count, 2);
+}
+
+#[test]
+fn test_oldest_bucket_dropped_after_8_days() {
+    let f = VaultFixture::new();
+    // Create 8 distinct day buckets (exceeds the 7-day cap).
+    for day in 0..8u32 {
+        set_ledger(&f.env, day * LEDGERS_PER_DAY);
+        f.vault.stake(&f.alice, &100_000);
+        f.vault.unstake(&f.alice, &50_000);
+    }
+
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 7, "rolling window must be capped at 7");
+
+    // Oldest retained bucket should be day 1 (day 0 was dropped).
+    let first = log.get(0).unwrap();
+    assert_eq!(first.day_index, 1);
+}
+
+#[test]
+fn test_all_three_counters_track_correctly() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.admin, &5_000_000);
+    f.vault.fund_reward_pool(&f.admin, &5_000_000);
+    f.vault.set_reward_rate_bps(&BOOST_BPS_BASE); // 100% APR for large rewards
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &500_000);
+    f.vault.unstake(&f.alice, &200_000);
+    // Advance within the same day — large enough for both claims to yield > 0.
+    set_ledger(&f.env, 10_000);
+    f.vault.claim(&f.alice);
+    f.vault.claim(&f.bob);
+
+    let log = f.vault.staker_activity_heatmap_data();
+    assert_eq!(log.len(), 1);
+    let bucket = log.get(0).unwrap();
+    assert_eq!(bucket.stake_count, 2, "two stakes recorded");
+    assert_eq!(bucket.unstake_count, 1, "one unstake recorded");
+    assert_eq!(bucket.claim_count, 2, "two claims recorded");
 }
