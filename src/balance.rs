@@ -1,5 +1,5 @@
 use crate::storage::{
-    ChangelogEntry, ClaimWindow, DataKey, RateHistoryEntry, ReferralStats, VestingEntry,
+    ChangelogEntry, ClaimWindow, DataKey, DayBucket, RateHistoryEntry, ReferralStats, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
@@ -750,4 +750,19 @@ pub fn get_total_rewards_added(env: &Env) -> i128 {
 pub fn set_total_rewards_added(env: &Env, total: i128) {
     let key = (Symbol::new(env, "tot_rwds"),);
     env.storage().instance().set(&key, &total);
+}
+
+// ── Activity heatmap (7-day rolling buckets) ────────────────────────────────
+
+pub fn get_activity_log(env: &Env) -> Vec<DayBucket> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("act_log"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_activity_log(env: &Env, log: &Vec<DayBucket>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("act_log"), log);
 }
