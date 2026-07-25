@@ -2,7 +2,7 @@ use crate::storage::{
     ChangelogEntry, ClaimWindow, DataKey, DayBucket, RateHistoryEntry, ReferralStats, VestingEntry,
 };
 
-use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
 
 pub fn get_shares(env: &Env, user: &Address) -> i128 {
     env.storage()
@@ -746,6 +746,39 @@ pub fn get_total_rewards_added(env: &Env) -> i128 {
 pub fn set_total_rewards_added(env: &Env, total: i128) {
     let key = (Symbol::new(env, "tot_rwds"),);
     env.storage().instance().set(&key, &total);
+}
+
+// ── Issue #180: lifetime protocol fee revenue counter ────────────────────────
+// Uses a direct symbol key (rather than a `DataKey` variant) because the
+// `DataKey` union is already at the 50-case XDR spec limit.
+
+pub fn get_protocol_fee_collected(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("prot_fee"))
+        .unwrap_or(0)
+}
+
+pub fn add_protocol_fee_collected(env: &Env, amount: i128) {
+    let total = get_protocol_fee_collected(env) + amount;
+    env.storage()
+        .instance()
+        .set(&symbol_short!("prot_fee"), &total);
+}
+
+// ── Issue #182: off-chain webhook URL config ─────────────────────────────────
+// Uses a direct symbol key for the same reason as above.
+
+pub fn get_webhook_url(env: &Env) -> Option<String> {
+    env.storage().instance().get(&symbol_short!("whk_url"))
+}
+
+pub fn set_webhook_url(env: &Env, url: &String) {
+    env.storage().instance().set(&symbol_short!("whk_url"), url);
+}
+
+pub fn clear_webhook_url(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("whk_url"));
 }
 
 // ── Activity heatmap (7-day rolling buckets) ────────────────────────────────

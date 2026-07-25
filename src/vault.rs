@@ -9,9 +9,9 @@ use crate::{
         BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses,
         ContractMetadata, DataKey, DayBucket, EpochState, InterfaceId, LeaderboardEntry, PauseInfo,
         PauseReason, PoolConfig, PoolHealthReport, PoolStats, RateHistoryEntry,
-        ReferralLeaderboardEntry, RoundingPolicy, StakeAction, StakeHistoryEntry, StakePosition,
-        StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        ReferralLeaderboardEntry, RewardMultiplierBreakdown, RoundingPolicy, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, TaxReport,
+        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -808,6 +808,52 @@ impl VaultContract {
         balance::get_unstake_fee_bps(&env)
     }
 
+    // ── Issue #180: protocol fee revenue counter ─────────────────────────────
+
+    /// Read-only lifetime total of protocol fees collected (e.g. unstake fees),
+    /// tracked separately from the reward pool balance. Cumulative — never
+    /// decremented, even after a treasury withdrawal. Defaults to 0.
+    pub fn get_protocol_fee_collected(env: Env) -> i128 {
+        balance::get_protocol_fee_collected(&env)
+    }
+
+    // ── Issue #182: stake-event webhook URL config ───────────────────────────
+
+    /// Maximum length in characters for the stored webhook URL.
+    const MAX_WEBHOOK_URL_LENGTH: u32 = 200;
+
+    /// Admin: store an off-chain webhook URL for indexers/monitoring bots to
+    /// read. Purely metadata — the contract never calls this URL itself.
+    /// Reverts with `DescriptionTooLong` if `url` exceeds 200 characters (the
+    /// error enum is at the XDR-enforced 50-case cap, so this reuses the
+    /// existing "value too long" variant rather than adding a new one).
+    pub fn set_webhook_url(env: Env, admin: Address, url: String) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if url.len() > Self::MAX_WEBHOOK_URL_LENGTH {
+            return Err(VaultError::DescriptionTooLong);
+        }
+        balance::set_webhook_url(&env, &url);
+        let admin = admin::get_admin(&env)?;
+        events::webhook_url_updated(&env, &admin, &Some(url), env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Read-only query for the stored webhook URL. Returns `None` if unset.
+    pub fn get_webhook_url(env: Env) -> Option<String> {
+        balance::get_webhook_url(&env)
+    }
+
+    /// Admin: clears the stored webhook URL.
+    pub fn clear_webhook_url(env: Env, admin: Address) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        balance::clear_webhook_url(&env);
+        let admin = admin::get_admin(&env)?;
+        events::webhook_url_updated(&env, &admin, &None, env.ledger().sequence());
+        Ok(())
+    }
+
     /// Admin: set the minimum stake. Zero disables the minimum.
     pub fn set_min_stake(env: Env, amount: i128) -> Result<(), VaultError> {
         admin::require_admin(&env)?;
@@ -1273,6 +1319,38 @@ impl VaultContract {
             current_multiplier_bps,
             next_tier_in_ledgers,
             next_multiplier_bps,
+        }
+    }
+
+    // ── Issue #181: combined reward multiplier preview ───────────────────────
+
+    /// Read-only preview of `user`'s current effective reward rate with all
+    /// active boosts (time-based tiers, campaign) stacked. No auth required,
+    /// no state changes. Each multiplier field defaults to 10000 bps (1x) if
+    /// that boost mechanism is not active for the user.
+    pub fn reward_multiplier_preview(env: Env, user: Address) -> RewardMultiplierBreakdown {
+        let current_ledger = env.ledger().sequence();
+        let base_rate_bps = balance::get_reward_rate_bps(&env) as i128;
+
+        let tier_multiplier_bps =
+            Self::boost_multiplier_for_ledger(&env, &user, current_ledger) as i128;
+
+        let campaign: Option<CampaignInfo> = env.storage().instance().get(&DataKey::BoostCampaign);
+        let (campaign_multiplier_bps, _) = Self::campaign_info_at(current_ledger, &campaign);
+        let campaign_multiplier_bps = campaign_multiplier_bps as i128;
+
+        let effective_rate_bps = base_rate_bps
+            .checked_mul(tier_multiplier_bps)
+            .and_then(|v| v.checked_mul(campaign_multiplier_bps))
+            .and_then(|v| v.checked_div(BOOST_BPS_BASE as i128))
+            .and_then(|v| v.checked_div(BOOST_BPS_BASE as i128))
+            .unwrap_or(0);
+
+        RewardMultiplierBreakdown {
+            base_rate_bps,
+            tier_multiplier_bps,
+            campaign_multiplier_bps,
+            effective_rate_bps,
         }
     }
 
@@ -2678,6 +2756,7 @@ impl VaultContract {
         if unstake_fee > 0 {
             let reward_pool = balance::get_reward_pool_balance(env);
             balance::set_reward_pool_balance(env, reward_pool + unstake_fee);
+            balance::add_protocol_fee_collected(env, unstake_fee);
         }
 
         if new_user_shares == 0 {
@@ -5040,6 +5119,35 @@ impl VaultContract {
             .and_then(|v| v.checked_div(BOOST_BPS_BASE as i128))
             .and_then(|v| v.checked_div(STELLAR_LEDGERS_PER_YEAR as i128))
             .unwrap_or(0)
+    }
+
+    // ── Issue #183: single-number solvency ratio ─────────────────────────────
+
+    /// Read-only solvency ratio: how many whole days of rewards the pool can
+    /// currently fund at the current drain rate. E.g. 30 means the pool can
+    /// pay rewards for 30 more days. No auth required, no state changes.
+    ///
+    /// Returns `u32::MAX` if the drain rate is 0 (solvent indefinitely), or 0
+    /// if the reward token balance is 0. Truncates partial days.
+    pub fn get_reward_token_solvency_ratio(env: Env) -> u32 {
+        let reward_token_balance = balance::get_reward_pool_balance(&env);
+        if reward_token_balance <= 0 {
+            return 0;
+        }
+
+        let drain_rate_per_day = Self::compute_reward_drain_rate(&env)
+            .checked_mul(LEDGERS_PER_DAY as i128)
+            .unwrap_or(0);
+        if drain_rate_per_day == 0 {
+            return u32::MAX;
+        }
+
+        let days = reward_token_balance / drain_rate_per_day;
+        if days > u32::MAX as i128 {
+            u32::MAX
+        } else {
+            days as u32
+        }
     }
 
     // ── Issue #219: pause reason info query ──────────────────────────────────

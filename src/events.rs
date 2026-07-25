@@ -441,3 +441,18 @@ pub fn migration_target_set(env: &Env, admin: &Address, target_pool: &Address, l
     env.events()
         .publish(topics, (target_pool.clone(), ledger));
 }
+
+// ── Issue #182: webhook URL config ───────────────────────────────────────────
+
+/// Emitted when the admin sets or clears the stake-event webhook URL.
+///
+/// `url` is `None` when the webhook has just been cleared.
+pub fn webhook_url_updated(
+    env: &Env,
+    admin: &Address,
+    url: &Option<soroban_sdk::String>,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("whk_url"), admin);
+    env.events().publish(topics, (url.clone(), ledger));
+}
