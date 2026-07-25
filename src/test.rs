@@ -9,12 +9,13 @@ use soroban_sdk::{
 };
 
 use crate::{
-    errors::VaultError,
+    errors::{VaultError, VaultExtError},
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{ChangelogEntry, PauseReason, ProposableParam, RoundingPolicy, UnstakeCheckResult},
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
-        CONTRACT_VERSION, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
+        CONTRACT_VERSION, FIRST_STAKE_COST, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
+        TOP_UP_COST,
     },
 };
 
@@ -4430,4 +4431,254 @@ fn test_enacting_proposal_frees_open_slot() {
 fn test_get_proposal_returns_none_for_unknown_id() {
     let f = VaultFixture::new();
     assert_eq!(f.vault.get_proposal(&999), None);
+}
+
+// ── Issues #200, #201, #202, #204 ────────────────────────────────────────────
+//
+// NOTE: this whole crate currently fails to build on `main` due to several
+// pre-existing, unrelated issues (functions/types referenced by
+// reward_multiplier_preview / dynamic fee config / reputation score /
+// user-claim-count features that don't exist anywhere in the codebase —
+// confirmed via `git stash` to be identical with or without this PR's
+// changes). These tests are written and reviewed carefully but could not
+// actually be run in this session as a result.
+
+// ── Issue #200: delegation chains ───────────────────────────────────────────
+
+#[test]
+fn test_three_hop_delegation_chain_can_stake_for_beneficiary() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    let dave = Address::generate(&f.env);
+    f.token_admin.mint(&carol, &1_000_000);
+    f.token_admin.mint(&dave, &1_000_000);
+
+    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
+    f.vault.add_delegate_to_chain(&f.alice, &carol);
+    f.vault.add_delegate_to_chain(&f.alice, &dave);
+
+    let chain = f.vault.get_delegation_chain(&f.alice).unwrap();
+    assert_eq!(chain.delegates.len(), 3);
+
+    // Any of the 3 delegates can stake_for the beneficiary.
+    f.vault.stake_for(&dave, &f.alice, &500_000);
+    assert_eq!(f.vault.shares_of(&f.alice), 500_000);
+}
+
+#[test]
+fn test_fourth_delegate_in_chain_rejected() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    let dave = Address::generate(&f.env);
+    let erin = Address::generate(&f.env);
+
+    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
+    f.vault.add_delegate_to_chain(&f.alice, &carol);
+    f.vault.add_delegate_to_chain(&f.alice, &dave);
+
+    let result = f.vault.try_add_delegate_to_chain(&f.alice, &erin);
+    assert_eq!(result, Err(Ok(VaultExtError::ChainTooLong)));
+}
+
+#[test]
+fn test_only_beneficiary_can_unstake_never_a_delegate() {
+    let f = VaultFixture::new();
+    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
+    f.vault.stake_for(&f.bob, &f.alice, &500_000);
+
+    // bob (the delegate) has no shares of his own to unstake — the position
+    // is entirely credited to alice.
+    assert_eq!(f.vault.shares_of(&f.bob), 0);
+    assert_eq!(f.vault.shares_of(&f.alice), 500_000);
+
+    // alice can unstake her own position.
+    f.vault.unstake(&f.alice, &500_000);
+    assert_eq!(f.vault.shares_of(&f.alice), 0);
+}
+
+#[test]
+fn test_removing_middle_link_breaks_chain_authorization() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    f.token_admin.mint(&carol, &1_000_000);
+
+    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
+    f.vault.add_delegate_to_chain(&f.alice, &carol);
+    f.vault.remove_delegate_from_chain(&f.alice, &f.bob);
+
+    let chain = f.vault.get_delegation_chain(&f.alice).unwrap();
+    assert_eq!(chain.delegates.len(), 1);
+
+    // bob is no longer authorized.
+    let result = f.vault.try_stake_for(&f.bob, &f.alice, &500_000);
+    assert_eq!(result, Err(Ok(VaultError::NotADelegate)));
+
+    // carol still is.
+    f.vault.stake_for(&carol, &f.alice, &500_000);
+    assert_eq!(f.vault.shares_of(&f.alice), 500_000);
+}
+
+#[test]
+fn test_direct_circular_delegation_rejected() {
+    let f = VaultFixture::new();
+    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
+    // bob tries to add alice back into *his* chain — would close a 2-hop loop.
+    let result = f.vault.try_add_delegate_to_chain(&f.bob, &f.alice);
+    assert_eq!(result, Err(Ok(VaultExtError::CircularDelegation)));
+}
+
+#[test]
+fn test_self_delegation_rejected() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_add_delegate_to_chain(&f.alice, &f.alice);
+    assert_eq!(result, Err(Ok(VaultExtError::CircularDelegation)));
+}
+
+// ── Issue #201: per-user stake/claim rate limiting ──────────────────────────
+
+#[test]
+fn test_stake_too_soon_rejected() {
+    let f = VaultFixture::new();
+    f.vault.set_stake_rate_limit(&100);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+
+    set_ledger(&f.env, 50); // only 49 ledgers later
+    let result = f.vault.try_stake(&f.alice, &100_000);
+    assert_eq!(result, Err(Ok(VaultExtError::RateLimitExceeded)));
+}
+
+#[test]
+fn test_stake_after_interval_succeeds() {
+    let f = VaultFixture::new();
+    f.vault.set_stake_rate_limit(&100);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+
+    set_ledger(&f.env, 1 + 100);
+    f.vault.stake(&f.alice, &100_000);
+    assert_eq!(f.vault.shares_of(&f.alice), 600_000);
+}
+
+#[test]
+fn test_claim_rate_limited_independently_of_stake() {
+    let f = VaultFixture::new();
+    f.vault.set_claim_rate_limit(&100);
+    // No stake rate limit set — staking freely shouldn't affect the claim limit.
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.claim(&f.alice);
+
+    set_ledger(&f.env, 50);
+    let result = f.vault.try_claim(&f.alice);
+    assert_eq!(result, Err(Ok(VaultExtError::RateLimitExceeded)));
+}
+
+#[test]
+fn test_rate_limit_zero_disables_check() {
+    let f = VaultFixture::new();
+    f.vault.set_stake_rate_limit(&0);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    set_ledger(&f.env, 2); // immediately after
+    f.vault.stake(&f.alice, &100_000);
+    assert_eq!(f.vault.shares_of(&f.alice), 600_000);
+}
+
+// ── Issue #202: liquidity bootstrap mode ────────────────────────────────────
+
+#[test]
+fn test_bootstrap_rate_at_start_equals_initial_rate() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1000);
+    f.vault.start_bootstrap(&2000, &500, &1000); // 20% -> 5% over 1000 ledgers
+
+    assert_eq!(f.vault.get_effective_rate_at(&1000), 2000);
+    assert_eq!(f.vault.get_reward_rate_bps(), 2000);
+}
+
+#[test]
+fn test_bootstrap_rate_at_end_equals_base_rate() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1000);
+    f.vault.start_bootstrap(&2000, &500, &1000);
+
+    assert_eq!(f.vault.get_effective_rate_at(&2000), 500);
+}
+
+#[test]
+fn test_bootstrap_rate_at_midpoint_correct() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1000);
+    f.vault.start_bootstrap(&2000, &500, &1000);
+
+    // Halfway: 2000 - (2000-500)*0.5 = 2000 - 750 = 1250
+    assert_eq!(f.vault.get_effective_rate_at(&1500), 1250);
+}
+
+#[test]
+fn test_bootstrap_after_expiry_uses_base_rate() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1000);
+    f.vault.start_bootstrap(&2000, &500, &1000);
+
+    assert_eq!(f.vault.get_effective_rate_at(&5000), 500);
+}
+
+#[test]
+fn test_bootstrap_settles_permanently_after_a_call_crosses_the_boundary() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1000);
+    f.vault.start_bootstrap(&2000, &500, &1000);
+    f.vault.stake(&f.alice, &500_000);
+
+    set_ledger(&f.env, 1000 + 1000 + 1); // past the bootstrap window
+    f.vault.claim(&f.alice); // any call touching accrue_rewards settles it
+
+    assert_eq!(f.vault.get_reward_rate_bps(), 500);
+    assert!(f.vault.get_bootstrap_config().is_none());
+}
+
+#[test]
+fn test_invalid_bootstrap_config_rejected() {
+    let f = VaultFixture::new();
+    // initial_rate_bps must be >= base_rate_bps.
+    let result = f.vault.try_start_bootstrap(&500, &2000, &1000);
+    assert_eq!(result, Err(Ok(VaultExtError::InvalidBootstrapConfig)));
+}
+
+// ── Issue #204: gas_estimate_stake ───────────────────────────────────────────
+
+#[test]
+fn test_gas_estimate_new_user_returns_first_stake_cost() {
+    let f = VaultFixture::new();
+    let estimate = f.vault.gas_estimate_stake(&f.alice, &500_000);
+    assert_eq!(estimate, FIRST_STAKE_COST);
+}
+
+#[test]
+fn test_gas_estimate_existing_user_returns_top_up_cost() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let estimate = f.vault.gas_estimate_stake(&f.alice, &100_000);
+    assert_eq!(estimate, TOP_UP_COST);
+}
+
+#[test]
+fn test_gas_estimate_constants_are_positive() {
+    assert!(FIRST_STAKE_COST > 0);
+    assert!(TOP_UP_COST > 0);
+}
+
+#[test]
+fn test_gas_estimate_does_not_write_state() {
+    let f = VaultFixture::new();
+    let shares_before = f.vault.shares_of(&f.alice);
+    f.vault.gas_estimate_stake(&f.alice, &500_000);
+    let shares_after = f.vault.shares_of(&f.alice);
+    assert_eq!(shares_before, shares_after);
 }

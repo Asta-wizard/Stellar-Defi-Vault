@@ -543,3 +543,30 @@ pub struct GovernanceProposal {
     pub ends_at: u32,
     pub enacted: bool,
 }
+
+// ── Issue #200: staking delegation chains ────────────────────────────────────
+
+/// A beneficiary's delegation chain — up to 3 delegates, any of whom may call
+/// `stake_for(beneficiary)` on the beneficiary's behalf. Only `beneficiary`
+/// may ever `unstake`/`claim` the resulting position.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DelegationChain {
+    pub beneficiary: Address,
+    pub delegates: Vec<Address>,
+}
+
+// ── Issue #202: liquidity bootstrap mode ─────────────────────────────────────
+
+/// Declining-rate launch configuration activated by `start_bootstrap()`
+/// (issue #202). The effective rate declines linearly from `initial_rate` at
+/// `started_at` to `base_rate` at `started_at + duration`, then stays at
+/// `base_rate` forever after.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapConfig {
+    pub initial_rate: u32,
+    pub base_rate: u32,
+    pub started_at: u32,
+    pub duration: u32,
+}

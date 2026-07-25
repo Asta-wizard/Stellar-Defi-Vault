@@ -1,19 +1,38 @@
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, String, Symbol,
+    Vec,
+};
 
 use crate::{
     admin, balance,
-    errors::VaultError,
+    errors::{VaultError, VaultExtError},
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses,
-        ContractMetadata, DataKey, DayBucket, EpochState, GovernanceProposal, InterfaceId,
-        LeaderboardEntry, PauseInfo, PauseReason, PoolConfig, PoolHealthReport, PoolStats,
-        ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, RoundingPolicy, StakeAction,
-        StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, TaxReport,
-        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        BoostTierProgress, BootstrapConfig, CampaignInfo, ChangelogEntry, ClaimWindow,
+        ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, EpochState,
+        GovernanceProposal, InterfaceId, LeaderboardEntry, PauseInfo, PauseReason, PoolConfig,
+        PoolHealthReport, PoolStats, ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry,
+        RoundingPolicy, StakeAction, StakeHistoryEntry, StakePosition, StakeStreak,
+        StakingEfficiencyScore, TaxReport, UnbondingPosition, UnstakeCheckResult, UserStats,
+        UserSummary, VestingEntry,
     },
 };
+
+/// Estimated compute units for a first-time stake (no existing position, no
+/// reward settlement needed) — issue #204. Approximated from the relative
+/// cost of do_stake's write set for a brand-new staker (new ShareBalance,
+/// StakedAtLedger, FirstStakedAt, LastClaimLedger, AllStakers append,
+/// TotalStakers increment, NFT mint) versus a top-up. Not derived from an
+/// actual Soroban resource-metering benchmark run in this session — treat as
+/// a rough, documented approximation, not a measured constant.
+pub(crate) const FIRST_STAKE_COST: u64 = 120_000;
+/// Estimated compute units for staking into an existing position (accrues
+/// and settles pending rewards first, then updates the existing
+/// ShareBalance) — issue #204. Higher than FIRST_STAKE_COST because of the
+/// added reward-settlement path (accrue_rewards' segment-walking reward
+/// math), even though it skips the new-staker bookkeeping above.
+pub(crate) const TOP_UP_COST: u64 = 180_000;
 
 /// Maximum number of stake/unstake history entries kept per user (issue #105).
 pub(crate) const MAX_STAKE_HISTORY: u32 = 5;
@@ -154,7 +173,17 @@ impl VaultContract {
     /// Returns the token amount transferred. Returns 0 if there is nothing to claim.
     pub fn claim(env: Env, staker: Address) -> Result<i128, VaultError> {
         staker.require_auth();
-        Self::do_claim(&env, &staker)
+        // Issue #201: rate limit applies to explicit claim() calls only —
+        // not to the internal do_claim() invoked by stake_and_claim() or
+        // NFT-transfer-with-rewards flows, which have their own callers'
+        // auth/rate semantics and shouldn't be collaterally throttled by a
+        // limit meant for standalone claim spam.
+        Self::check_claim_rate_limit(&env, &staker);
+        let result = Self::do_claim(&env, &staker);
+        if result.is_ok() {
+            balance::set_last_claim_action_ledger(&env, &staker, env.ledger().sequence());
+        }
+        result
     }
 
     /// Convenience function that claims pending rewards and adds a new stake
@@ -547,6 +576,29 @@ impl VaultContract {
             .persistent()
             .get::<_, bool>(&DataKey::Whitelisted(user))
             .unwrap_or(false)
+    }
+
+    /// Admin: cap how often (in ledgers) a single user may call `stake()`.
+    /// `0` disables the check (issue #201). Does not apply to `unstake` —
+    /// users must always be able to exit.
+    pub fn set_stake_rate_limit(
+        env: Env,
+        min_ledgers_between_stakes: u32,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        balance::set_stake_rate_limit(&env, min_ledgers_between_stakes);
+        Ok(())
+    }
+
+    /// Admin: cap how often (in ledgers) a single user may call `claim()`.
+    /// `0` disables the check (issue #201).
+    pub fn set_claim_rate_limit(
+        env: Env,
+        min_ledgers_between_claims: u32,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        balance::set_claim_rate_limit(&env, min_ledgers_between_claims);
+        Ok(())
     }
 
     /// Admin: set the maximum withdrawal limit per transaction (in shares).
@@ -1162,6 +1214,156 @@ impl VaultContract {
         balance::get_reward_rate_bps(&env)
     }
 
+    /// Read-only estimate of the compute cost `stake(user, amount)` would
+    /// incur (issue #204) — no auth, no state changes; only reads
+    /// `user`'s existing share balance to pick a path.
+    ///
+    /// `amount` isn't currently used by the estimate (both paths' cost is
+    /// dominated by fixed bookkeeping/storage writes rather than the staked
+    /// amount itself) but is kept in the signature per the issue's spec, so
+    /// a future refinement (e.g. accounting for boost-schedule segment count)
+    /// can use it without an interface change.
+    pub fn gas_estimate_stake(env: Env, user: Address, _amount: i128) -> u64 {
+        let has_existing_position = balance::get_shares(&env, &user) > 0;
+        if has_existing_position {
+            TOP_UP_COST
+        } else {
+            FIRST_STAKE_COST
+        }
+    }
+
+    /// Admin: activate liquidity bootstrap mode (issue #202) — the reward
+    /// rate starts at `initial_rate_bps`, declines linearly over
+    /// `duration_ledgers`, and settles permanently at `base_rate_bps`
+    /// afterward.
+    ///
+    /// Note: the issue's own signature suggested `i128` for the two rate
+    /// parameters; every reward rate elsewhere in this contract
+    /// (`set_reward_rate_bps`, `RewardRateBps`, etc.) is `u32` basis points,
+    /// so `u32` is used here too for consistency — an `i128` rate would
+    /// require converting at every call site that reads it back out.
+    pub fn start_bootstrap(
+        env: Env,
+        initial_rate_bps: u32,
+        base_rate_bps: u32,
+        duration_ledgers: u32,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        if initial_rate_bps < base_rate_bps {
+            return Err(VaultExtError::InvalidBootstrapConfig);
+        }
+
+        let started_at = env.ledger().sequence();
+        let config = BootstrapConfig {
+            initial_rate: initial_rate_bps,
+            base_rate: base_rate_bps,
+            started_at,
+            duration: duration_ledgers,
+        };
+        balance::set_bootstrap_config(&env, &config);
+        balance::set_reward_rate_bps(&env, initial_rate_bps);
+
+        events::bootstrap_started(&env, initial_rate_bps, base_rate_bps, duration_ledgers);
+        Ok(())
+    }
+
+    /// Read-only: the currently configured bootstrap schedule, if active.
+    pub fn get_bootstrap_config(env: Env) -> Option<BootstrapConfig> {
+        balance::get_bootstrap_config(&env)
+    }
+
+    /// Read-only: the bootstrap-adjusted reward rate (basis points) that
+    /// would apply at `ledger` — linearly interpolated between
+    /// `initial_rate` (at `started_at`) and `base_rate` (at
+    /// `started_at + duration`), clamped to `base_rate` outside that window.
+    /// Falls back to the plain `reward_rate_bps()` when no bootstrap is
+    /// configured.
+    pub fn get_effective_rate_at(env: Env, ledger: u32) -> i128 {
+        Self::effective_rate_at_ledger(&env, ledger) as i128
+    }
+
+    fn effective_rate_at_ledger(env: &Env, ledger: u32) -> u32 {
+        let config = match balance::get_bootstrap_config(env) {
+            Some(c) => c,
+            None => return balance::get_reward_rate_bps(env),
+        };
+
+        let end = config.started_at.saturating_add(config.duration);
+        if config.duration == 0 || ledger >= end {
+            return config.base_rate;
+        }
+        if ledger <= config.started_at {
+            return config.initial_rate;
+        }
+
+        let elapsed = (ledger - config.started_at) as u64;
+        let total = config.duration as u64;
+        let decline = (config.initial_rate - config.base_rate) as u64;
+        let interpolated = decline * elapsed / total;
+        config.initial_rate - interpolated as u32
+    }
+
+    /// If a bootstrap is active and its window has fully elapsed, settle the
+    /// rate permanently at `base_rate` and clear the config so future calls
+    /// take the cheap `reward_rate_bps()` path. Called from `accrue_rewards`
+    /// *after* that call's own reward computation, so the computation for
+    /// the very call that crosses the boundary still sees the bootstrap
+    /// config it needs for a correct time-weighted result (see
+    /// `effective_rate_bps_for_window`).
+    fn maybe_settle_bootstrap(env: &Env) {
+        if let Some(config) = balance::get_bootstrap_config(env) {
+            let end = config.started_at.saturating_add(config.duration);
+            if env.ledger().sequence() >= end {
+                balance::set_reward_rate_bps(env, config.base_rate);
+                balance::clear_bootstrap_config(env);
+                events::bootstrap_ended(env, config.base_rate);
+            }
+        }
+    }
+
+    /// Time-weighted average reward rate (basis points) across
+    /// `[start_ledger, end_ledger)`, correctly accounting for a bootstrap
+    /// window that only partially overlaps it (issue #202's requirement that
+    /// "claims spanning the bootstrap boundary use time-weighted rates").
+    ///
+    /// Reward accrual (`reward_for_ledgers`) is linear in the rate, so
+    /// substituting this single averaged rate for the whole window is
+    /// mathematically equivalent to separately accruing the bootstrap
+    /// portion at its own (also linear, hence average-at-midpoint) rate and
+    /// the remaining portion at `base_rate`, then summing — without having
+    /// to add bootstrap as a third kind of segment boundary alongside the
+    /// existing boost-tier/campaign segment walk in `reward_between_ledgers`.
+    fn effective_rate_bps_for_window(env: &Env, start_ledger: u32, end_ledger: u32) -> u32 {
+        let base_rate = balance::get_reward_rate_bps(env);
+        if end_ledger <= start_ledger {
+            return base_rate;
+        }
+        let config = match balance::get_bootstrap_config(env) {
+            Some(c) => c,
+            None => return base_rate,
+        };
+
+        let bootstrap_end = config.started_at.saturating_add(config.duration);
+        let clip_start = start_ledger.max(config.started_at);
+        let clip_end = end_ledger.min(bootstrap_end);
+        if clip_end <= clip_start {
+            return base_rate;
+        }
+
+        let window_len = (end_ledger - start_ledger) as u64;
+        let bootstrap_ledgers = (clip_end - clip_start) as u64;
+        let outside_ledgers = window_len - bootstrap_ledgers;
+
+        // Average of a linear function over an interval equals its value at
+        // the interval's midpoint.
+        let mid = clip_start + (clip_end - clip_start) / 2;
+        let bootstrap_avg_rate = Self::effective_rate_at_ledger(env, mid) as u64;
+
+        let weighted =
+            bootstrap_avg_rate * bootstrap_ledgers + (base_rate as u64) * outside_ledgers;
+        (weighted / window_len) as u32
+    }
+
     /// Read-only: returns time-weighted average APR over the last N ledgers.
     /// Calculates the weighted average of rates based on how many ledgers each rate was active.
     pub fn twap_apr_bps(env: Env, window_ledgers: u32) -> Result<u32, VaultError> {
@@ -1627,8 +1829,91 @@ impl VaultContract {
             .unwrap_or(false)
     }
 
+    // --- Delegation chains (issue #200), extending #37's single delegate ---
+
+    const MAX_DELEGATION_CHAIN: u32 = 3;
+
+    /// Extend `user`'s delegation chain with `delegate` (up to 3 total).
+    /// Any address in the chain may subsequently call `stake_for(user)`.
+    pub fn add_delegate_to_chain(
+        env: Env,
+        user: Address,
+        delegate: Address,
+    ) -> Result<(), VaultExtError> {
+        user.require_auth();
+
+        if delegate == user {
+            return Err(VaultExtError::CircularDelegation);
+        }
+
+        let mut chain = balance::get_delegation_chain(&env, &user).unwrap_or(DelegationChain {
+            beneficiary: user.clone(),
+            delegates: Vec::new(&env),
+        });
+
+        if chain.delegates.iter().any(|d| d == delegate) {
+            return Err(VaultExtError::CircularDelegation);
+        }
+        if chain.delegates.len() >= Self::MAX_DELEGATION_CHAIN {
+            return Err(VaultExtError::ChainTooLong);
+        }
+
+        // Direct 2-hop cycle check: if `delegate` is themselves a beneficiary
+        // with their own chain, that chain must not already list `user` —
+        // otherwise linking them would close a loop (A -> B -> A).
+        if let Some(delegate_chain) = balance::get_delegation_chain(&env, &delegate) {
+            if delegate_chain.delegates.iter().any(|d| d == user) {
+                return Err(VaultExtError::CircularDelegation);
+            }
+        }
+
+        chain.delegates.push_back(delegate);
+        balance::set_delegation_chain(&env, &user, &chain);
+        Ok(())
+    }
+
+    /// Remove `delegate` from `user`'s delegation chain, if present.
+    pub fn remove_delegate_from_chain(
+        env: Env,
+        user: Address,
+        delegate: Address,
+    ) -> Result<(), VaultExtError> {
+        user.require_auth();
+
+        let mut chain = match balance::get_delegation_chain(&env, &user) {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let idx = chain.delegates.iter().position(|d| d == delegate);
+        if let Some(idx) = idx {
+            chain.delegates.remove(idx as u32);
+        }
+
+        if chain.delegates.is_empty() {
+            balance::remove_delegation_chain(&env, &user);
+        } else {
+            balance::set_delegation_chain(&env, &user, &chain);
+        }
+        Ok(())
+    }
+
+    /// Read-only: `user`'s current delegation chain, if any.
+    pub fn get_delegation_chain(env: Env, user: Address) -> Option<DelegationChain> {
+        balance::get_delegation_chain(&env, &user)
+    }
+
+    fn chain_contains(env: &Env, beneficiary: &Address, delegate: &Address) -> bool {
+        balance::get_delegation_chain(env, beneficiary)
+            .map(|chain| chain.delegates.iter().any(|d| &d == delegate))
+            .unwrap_or(false)
+    }
+
     /// Stake `amount` tokens from `delegate`'s wallet, crediting the position to `beneficiary`.
-    /// Only an approved delegate may call this; the beneficiary retains exclusive unstake/claim rights.
+    /// `delegate` must either be the single legacy delegate (#37,
+    /// `approve_delegate`) or anywhere in `beneficiary`'s delegation chain
+    /// (#200). Only `beneficiary` may ever `unstake`/`claim` the resulting
+    /// position — never a delegate.
     pub fn stake_for(
         env: Env,
         delegate: Address,
@@ -1642,9 +1927,12 @@ impl VaultContract {
             return Err(VaultError::ZeroAmount);
         }
 
-        match balance::get_delegate(&env, &beneficiary) {
-            Some(d) if d == delegate => {}
-            _ => return Err(VaultError::NotADelegate),
+        let is_legacy_delegate = matches!(
+            balance::get_delegate(&env, &beneficiary),
+            Some(d) if d == delegate
+        );
+        if !is_legacy_delegate && !Self::chain_contains(&env, &beneficiary, &delegate) {
+            return Err(VaultError::NotADelegate);
         }
 
         // If whitelist is enabled, ensure beneficiary is whitelisted for new stakes
@@ -2537,6 +2825,7 @@ impl VaultContract {
         Self::require_not_stopped(env)?;
         Self::require_not_shutting_down(env)?;
         Self::require_not_paused(env)?;
+        Self::check_stake_rate_limit(env, staker);
 
         // If whitelist is enabled, reject non-whitelisted stakers. Existing stakers can still unstake/claim.
         let whitelist_enabled: bool = env
@@ -2685,6 +2974,7 @@ impl VaultContract {
 
         events::deposit(env, staker, amount, shares, env.ledger().sequence());
         balance::set_last_updated_ledger(env, env.ledger().sequence()); // Issue #69
+        balance::set_last_stake_ledger(env, staker, env.ledger().sequence()); // Issue #201
 
         Self::record_activity(env, "stake");
 
@@ -2998,6 +3288,13 @@ impl VaultContract {
         }
 
         balance::set_reward_checkpoint_ledger(env, user, current_ledger);
+
+        // Issue #202: settle bootstrap -> base_rate *after* this call's own
+        // reward math ran, so a claim/stake that crosses the bootstrap
+        // boundary still saw the config it needed for a correct
+        // time-weighted result above.
+        Self::maybe_settle_bootstrap(env);
+
         Ok(())
     }
 
@@ -3056,7 +3353,11 @@ impl VaultContract {
             return Ok(0);
         }
 
-        let rate_bps = balance::get_reward_rate_bps(env);
+        // Issue #202: time-weighted average rate across [start_ledger,
+        // end_ledger), correctly handling a bootstrap window that only
+        // partially overlaps this range (falls back to the plain
+        // reward_rate_bps() when no bootstrap is configured).
+        let rate_bps = Self::effective_rate_bps_for_window(env, start_ledger, end_ledger);
         if rate_bps == 0 {
             return Ok(0);
         }
@@ -3424,6 +3725,43 @@ impl VaultContract {
             Err(VaultError::VaultPaused)
         } else {
             Ok(())
+        }
+    }
+
+    /// Issue #201. Uses `panic_with_error!` rather than returning a `Result`
+    /// error: `do_stake`'s signature is `Result<i128, VaultError>`, and
+    /// `VaultError` is already at Soroban's 50-variant cap (see the note on
+    /// `VaultExtError`), so a new case can't be added to its `Result` without
+    /// either exceeding that cap or changing `do_stake`'s (and therefore
+    /// `stake`'s/`deposit`'s) public signature — a bigger, riskier change
+    /// than this issue calls for. `panic_with_error!` aborts the whole
+    /// transaction with `VaultExtError::RateLimitExceeded`'s error code
+    /// without needing to touch either signature.
+    fn check_stake_rate_limit(env: &Env, staker: &Address) {
+        let min_ledgers = balance::get_stake_rate_limit(env);
+        if min_ledgers == 0 {
+            return;
+        }
+        if let Some(last) = balance::get_last_stake_ledger(env, staker) {
+            let current = env.ledger().sequence();
+            if current.saturating_sub(last) < min_ledgers {
+                panic_with_error!(env, VaultExtError::RateLimitExceeded);
+            }
+        }
+    }
+
+    /// Issue #201. See `check_stake_rate_limit` for why this uses
+    /// `panic_with_error!` instead of a `Result` error.
+    fn check_claim_rate_limit(env: &Env, staker: &Address) {
+        let min_ledgers = balance::get_claim_rate_limit(env);
+        if min_ledgers == 0 {
+            return;
+        }
+        if let Some(last) = balance::get_last_claim_action_ledger(env, staker) {
+            let current = env.ledger().sequence();
+            if current.saturating_sub(last) < min_ledgers {
+                panic_with_error!(env, VaultExtError::RateLimitExceeded);
+            }
         }
     }
 
