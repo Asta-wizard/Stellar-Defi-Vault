@@ -3,6 +3,7 @@
 extern crate std;
 
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Events, Ledger as _},
     token, Address, Env, Symbol, TryFromVal, Vec,
 };
@@ -10,13 +11,10 @@ use soroban_sdk::{
 use crate::{
     errors::VaultError,
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
-    storage::{
-        ChangelogEntry, DayBucket, PauseReason, PoolHealthReport, ReferralLeaderboardEntry,
-        RoundingPolicy, TaxReport, UnstakeCheckResult,
-    },
+    storage::{ChangelogEntry, PauseReason, ProposableParam, RoundingPolicy, UnstakeCheckResult},
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
-        CONTRACT_VERSION, LEDGERS_PER_DAY, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
+        CONTRACT_VERSION, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
     },
 };
 
@@ -44,6 +42,27 @@ fn boost_schedule(env: &Env, tiers: &[(u32, u32)]) -> Vec<(u32, u32)> {
         schedule.push_back(*tier);
     }
     schedule
+}
+
+// ── Mock external yield protocol (issue #215 tests) ──────────────────────────
+
+#[contract]
+struct MockYieldProtocol;
+
+#[contractimpl]
+impl MockYieldProtocol {
+    pub fn deposit(_env: Env, _depositor: Address, _amount: i128) {}
+
+    /// Transfers `amount` plus a simulated 10% yield bonus of `token` from
+    /// this contract to `recipient`, and returns the total amount
+    /// transferred. Tests must pre-fund this contract with enough extra
+    /// tokens to cover the bonus.
+    pub fn withdraw(env: Env, token: Address, recipient: Address, amount: i128) -> i128 {
+        let token_client = token::Client::new(&env, &token);
+        let payout = amount + amount / 10;
+        token_client.transfer(&env.current_contract_address(), &recipient, &payout);
+        payout
+    }
 }
 
 fn topic_matches(env: &Env, topics: &Vec<soroban_sdk::Val>, name: &str) -> bool {
@@ -4139,4 +4158,276 @@ fn test_migration_target_immutable_after_set() {
     let result = f.vault.try_set_migration_target(&f.admin, &target2);
     assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
     assert_eq!(f.vault.get_migration_target(), Some(target1));
+}
+
+// ── Issue #215: yield farming hook ────────────────────────────────────────────
+
+fn setup_yield_protocol(f: &VaultFixture) -> Address {
+    let protocol_id = f.env.register_contract(None, MockYieldProtocol);
+    f.vault.set_yield_protocol(&f.admin, &protocol_id);
+    protocol_id
+}
+
+#[test]
+fn test_set_and_get_yield_protocol() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_yield_protocol(), None);
+
+    let protocol_id = setup_yield_protocol(&f);
+    assert_eq!(f.vault.get_yield_protocol(), Some(protocol_id));
+}
+
+#[test]
+fn test_available_for_yield_reserves_buffer() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Buffer is 20% of total_staked (1_000_000): 200_000 stays reserved.
+    assert_eq!(f.vault.available_for_yield(), 800_000);
+}
+
+#[test]
+fn test_deploy_to_yield_sends_tokens_to_protocol() {
+    let f = VaultFixture::new();
+    let protocol_id = setup_yield_protocol(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    f.vault.deploy_to_yield(&f.admin, &500_000);
+
+    assert_eq!(f.vault.get_yield_deployed(), 500_000);
+    assert_eq!(f.token.balance(&protocol_id), 500_000);
+    assert_eq!(f.token.balance(&f.vault.address), 500_000);
+}
+
+#[test]
+fn test_deploy_to_yield_no_protocol_set_reverts() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let result = f.vault.try_deploy_to_yield(&f.admin, &500_000);
+    assert_eq!(result, Err(Ok(VaultError::NotInitialized)));
+}
+
+#[test]
+fn test_deploy_to_yield_over_buffer_rejected() {
+    let f = VaultFixture::new();
+    setup_yield_protocol(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Available is 800_000 (after the 20% buffer); 900_000 exceeds it.
+    let result = f.vault.try_deploy_to_yield(&f.admin, &900_000);
+    assert_eq!(result, Err(Ok(VaultError::PoolCapReached)));
+}
+
+#[test]
+fn test_withdraw_from_yield_retrieves_principal_and_yield() {
+    let f = VaultFixture::new();
+    let protocol_id = setup_yield_protocol(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.deploy_to_yield(&f.admin, &500_000);
+
+    // Simulate 10% yield accrued in the protocol beyond the deployed principal.
+    f.token_admin.mint(&protocol_id, &50_000);
+
+    let vault_balance_before = f.token.balance(&f.vault.address);
+    f.vault.withdraw_from_yield(&f.admin, &500_000);
+
+    // Vault receives back principal (500_000) plus the 10% yield bonus (50_000).
+    assert_eq!(
+        f.token.balance(&f.vault.address),
+        vault_balance_before + 550_000
+    );
+    assert_eq!(f.vault.get_yield_deployed(), 0);
+    assert_eq!(f.token.balance(&protocol_id), 0);
+}
+
+#[test]
+fn test_withdraw_from_yield_no_protocol_set_reverts() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_withdraw_from_yield(&f.admin, &500_000);
+    assert_eq!(result, Err(Ok(VaultError::NotInitialized)));
+}
+
+#[test]
+fn test_withdraw_from_yield_exceeds_deployed_rejected() {
+    let f = VaultFixture::new();
+    setup_yield_protocol(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.deploy_to_yield(&f.admin, &500_000);
+
+    let result = f.vault.try_withdraw_from_yield(&f.admin, &500_001);
+    assert_eq!(result, Err(Ok(VaultError::InsufficientRewardPool)));
+}
+
+// ── Issue #216: governance voting ────────────────────────────────────────────
+
+#[test]
+fn test_create_proposal_requires_active_position() {
+    let f = VaultFixture::new();
+    let result =
+        f.vault
+            .try_create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &1000_u32);
+    assert_eq!(result, Err(Ok(VaultError::PositionNotFound)));
+}
+
+#[test]
+fn test_proposal_passes_with_majority() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &700_000);
+    f.vault.stake(&f.bob, &300_000);
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.vote(&f.alice, &id, &true);
+    f.vault.vote(&f.bob, &id, &false);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 700_000);
+    assert_eq!(proposal.votes_against, 300_000);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert!(proposal.enacted);
+    assert_eq!(f.vault.get_reward_rate_bps(), 500);
+}
+
+#[test]
+fn test_proposal_fails_without_majority() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+    let original_rate = f.vault.get_reward_rate_bps();
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.vote(&f.alice, &id, &true);
+    f.vault.vote(&f.bob, &id, &false);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert!(proposal.enacted);
+    // Parameter is unchanged since votes_against > votes_for.
+    assert_eq!(f.vault.get_reward_rate_bps(), original_rate);
+}
+
+#[test]
+fn test_double_vote_rejected() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    f.vault.vote(&f.alice, &id, &true);
+    let result = f.vault.try_vote(&f.alice, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::TooManyStakers)));
+}
+
+#[test]
+fn test_non_staker_cannot_vote() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    let result = f.vault.try_vote(&f.bob, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::PositionNotFound)));
+}
+
+#[test]
+fn test_vote_after_deadline_rejected() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    let result = f.vault.try_vote(&f.alice, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::BatchKycTooLarge)));
+}
+
+#[test]
+fn test_enact_before_deadline_rejected() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    let result = f.vault.try_enact_proposal(&id);
+    assert_eq!(result, Err(Ok(VaultError::EpochNotFinalized)));
+}
+
+#[test]
+fn test_double_enact_rejected() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+    let result = f.vault.try_enact_proposal(&id);
+    assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
+}
+
+#[test]
+fn test_max_open_proposals_enforced() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+
+    for _ in 0..10 {
+        f.vault
+            .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &1000_u32);
+    }
+
+    let result =
+        f.vault
+            .try_create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &1000_u32);
+    assert_eq!(result, Err(Ok(VaultError::MaxPositionsReached)));
+}
+
+#[test]
+fn test_enacting_proposal_frees_open_slot() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+
+    let mut last_id = 0;
+    for _ in 0..10 {
+        last_id = f
+            .vault
+            .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+    }
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&last_id);
+
+    // A slot freed up, so a new proposal can be created.
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &1000_u32);
+    assert!(f.vault.get_proposal(&id).is_some());
+}
+
+#[test]
+fn test_get_proposal_returns_none_for_unknown_id() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_proposal(&999), None);
 }

@@ -1,5 +1,5 @@
 use crate::storage::{
-    ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig, RateHistoryEntry,
+    ChangelogEntry, ClaimWindow, DataKey, DayBucket, GovernanceProposal, RateHistoryEntry,
     ReferralStats, VestingEntry,
 };
 
@@ -800,31 +800,6 @@ pub fn get_activity_log(env: &Env) -> Vec<DayBucket> {
         .unwrap_or(Vec::new(env))
 }
 
-// ── Issue #213: dynamic unstake fee config ───────────────────────────────────
-
-pub fn get_dynamic_fee_config(env: &Env) -> Option<DynamicFeeConfig> {
-    env.storage().instance().get(&symbol_short!("dyn_fee"))
-}
-
-pub fn set_dynamic_fee_config(env: &Env, config: &DynamicFeeConfig) {
-    env.storage()
-        .instance()
-        .set(&symbol_short!("dyn_fee"), config);
-}
-
-// ── Issue #214: per-user lifetime claim count (reputation consistency score) ─
-
-pub fn get_user_claim_count(env: &Env, user: &Address) -> u32 {
-    let key = (Symbol::new(env, "clm_cnt"), user.clone());
-    env.storage().persistent().get(&key).unwrap_or(0)
-}
-
-pub fn increment_user_claim_count(env: &Env, user: &Address) {
-    let current = get_user_claim_count(env, user);
-    let key = (Symbol::new(env, "clm_cnt"), user.clone());
-    env.storage().persistent().set(&key, &(current + 1));
-}
-
 pub fn set_activity_log(env: &Env, log: &Vec<DayBucket>) {
     env.storage().instance().set(&symbol_short!("act_log"), log);
 }
@@ -887,4 +862,77 @@ pub fn set_rounding_policy(env: &Env, policy: &crate::storage::RoundingPolicy) {
     env.storage()
         .instance()
         .set(&symbol_short!("rnd_pol"), policy);
+}
+
+// ── Issue #215: yield farming hook ────────────────────────────────────────────
+
+pub fn get_yield_protocol(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&symbol_short!("yld_prot"))
+}
+
+pub fn set_yield_protocol(env: &Env, protocol: &Address) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("yld_prot"), protocol);
+}
+
+pub fn get_yield_deployed(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("yld_dep"))
+        .unwrap_or(0)
+}
+
+pub fn set_yield_deployed(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("yld_dep"), &amount);
+}
+
+// ── Issue #216: governance voting ─────────────────────────────────────────────
+
+pub fn get_next_proposal_id(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("prop_nid"))
+        .unwrap_or(0)
+}
+
+pub fn set_next_proposal_id(env: &Env, id: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("prop_nid"), &id);
+}
+
+pub fn get_open_proposal_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("prop_opn"))
+        .unwrap_or(0)
+}
+
+pub fn set_open_proposal_count(env: &Env, count: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("prop_opn"), &count);
+}
+
+pub fn get_proposal(env: &Env, id: u32) -> Option<GovernanceProposal> {
+    let key = (Symbol::new(env, "prop"), id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_proposal(env: &Env, id: u32, proposal: &GovernanceProposal) {
+    let key = (Symbol::new(env, "prop"), id);
+    env.storage().persistent().set(&key, proposal);
+}
+
+pub fn has_voted(env: &Env, proposal_id: u32, voter: &Address) -> bool {
+    let key = (Symbol::new(env, "voted"), proposal_id, voter.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_voted(env: &Env, proposal_id: u32, voter: &Address) {
+    let key = (Symbol::new(env, "voted"), proposal_id, voter.clone());
+    env.storage().persistent().set(&key, &true);
 }

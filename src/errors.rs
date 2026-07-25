@@ -5,9 +5,12 @@ use soroban_sdk::contracterror;
 #[repr(u32)]
 pub enum VaultError {
     /// Returned by initialize-dependent getters and stake/unstake flows when
-    /// the admin, token, or other required contract state has not been stored yet.
+    /// the admin, token, or other required contract state has not been stored
+    /// yet, and by `deploy_to_yield()` / `withdraw_from_yield()` when no yield
+    /// protocol has been registered via `set_yield_protocol()`.
     NotInitialized = 1,
-    /// Returned by initialize() when the vault has already been initialized.
+    /// Returned by initialize() when the vault has already been initialized,
+    /// and by `enact_proposal()` when the proposal has already been enacted.
     AlreadyInitialized = 2,
     /// Returned by admin-only entrypoints that call `admin::require_admin()`
     /// and by `rescue_token()` / `slash()` when the supplied admin address does
@@ -44,7 +47,9 @@ pub enum VaultError {
     /// base rate or the tier ledgers are not strictly increasing.
     InvalidBoostSchedule = 13,
     /// Returned by `claim()`, `stake_and_claim()`, and `claim_epoch_rewards()`
-    /// when the reward pool does not hold enough tokens to pay the claim.
+    /// when the reward pool does not hold enough tokens to pay the claim, and
+    /// by `withdraw_from_yield()` when the requested amount exceeds what is
+    /// currently tracked as deployed to the yield protocol.
     InsufficientRewardPool = 14,
     /// Returned by `revoke_delegate()` when the caller revokes the wrong
     /// delegate, and by `stake_for()` when the caller is not the approved
@@ -60,7 +65,9 @@ pub enum VaultError {
     /// `claimable_since()`, `position_age_ledgers()`, `time_since_last_claim()`,
     /// `request_unstake()`, `execute_unstake()`, `slash()`, `transfer_position()`,
     /// `merge_positions()`, and `flag_frozen()` when the user has no active
-    /// stake or unbonding position.
+    /// stake or unbonding position. Also returned by `create_proposal()` and
+    /// `vote()` when the caller has no active position, and by `vote()` /
+    /// `enact_proposal()` when the given proposal id does not exist.
     PositionNotFound = 18,
     /// Returned by `deposit()`, `stake()`, `stake_for()`, and `stake_and_claim()`
     /// when whitelist enforcement is enabled and the staker or beneficiary is
@@ -73,8 +80,8 @@ pub enum VaultError {
     UnstakeFeeTooHigh = 21,
     /// Returned by `batch_position_query()` when more than 20 addresses are supplied.
     BatchTooLarge = 22,
-    /// Reserved for aggregate-claim or staker-count limit checks; no current
-    /// public function returns this variant.
+    /// Returned by `vote()` when the caller has already voted on the given
+    /// proposal.
     TooManyStakers = 23,
     /// Returned by `transfer_position()` when the recipient already has an
     /// active staking position.
@@ -97,7 +104,8 @@ pub enum VaultError {
     /// stopped the contract.
     ContractStopped = 30,
     /// Returned by staking entrypoints when the new deposit would exceed the
-    /// configured pool cap.
+    /// configured pool cap, and by `deploy_to_yield()` when the requested
+    /// amount exceeds `available_for_yield()` (the 20% liquidity buffer).
     PoolCapReached = 31,
     /// Returned by `set_pool_description()` when the description exceeds 200
     /// characters.
@@ -115,12 +123,13 @@ pub enum VaultError {
     /// APR exceeds the configured cap.
     RateTooHigh = 36,
     /// Returned by staking entrypoints when the user already holds the
-    /// configured maximum number of active positions.
+    /// configured maximum number of active positions, and by
+    /// `create_proposal()` when 10 governance proposals are already open.
     MaxPositionsReached = 37,
     /// Returned by `set_max_positions_per_user()` when the requested cap exceeds 10.
     MaxPositionsTooHigh = 38,
-    /// Reserved for future bulk-KYC updates; no current public function returns
-    /// this variant.
+    /// Returned by `vote()` when the proposal's voting period has already
+    /// ended, or the proposal has already been enacted.
     BatchKycTooLarge = 39,
     /// Returned by `set_dynamic_fee_config()` when `base_fee_bps > max_fee_bps`
     /// or `utilization_threshold_bps` exceeds 10 000 (100%).
@@ -134,7 +143,9 @@ pub enum VaultError {
     VestingQueueFull = 43,
     /// Returned when a vesting withdrawal is requested but nothing has matured yet.
     NothingToWithdraw = 44,
-    /// Returned when an epoch cannot be finalized because the configured window has not elapsed.
+    /// Returned when an epoch cannot be finalized because the configured
+    /// window has not elapsed, and by `enact_proposal()` when the voting
+    /// period has not ended yet.
     EpochNotFinalized = 45,
     /// Caller is not an approved relayer for the target user (issue #118).
     RelayerNotApproved = 46,

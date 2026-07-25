@@ -444,27 +444,64 @@ pub fn migration_target_set(env: &Env, admin: &Address, target_pool: &Address, l
     env.events().publish(topics, (target_pool.clone(), ledger));
 }
 
-/// Emitted when the admin sets or updates the dynamic unstake fee config.
-///
-/// Topics: `("dyn_fee_u", admin)`.
-/// Data: `(base_fee_bps, max_fee_bps, utilization_threshold_bps, ledger)`.
-pub fn dynamic_fee_config_updated(
+// ── Issue #215: yield farming hook ────────────────────────────────────────────
+
+/// Emitted when the admin registers the external yield protocol.
+pub fn yield_protocol_set(env: &Env, admin: &Address, protocol: &Address) {
+    let topics = (symbol_short!("yld_p_set"), admin);
+    env.events()
+        .publish(topics, (protocol.clone(), env.ledger().sequence()));
+}
+
+/// Emitted when idle stake tokens are deployed to the yield protocol.
+pub fn yield_deployed(env: &Env, admin: &Address, amount: i128, ledger: u32) {
+    let topics = (symbol_short!("yld_dep"), admin);
+    env.events().publish(topics, (amount, ledger));
+}
+
+/// Emitted when tokens (plus any accrued yield) are withdrawn from the yield protocol.
+pub fn yield_withdrawn(env: &Env, admin: &Address, amount_returned: i128, ledger: u32) {
+    let topics = (symbol_short!("yld_wdrw"), admin);
+    env.events().publish(topics, (amount_returned, ledger));
+}
+
+// ── Issue #216: governance voting ─────────────────────────────────────────────
+
+/// Emitted when a staker creates a new governance proposal.
+pub fn proposal_created(env: &Env, proposer: &Address, proposal_id: u32, ends_at: u32) {
+    let topics = (symbol_short!("prop_new"), proposer);
+    env.events().publish(topics, (proposal_id, ends_at));
+}
+
+/// Emitted when a staker votes on a governance proposal.
+pub fn proposal_voted(
     env: &Env,
-    admin: &Address,
-    base_fee_bps: u32,
-    max_fee_bps: u32,
-    utilization_threshold_bps: u32,
+    voter: &Address,
+    proposal_id: u32,
+    support: bool,
+    weight: i128,
+    ledger: u32,
 ) {
-    let topics = (symbol_short!("dyn_fee_u"), admin);
-    env.events().publish(
-        topics,
-        (
-            base_fee_bps,
-            max_fee_bps,
-            utilization_threshold_bps,
-            env.ledger().sequence(),
-        ),
-    );
+    let topics = (symbol_short!("prop_vote"), voter);
+    env.events()
+        .publish(topics, (proposal_id, support, weight, ledger));
+}
+
+/// Emitted when a governance proposal is enacted (whether or not it passed).
+///
+/// Topics: `("prop_enct",)`.
+/// Data: `(id, parameter, new_value, total_votes, ledger)`.
+pub fn proposal_enacted(
+    env: &Env,
+    id: u32,
+    parameter: crate::storage::ProposableParam,
+    new_value: i128,
+    total_votes: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("prop_enct"),);
+    env.events()
+        .publish(topics, (id, parameter, new_value, total_votes, ledger));
 }
 
 // ── Issue #182: webhook URL config ───────────────────────────────────────────
