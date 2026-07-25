@@ -9,7 +9,7 @@ use soroban_sdk::{
 };
 
 use crate::{
-    errors::VaultError,
+    errors::{VaultError, VaultExtError},
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{ChangelogEntry, PauseReason, ProposableParam, RoundingPolicy, UnstakeCheckResult},
     vault::{
@@ -4430,4 +4430,239 @@ fn test_enacting_proposal_frees_open_slot() {
 fn test_get_proposal_returns_none_for_unknown_id() {
     let f = VaultFixture::new();
     assert_eq!(f.vault.get_proposal(&999), None);
+}
+
+// ── Issues #198, #199, #203, #208 ────────────────────────────────────────────
+//
+// NOTE: this whole crate currently fails to build on `main` due to several
+// pre-existing, unrelated issues (functions/types referenced by
+// reward_multiplier_preview / dynamic fee config / reputation score /
+// user-claim-count features that don't exist anywhere in the codebase —
+// confirmed via `git stash` to be identical with or without this PR's
+// changes). These tests are written and reviewed carefully but could not
+// actually be run in this session as a result.
+
+// ── Issue #199: insurance fund ───────────────────────────────────────────────
+
+#[test]
+fn test_reward_split_correctly_with_insurance_rate() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000); // 10% APR
+    f.vault.set_insurance_rate_bps(&500); // 5% retained
+    f.token_admin.mint(&f.admin, &10_000_000);
+    f.vault.fund_reward_pool(&f.admin, &5_000_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+
+    let balance_before = f.token.balance(&f.alice);
+    f.vault.claim(&f.alice);
+    let paid = f.token.balance(&f.alice) - balance_before;
+
+    assert!(paid > 0);
+    assert!(f.vault.get_insurance_fund_balance() > 0);
+}
+
+#[test]
+fn test_insurance_fund_balance_grows_across_claims() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.set_insurance_rate_bps(&500);
+    f.token_admin.mint(&f.admin, &10_000_000);
+    f.vault.fund_reward_pool(&f.admin, &5_000_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+    f.vault.claim(&f.alice);
+    let after_first = f.vault.get_insurance_fund_balance();
+
+    set_ledger(&f.env, 1 + 2 * STELLAR_LEDGERS_PER_YEAR);
+    f.vault.claim(&f.alice);
+    let after_second = f.vault.get_insurance_fund_balance();
+
+    assert!(after_second > after_first);
+}
+
+#[test]
+fn test_deploy_insurance_fund_moves_balance_to_reward_pool() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.set_insurance_rate_bps(&500);
+    f.token_admin.mint(&f.admin, &10_000_000);
+    f.vault.fund_reward_pool(&f.admin, &5_000_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+    f.vault.claim(&f.alice);
+
+    let insurance_before = f.vault.get_insurance_fund_balance();
+    let reward_pool_before = f.vault.get_reward_pool_balance();
+    assert!(insurance_before > 0);
+
+    f.vault.deploy_insurance_fund(&f.admin, &insurance_before);
+
+    assert_eq!(f.vault.get_insurance_fund_balance(), 0);
+    assert_eq!(
+        f.vault.get_reward_pool_balance(),
+        reward_pool_before + insurance_before
+    );
+}
+
+#[test]
+fn test_insurance_rate_zero_disables_feature() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    // insurance rate left at its default (0).
+    f.token_admin.mint(&f.admin, &10_000_000);
+    f.vault.fund_reward_pool(&f.admin, &5_000_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+    f.vault.claim(&f.alice);
+
+    assert_eq!(f.vault.get_insurance_fund_balance(), 0);
+}
+
+// ── Issue #203: contract migration export/import ────────────────────────────
+
+#[test]
+fn test_export_includes_all_positions() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.stake(&f.bob, &300_000);
+
+    let export = f.vault.export_state(&f.admin);
+    assert_eq!(export.all_positions.len(), 2);
+    assert_eq!(export.total_stakers, 2);
+}
+
+#[test]
+fn test_import_restores_all_positions_on_a_fresh_contract() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.stake(&f.bob, &300_000);
+    let export = f.vault.export_state(&f.admin);
+
+    let new_vault_id = f.env.register_contract(None, VaultContract);
+    let new_vault = VaultContractClient::new(&f.env, &new_vault_id);
+    new_vault.import_state(&f.admin, &export);
+
+    assert_eq!(new_vault.shares_of(&f.alice), 500_000);
+    assert_eq!(new_vault.shares_of(&f.bob), 300_000);
+    assert_eq!(new_vault.get_admin(), f.admin);
+}
+
+#[test]
+fn test_import_on_already_initialized_contract_rejected() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let export = f.vault.export_state(&f.admin);
+
+    // f.vault is already initialized (via VaultFixture::new()).
+    let result = f.vault.try_import_state(&f.admin, &export);
+    assert_eq!(result, Err(Ok(VaultExtError::AlreadyInitialized)));
+}
+
+#[test]
+fn test_export_position_count_limit_enforced() {
+    let f = VaultFixture::new();
+    for _ in 0..101 {
+        let staker = Address::generate(&f.env);
+        f.token_admin.mint(&staker, &1_000_000);
+        f.vault.stake(&staker, &100_000);
+    }
+
+    let result = f.vault.try_export_state(&f.admin);
+    assert_eq!(result, Err(Ok(VaultExtError::TooManyPositions)));
+}
+
+// ── Issue #208: storage usage report ─────────────────────────────────────────
+
+#[test]
+fn test_storage_report_on_fresh_pool_is_minimal() {
+    let f = VaultFixture::new();
+    let report = f.vault.storage_usage_report();
+    assert_eq!(report.persistent_position_count, 0);
+    assert!(report.instance_keys > 0); // Admin/Token/Paused/etc. are set at initialize()
+}
+
+#[test]
+fn test_storage_report_after_three_stakes_shows_three_positions() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    f.token_admin.mint(&carol, &1_000_000);
+
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.stake(&f.bob, &300_000);
+    f.vault.stake(&carol, &100_000);
+
+    let report = f.vault.storage_usage_report();
+    assert_eq!(report.persistent_position_count, 3);
+}
+
+#[test]
+fn test_storage_report_values_are_non_negative() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let report = f.vault.storage_usage_report();
+    // All fields are u32, so "non-negative" is guaranteed by the type: this
+    // just confirms the estimate is actually computed (not zero/garbage).
+    assert!(report.estimated_total_bytes > 0);
+}
+
+// ── Issue #198: penalty redistribution ───────────────────────────────────────
+
+#[test]
+fn test_penalty_split_proportionally_across_three_stakers() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    f.token_admin.mint(&carol, &1_000_000);
+
+    f.vault.set_penalty_redistribution_mode(&true);
+    f.vault.stake(&f.alice, &600_000);
+    f.vault.stake(&f.bob, &300_000);
+    f.vault.stake(&carol, &100_000);
+
+    // Slash a 4th, unrelated staker fully so the whole penalty is
+    // redistributed to alice/bob/carol proportionally (6:3:1).
+    let dave = Address::generate(&f.env);
+    f.token_admin.mint(&dave, &1_000_000);
+    f.vault.stake(&dave, &1_000_000);
+    f.vault.slash(&f.admin, &dave, &1_000_000);
+
+    let alice_accrued = f.vault.user_stats(&f.alice).pending_reward;
+    let bob_accrued = f.vault.user_stats(&f.bob).pending_reward;
+    let carol_accrued = f.vault.user_stats(&carol).pending_reward;
+
+    assert!(alice_accrued > bob_accrued);
+    assert!(bob_accrued > carol_accrued);
+    assert!(alice_accrued > 0 && bob_accrued > 0 && carol_accrued > 0);
+}
+
+#[test]
+fn test_penalty_redistribution_mode_toggle() {
+    let f = VaultFixture::new();
+    assert!(!f.vault.get_penalty_redistribution_mode());
+    f.vault.set_penalty_redistribution_mode(&true);
+    assert!(f.vault.get_penalty_redistribution_mode());
+    f.vault.set_penalty_redistribution_mode(&false);
+    assert!(!f.vault.get_penalty_redistribution_mode());
+}
+
+#[test]
+fn test_penalty_disabled_mode_keeps_existing_treasury_behaviour() {
+    let f = VaultFixture::new();
+    // Mode left at its default (disabled).
+    f.vault.stake(&f.alice, &500_000);
+
+    let treasury_balance_before = f.token.balance(&f.admin);
+    f.vault.slash(&f.admin, &f.alice, &500_000);
+    let treasury_balance_after = f.token.balance(&f.admin);
+
+    // Default slash_treasury is the admin address (set at initialize()).
+    assert!(treasury_balance_after > treasury_balance_before);
 }
