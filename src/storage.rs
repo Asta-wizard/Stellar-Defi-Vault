@@ -630,3 +630,80 @@ pub struct AdminProposal {
     pub approvals: Vec<Address>,
     pub executed: bool,
 }
+
+// ── Missing types for existing feature branches ──────────────────────────────
+
+/// Export payload for migrating pool state to a new contract (issue #203).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MigrationExport {
+    pub admin: Address,
+    pub stake_token: Address,
+    pub reward_token: Address,
+    pub reward_rate_bps: u32,
+    pub total_staked: i128,
+    pub total_stakers: u32,
+    pub paused: bool,
+    pub all_positions: Vec<(Address, StakePosition)>,
+}
+
+/// Bootstrap configuration for phased reward rate (issue #202).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BootstrapConfig {
+    pub initial_rate: u32,
+    pub base_rate: u32,
+    pub started_at: u32,
+    pub duration: u32,
+}
+
+/// A delegation chain: beneficiary + list of delegates (issue #200).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DelegationChain {
+    pub beneficiary: Address,
+    pub delegates: Vec<Address>,
+}
+
+/// Storage footprint report (issue #208).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageUsageReport {
+    pub instance_keys: u32,
+    pub persistent_position_count: u32,
+    pub persistent_other_keys: u32,
+    pub estimated_total_bytes: u32,
+}
+
+// ── Issue #210: Merkle Reward Distribution ────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MerkleRoot {
+    pub root: soroban_sdk::Bytes,
+    pub epoch: u32,
+    pub total_claimable: i128,
+    pub published_at: u32,
+}
+
+// ── Issue #211: Staking Tournament Competition ─────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tournament {
+    pub prize_pool: i128,
+    pub starts_at: u32,
+    pub ends_at: u32,
+    pub winner: soroban_sdk::Bytes,
+    pub finalized: bool,
+}
+
+// ── Issue #221: Cross-Pool Reward Comparison ──────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolComparison {
+    pub pool_address: Address,
+    pub reward_rate_bps: i128,
+    pub reachable: bool,
+}

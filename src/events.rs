@@ -619,3 +619,82 @@ pub fn webhook_url_updated(
     let topics = (symbol_short!("whk_url"), admin);
     env.events().publish(topics, (url.clone(), ledger));
 }
+
+// ── Issue #210: Merkle Reward Distribution ────────────────────────────────────
+
+pub fn merkle_claimed(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    epoch: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("mrk_clm"), user);
+    env.events().publish(topics, (amount, epoch, ledger));
+}
+
+// ── Issue #211: Staking Tournament Competition ─────────────────────────────────
+
+pub fn tournament_winner(
+    env: &Env,
+    winner: &Address,
+    score: i128,
+    prize_paid: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("tour_win"),);
+    env.events().publish(topics, (winner, score, prize_paid, ledger));
+}
+
+// ── Issue #212: Buyback & Burn ────────────────────────────────────────────────
+
+pub fn buyback_executed(
+    env: &Env,
+    fee_amount_used: i128,
+    reward_tokens_burned: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("buyback"),);
+    env.events().publish(topics, (fee_amount_used, reward_tokens_burned, ledger));
+}
+
+pub fn buyback_toggled(env: &Env, admin: &Address, enabled: bool) {
+    let topics = (symbol_short!("buy_tog"), admin);
+    env.events().publish(topics, (enabled, env.ledger().sequence()));
+}
+
+pub fn merkle_root_published(env: &Env, admin: &Address, epoch: u32, total_claimable: i128) {
+    let topics = (symbol_short!("mrk_pub"), admin);
+    env.events().publish(topics, (epoch, total_claimable, env.ledger().sequence()));
+}
+
+// ── Events referenced by existing feature branches ────────────────────────────
+
+pub fn state_exported(env: &Env, admin: &Address, num_positions: u32, ledger: u32) {
+    let topics = (symbol_short!("st_exp"), admin);
+    env.events().publish(topics, (num_positions, ledger));
+}
+
+pub fn penalty_redistributed(env: &Env, total_amount: i128, recipient_count: u32, ledger: u32) {
+    let topics = (symbol_short!("pen_rdst"),);
+    env.events().publish(topics, (total_amount, recipient_count, ledger));
+}
+
+pub fn insurance_deployed(env: &Env, amount: i128, new_balance: i128) {
+    let topics = (symbol_short!("ins_dep"),);
+    env.events().publish(topics, (amount, new_balance, env.ledger().sequence()));
+}
+
+pub fn dynamic_fee_config_updated(
+    env: &Env,
+    admin: &Address,
+    base_fee_bps: u32,
+    max_fee_bps: u32,
+    threshold_bps: u32,
+) {
+    let topics = (symbol_short!("dfeecfg"), admin);
+    env.events().publish(
+        topics,
+        (base_fee_bps, max_fee_bps, threshold_bps, env.ledger().sequence()),
+    );
+}

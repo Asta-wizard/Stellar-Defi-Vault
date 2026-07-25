@@ -1,7 +1,6 @@
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, Bytes, Env, String, Symbol, Vec,
-    contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, String, Symbol,
-    Vec,
+    contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, String,
+    Symbol, Vec,
 };
 
 use crate::{
@@ -10,20 +9,15 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        AdminAction, AdminProposal, BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow,
-        ContractAddresses, ContractMetadata, DataKey, DayBucket, EpochState, FeeRecipient,
-        GovernanceProposal, InterfaceId, LeaderboardEntry, MigrationExport, MultisigConfig,
-        PauseInfo, PauseReason, PendingAction, PoolConfig, PoolHealthReport, PoolStats,
-        ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, RoundingPolicy, StakeAction,
-        StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, StorageUsageReport,
-        TaxReport, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
-        BoostTierProgress, BootstrapConfig, CampaignInfo, ChangelogEntry, ClaimWindow,
-        ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, EpochState,
-        GovernanceProposal, InterfaceId, LeaderboardEntry, PauseInfo, PauseReason, PoolConfig,
-        PoolHealthReport, PoolStats, ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry,
-        RoundingPolicy, StakeAction, StakeHistoryEntry, StakePosition, StakeStreak,
-        StakingEfficiencyScore, TaxReport, UnbondingPosition, UnstakeCheckResult, UserStats,
-        UserSummary, VestingEntry,
+        AdminAction, AdminProposal, BoostTierProgress, BootstrapConfig, CampaignInfo,
+        ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey, DayBucket,
+        DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal, InterfaceId,
+        LeaderboardEntry, MerkleRoot, MigrationExport, MultisigConfig, PauseInfo, PauseReason,
+        PendingAction, PoolComparison, PoolConfig, PoolHealthReport, PoolStats, ProposableParam,
+        RateHistoryEntry, ReferralLeaderboardEntry, ReputationScore,
+        RewardMultiplierBreakdown, RoundingPolicy, StakeAction, StakeHistoryEntry,
+        StakePosition, StakeStreak, StakingEfficiencyScore, StorageUsageReport, TaxReport,
+        Tournament, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -72,6 +66,14 @@ pub(crate) const REFILL_ALERT_DAYS: u32 = 30;
 pub(crate) const YIELD_BUFFER_BPS: u32 = 2_000;
 /// Maximum number of simultaneously open governance proposals (issue #216).
 pub(crate) const MAX_OPEN_PROPOSALS: u32 = 10;
+/// Estimated gas cost for a first-time stake transaction (issue #204).
+pub(crate) const FIRST_STAKE_COST: u64 = 100_000;
+/// Estimated gas cost for a top-up stake transaction (issue #204).
+pub(crate) const TOP_UP_COST: u64 = 50_000;
+/// Maximum sub-score for any single reputation dimension (2500 = 25% of total 10 000).
+pub(crate) const REPUTATION_SUB_SCORE_MAX: u32 = 2500;
+/// Points deducted per lifetime claim (100 bps = 1% of max consistency score).
+pub(crate) const REPUTATION_CLAIM_DECAY_BPS: u32 = 100;
 
 #[contract]
 pub struct VaultContract;
@@ -232,7 +234,7 @@ impl VaultContract {
         let mut total_shares: i128 = 0;
         let mut total_deposited: i128 = 0;
         let mut all_stakers: Vec<Address> = Vec::new(&env);
-        let current_ledger = env.ledger().sequence();
+        let _current_ledger = env.ledger().sequence();
 
         for (staker, position) in export.all_positions.iter() {
             balance::set_shares(&env, &staker, position.amount);
@@ -5900,7 +5902,7 @@ impl VaultContract {
                 .persistent()
                 .get(&DataKey::StakedAtLedger(user.clone()))
                 .unwrap_or(0);
-            let current_ledger = env.ledger().sequence();
+        let current_ledger = env.ledger().sequence();
             if current_ledger < staked_at.saturating_add(lock_period) {
                 return UnstakeCheckResult::StillLocked;
             }
@@ -7087,5 +7089,390 @@ impl VaultContract {
             .map(|s| s.current_streak)
             .unwrap_or(0);
         streak.min(4) * 625
+    }
+
+    // ── Issue #210: Merkle Reward Distribution ────────────────────────────────
+
+    /// Uses SHA-256 for leaf and node hashing (available in Soroban no_std via
+    /// `soroban_sdk::crypto::Sha256`). Each proof step hashes
+    /// `hash(left || right)` to walk up to the root, matching the convention
+    /// used by the off-chain proof generator.
+    pub fn publish_merkle_root(
+        env: Env,
+        admin: Address,
+        root: soroban_sdk::Bytes,
+        epoch: u32,
+        total_claimable: i128,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mr = MerkleRoot {
+            root,
+            epoch,
+            total_claimable,
+            published_at: env.ledger().sequence(),
+        };
+        balance::set_merkle_root(&env, &mr);
+        events::merkle_root_published(&env, &admin, epoch, total_claimable);
+        Ok(())
+    }
+
+    pub fn claim_merkle_reward(
+        env: Env,
+        user: Address,
+        amount: i128,
+        proof: Vec<soroban_sdk::BytesN<32>>,
+    ) -> Result<(), VaultExtError> {
+        user.require_auth();
+
+        let mr = balance::get_merkle_root(&env).ok_or(VaultExtError::MerkleInvalidProof)?;
+        if balance::is_merkle_claimed(&env, &user, mr.epoch) {
+            return Err(VaultExtError::MerkleAlreadyClaimed);
+        }
+
+        let leaf = Self::merkle_leaf_hash(&env, &user, amount);
+        let computed_root = Self::compute_merkle_root(&env, leaf, proof);
+        let computed_root_bytes: soroban_sdk::Bytes = computed_root.into();
+        if computed_root_bytes != mr.root {
+            return Err(VaultExtError::MerkleInvalidProof);
+        }
+
+        balance::set_merkle_claimed(&env, &user, mr.epoch);
+
+        let reward_token = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .ok_or(VaultExtError::NotInitialized)?;
+        let token_client = token::Client::new(&env, &reward_token);
+        let reward_pool = balance::get_reward_pool_balance(&env);
+        if reward_pool < amount {
+            return Err(VaultExtError::Unauthorized);
+        }
+        balance::set_reward_pool_balance(&env, reward_pool - amount);
+        token_client.transfer(&env.current_contract_address(), &user, &amount);
+
+        let total_paid = balance::get_total_rewards_paid(&env);
+        balance::set_total_rewards_paid(&env, total_paid + amount);
+
+        events::merkle_claimed(&env, &user, amount, mr.epoch, env.ledger().sequence());
+        Ok(())
+    }
+
+    fn merkle_leaf_hash(env: &Env, user: &Address, amount: i128) -> soroban_sdk::BytesN<32> {
+        let mut buf = soroban_sdk::Bytes::new(env);
+        let addr_str = user.to_string();
+        let len = addr_str.len();
+        let mut raw = [0u8; 56];
+        let slice = &mut raw[..len as usize];
+        addr_str.copy_into_slice(slice);
+        buf.extend_from_slice(slice);
+        buf.extend_from_slice(&amount.to_be_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    fn compute_merkle_root(
+        env: &Env,
+        leaf: soroban_sdk::BytesN<32>,
+        proof: Vec<soroban_sdk::BytesN<32>>,
+    ) -> soroban_sdk::BytesN<32> {
+        let mut current = leaf;
+        for i in 0..proof.len() {
+            let sibling = proof.get(i).unwrap();
+            let cur_arr: [u8; 32] = current.to_array();
+            let sib_arr: [u8; 32] = sibling.to_array();
+            let mut combined = soroban_sdk::Bytes::new(env);
+            if cur_arr[0] <= sib_arr[0] {
+                combined.extend_from_slice(&cur_arr);
+                combined.extend_from_slice(&sib_arr);
+            } else {
+                combined.extend_from_slice(&sib_arr);
+                combined.extend_from_slice(&cur_arr);
+            }
+            current = env.crypto().sha256(&combined).into();
+        }
+        current
+    }
+
+    pub fn get_merkle_root(env: Env) -> Option<MerkleRoot> {
+        balance::get_merkle_root(&env)
+    }
+
+    // ── Issue #211: Staking Tournament Competition ─────────────────────────────
+
+    pub fn create_tournament(
+        env: Env,
+        admin: Address,
+        prize_pool: i128,
+        duration_ledgers: u32,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if balance::get_tournament(&env).is_some() {
+            return Err(VaultExtError::TournamentAlreadyExists);
+        }
+        if prize_pool <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        if duration_ledgers == 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+
+        let token_addr = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .ok_or(VaultExtError::NotInitialized)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&admin, &env.current_contract_address(), &prize_pool);
+
+        let current_ledger = env.ledger().sequence();
+        let tournament = Tournament {
+            prize_pool,
+            starts_at: current_ledger,
+            ends_at: current_ledger.saturating_add(duration_ledgers),
+            winner: soroban_sdk::Bytes::new(&env),
+            finalized: false,
+        };
+        balance::set_tournament(&env, &tournament);
+        Ok(())
+    }
+
+    pub fn finalize_tournament(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut tournament = balance::get_tournament(&env).ok_or(VaultExtError::TournamentNotFound)?;
+        if tournament.finalized {
+            return Err(VaultExtError::TournamentNotFound);
+        }
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < tournament.ends_at {
+            return Err(VaultExtError::TournamentNotEnded);
+        }
+
+        let participants = balance::get_tournament_participants(&env);
+        let mut best_user: Option<Address> = None;
+        let mut best_score: i128 = 0;
+
+        for i in 0..participants.len() {
+            let user = participants.get(i).unwrap();
+            let score = balance::get_tournament_score(&env, &user);
+            if score > best_score || (score == best_score && score > 0) {
+                if score > best_score {
+                    best_score = score;
+                    best_user = Some(user);
+                } else if let Some(ref best) = best_user {
+                    if user.to_string() < best.to_string() {
+                        best_user = Some(user);
+                    }
+                }
+            }
+        }
+
+        let token_addr = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .ok_or(VaultExtError::NotInitialized)?;
+        let token_client = token::Client::new(&env, &token_addr);
+
+        if let Some(winner_addr) = best_user {
+            let prize = tournament.prize_pool;
+            token_client.transfer(&env.current_contract_address(), &winner_addr, &prize);
+            let addr_str = winner_addr.to_string();
+            let len = addr_str.len();
+            let mut raw = [0u8; 56];
+            let slice = &mut raw[..len as usize];
+            addr_str.copy_into_slice(slice);
+            tournament.winner = soroban_sdk::Bytes::from_slice(&env, slice);
+            events::tournament_winner(&env, &winner_addr, best_score, prize, current_ledger);
+        }
+
+        tournament.finalized = true;
+        balance::set_tournament(&env, &tournament);
+        Ok(())
+    }
+
+    pub fn get_tournament_scores(env: Env) -> Vec<(Address, i128)> {
+        let participants = balance::get_tournament_participants(&env);
+        let mut scores: Vec<(Address, i128)> = Vec::new(&env);
+        for i in 0..participants.len() {
+            let user = participants.get(i).unwrap();
+            let score = balance::get_tournament_score(&env, &user);
+            if score > 0 {
+                scores.push_back((user, score));
+            }
+        }
+        let n = scores.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let a = scores.get(i).unwrap();
+                let b = scores.get(j).unwrap();
+                if b.1 > a.1 || (b.1 == a.1 && b.0.to_string() < a.0.to_string()) {
+                    scores.set(i, b);
+                    scores.set(j, a);
+                }
+            }
+        }
+        while scores.len() > 50 {
+            scores.pop_back();
+        }
+        scores
+    }
+
+    /// Called during stake/unstake to update a user's tournament score.
+    pub fn update_tournament_score(
+        env: Env,
+        user: Address,
+        amount: i128,
+        elapsed_ledgers: u32,
+    ) {
+        let tournament = match balance::get_tournament(&env) {
+            Some(t) if !t.finalized => t,
+            _ => return,
+        };
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < tournament.starts_at || current_ledger >= tournament.ends_at {
+            return;
+        }
+        let score_delta = amount.saturating_mul(elapsed_ledgers as i128);
+        if score_delta > 0 {
+            let current = balance::get_tournament_score(&env, &user);
+            balance::set_tournament_score(&env, &user, current + score_delta);
+            balance::add_tournament_participant(&env, &user);
+        }
+    }
+
+    // ── Issue #221: Cross-Pool Reward Comparison ──────────────────────────────
+
+    pub fn compare_pools(
+        env: Env,
+        other_pools: Vec<Address>,
+    ) -> Result<Vec<PoolComparison>, VaultExtError> {
+        if other_pools.len() > 5 {
+            return Err(VaultExtError::TooManyPools);
+        }
+
+        let self_addr = env.current_contract_address();
+        let self_rate = balance::get_reward_rate_bps(&env) as i128;
+        let mut results: Vec<PoolComparison> = Vec::new(&env);
+        results.push_back(PoolComparison {
+            pool_address: self_addr,
+            reward_rate_bps: self_rate,
+            reachable: true,
+        });
+
+        for i in 0..other_pools.len() {
+            let pool = other_pools.get(i).unwrap();
+            let (rate, reachable) = Self::try_query_reward_rate(&env, &pool);
+            results.push_back(PoolComparison {
+                pool_address: pool,
+                reward_rate_bps: rate,
+                reachable,
+            });
+        }
+
+        let n = results.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let a = results.get(i).unwrap();
+                let b = results.get(j).unwrap();
+                if b.reward_rate_bps > a.reward_rate_bps
+                    || (b.reward_rate_bps == a.reward_rate_bps && b.reachable && !a.reachable)
+                {
+                    results.set(i, b);
+                    results.set(j, a);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn try_query_reward_rate(env: &Env, pool: &Address) -> (i128, bool) {
+        let args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(env);
+        let result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
+            pool,
+            &Symbol::new(env, "reward_rate_bps"),
+            args,
+        );
+        match result {
+            Ok(Ok(rate)) => (rate, true),
+            _ => (0, false),
+        }
+    }
+
+    // ── Issue #212: Buyback & Burn Mechanism ──────────────────────────────────
+
+    pub fn set_buyback_enabled(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        balance::set_buyback_enabled(&env, enabled);
+        events::buyback_toggled(&env, &admin, enabled);
+        Ok(())
+    }
+
+    pub fn buyback_threshold(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if amount < 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        balance::set_buyback_threshold(&env, amount);
+        Ok(())
+    }
+
+    pub fn execute_buyback(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if !balance::buyback_enabled(&env) {
+            return Err(VaultExtError::BuybackNotEnabled);
+        }
+
+        let token_addr = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .ok_or(VaultExtError::NotInitialized)?;
+        let token_client = token::Client::new(&env, &token_addr);
+
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        let total_deposited = balance::get_total_deposited(&env);
+        let staked_tokens = total_deposited;
+        let available = contract_balance.saturating_sub(staked_tokens);
+
+        let threshold = balance::get_buyback_threshold(&env);
+        if available < threshold {
+            return Err(VaultExtError::BuybackThresholdNotMet);
+        }
+
+        let burn_amount = available;
+        token_client.burn(&env.current_contract_address(), &burn_amount);
+
+        balance::add_tokens_burned(&env, burn_amount);
+        events::buyback_executed(&env, burn_amount, burn_amount, env.ledger().sequence());
+        Ok(())
+    }
+
+    pub fn get_total_burned(env: Env) -> i128 {
+        balance::get_total_tokens_burned(&env)
     }
 }
