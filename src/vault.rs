@@ -7,10 +7,11 @@ use crate::{
     nft::StakeReceiptNFTClient,
     storage::{
         BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses,
-        ContractMetadata, DataKey, EpochState, InterfaceId, LeaderboardEntry, PoolConfig,
-        PoolHealthReport, PoolStats, RateHistoryEntry, ReferralLeaderboardEntry, StakeAction,
-        StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, TotalStakedSnapshot,
-        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        ContractMetadata, DataKey, DayBucket, EpochState, InterfaceId, LeaderboardEntry, PauseInfo,
+        PauseReason, PoolConfig, PoolHealthReport, PoolStats, RateHistoryEntry,
+        ReferralLeaderboardEntry, RoundingPolicy, StakeAction, StakeHistoryEntry, StakePosition,
+        StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition,
+        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -410,31 +411,57 @@ impl VaultContract {
     }
 
     /// Pause all deposits and withdrawals (admin only).
-    pub fn pause(env: Env) -> Result<(), VaultError> {
+    ///
+    /// `reason` categorizes why the pool is paused; `message` provides a
+    /// human-readable explanation (max 200 characters).
+    pub fn pause(
+        env: Env,
+        reason: PauseReason,
+        message: soroban_sdk::String,
+    ) -> Result<(), VaultError> {
         admin::require_admin(&env)?;
-        // Issue #107: stopped contracts cannot be re-paused or unpaused.
         Self::require_not_stopped(&env)?;
+
+        if message.len() > 200 {
+            return Err(VaultError::DescriptionTooLong);
+        }
+
         Self::set_paused(&env, true);
         let admin = admin::get_admin(&env)?;
-        events::paused(&env, &admin, env.ledger().sequence());
+        let current_ledger = env.ledger().sequence();
+
+        let pause_info = PauseInfo {
+            reason,
+            message: message.clone(),
+            paused_at: current_ledger,
+        };
+        balance::set_pause_info(&env, &pause_info);
+
+        events::paused_with_reason(&env, &admin, &reason, &message, current_ledger);
         events::admin_action_pause(&env, &admin);
         balance::increment_admin_action_count(&env);
-        balance::set_last_updated_ledger(&env, env.ledger().sequence()); // Issue #69
-        Self::append_changelog(&env, &admin, String::from_str(&env, "paused"), 0, 1);
+        balance::set_last_updated_ledger(&env, current_ledger);
+        Self::append_changelog(
+            &env,
+            &admin,
+            String::from_str(&env, "paused"),
+            0,
+            1,
+        );
         Ok(())
     }
 
     /// Resume deposits and withdrawals after a pause (admin only).
     pub fn unpause(env: Env) -> Result<(), VaultError> {
         admin::require_admin(&env)?;
-        // Issue #107: stopped contracts cannot be re-paused or unpaused.
         Self::require_not_stopped(&env)?;
         Self::set_paused(&env, false);
+        balance::clear_pause_info(&env);
         let admin = admin::get_admin(&env)?;
         events::unpaused(&env, &admin, env.ledger().sequence());
         events::admin_action_unpause(&env, &admin);
         balance::increment_admin_action_count(&env);
-        balance::set_last_updated_ledger(&env, env.ledger().sequence()); // Issue #69
+        balance::set_last_updated_ledger(&env, env.ledger().sequence());
         Self::append_changelog(&env, &admin, String::from_str(&env, "unpaused"), 1, 0);
         Ok(())
     }
@@ -3479,6 +3506,14 @@ impl VaultContract {
         let paid = balance::get_total_rewards_paid(env);
         balance::set_total_rewards_paid(env, paid + reward);
 
+        // Issue #217: append to per-user claim history for tax reporting
+        let mut claim_history = balance::get_claim_history(env, staker);
+        if claim_history.len() >= balance::MAX_CLAIM_HISTORY {
+            claim_history.pop_front();
+        }
+        claim_history.push_back((env.ledger().sequence(), reward));
+        balance::set_claim_history(env, staker, &claim_history);
+
         events::claimed(env, staker, reward, env.ledger().sequence());
         balance::set_last_updated_ledger(env, env.ledger().sequence()); // Issue #69
 
@@ -5005,5 +5040,237 @@ impl VaultContract {
             .and_then(|v| v.checked_div(BOOST_BPS_BASE as i128))
             .and_then(|v| v.checked_div(STELLAR_LEDGERS_PER_YEAR as i128))
             .unwrap_or(0)
+    }
+
+    // ── Issue #219: pause reason info query ──────────────────────────────────
+
+    /// Read-only query for the current pause reason and message.
+    ///
+    /// Returns `None` when the pool is not paused. Callers can use this as an
+    /// `is_paused` check too: `None` means unpaused.
+    pub fn get_pause_info(env: Env) -> Option<PauseInfo> {
+        balance::get_pause_info(&env)
+    }
+
+    // ── Issue #217: tax reporting ────────────────────────────────────────────
+
+    /// Returns a structured annual rewards summary for `user` covering the
+    /// ledger range `[ledger_from, ledger_to]`.
+    ///
+    /// No auth required — users can query their own or others' public data.
+    /// The report sums all claimed events in the range, counts them, and
+    /// computes the average staked position across stake snapshots.
+    pub fn get_tax_report(
+        env: Env,
+        user: Address,
+        ledger_from: u32,
+        ledger_to: u32,
+    ) -> TaxReport {
+        let history = balance::get_claim_history(&env, &user);
+        let mut total_rewards_claimed: i128 = 0;
+        let mut claim_count: u32 = 0;
+        let mut i = 0u32;
+        while i < history.len() {
+            let (ledger, amount) = history.get(i).unwrap();
+            if ledger >= ledger_from && ledger <= ledger_to {
+                total_rewards_claimed = total_rewards_claimed
+                    .checked_add(amount)
+                    .unwrap_or(i128::MAX);
+                claim_count = claim_count.saturating_add(1);
+            }
+            i += 1;
+        }
+
+        let stake_history = balance::get_stake_history(&env, &user).unwrap_or(Vec::new(&env));
+        let mut sum_amount: i128 = 0;
+        let mut snapshot_count: u32 = 0;
+        let mut j = 0u32;
+        while j < stake_history.len() {
+            let (snapshot_ledger, snapshot_amount) = stake_history.get(j).unwrap();
+            if snapshot_ledger >= ledger_from && snapshot_ledger <= ledger_to {
+                sum_amount = sum_amount
+                    .checked_add(snapshot_amount)
+                    .unwrap_or(i128::MAX);
+                snapshot_count = snapshot_count.saturating_add(1);
+            }
+            j += 1;
+        }
+
+        let average_stake_amount = if snapshot_count == 0 {
+            0
+        } else {
+            sum_amount / (snapshot_count as i128)
+        };
+
+        TaxReport {
+            user,
+            ledger_from,
+            ledger_to,
+            total_rewards_claimed,
+            average_stake_amount,
+            claim_count,
+        }
+    }
+
+    // ── Issue #218: pool-to-pool migration ───────────────────────────────────
+
+    /// Admin: designate a successor pool for migration.
+    ///
+    /// Can only be called once — the target is immutable after first set to
+    /// prevent bait-and-switch. Reverts with `MigrationTargetAlreadySet` on
+    /// a second call.
+    pub fn set_migration_target(
+        env: Env,
+        admin: Address,
+        target_pool: Address,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+
+        if balance::get_migration_target(&env).is_some() {
+            return Err(VaultError::AlreadyInitialized);
+        }
+
+        balance::set_migration_target(&env, &target_pool);
+        let admin_addr = admin::get_admin(&env)?;
+        events::migration_target_set(&env, &admin_addr, &target_pool, env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Read-only query for the designated migration target pool.
+    ///
+    /// Returns `None` if no migration target has been set.
+    pub fn get_migration_target(env: Env) -> Option<Address> {
+        balance::get_migration_target(&env)
+    }
+
+    /// Migrate the caller's position to the designated target pool atomically.
+    ///
+    /// Settles pending rewards first, then unstakes the full position, and
+    /// calls `stake(user, amount)` on the target pool. The target pool must
+    /// implement the same `stake(user, amount)` interface.
+    ///
+    /// After migration the user has no position in this pool and a new
+    /// position in the target pool.
+    pub fn migrate_to_new_pool(env: Env, user: Address) -> Result<i128, VaultError> {
+        user.require_auth();
+
+        let target_pool = balance::get_migration_target(&env)
+            .ok_or(VaultError::PositionNotFound)?;
+
+        let shares = balance::get_shares(&env, &user);
+        if shares == 0 {
+            return Err(VaultError::PositionNotFound);
+        }
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let position_amount = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        // Settle pending rewards first
+        let accrued_before = balance::get_accrued_reward(&env, &user);
+        Self::accrue_rewards(&env, &user, shares)?;
+        let accrued_after = balance::get_accrued_reward(&env, &user);
+        let rewards_settled = accrued_after - accrued_before;
+
+        // Transfer accrued rewards to the user if any
+        if accrued_after > 0 {
+            let reward_pool = balance::get_reward_pool_balance(&env);
+            if reward_pool >= accrued_after {
+                let token_addr = Self::token_address(&env)?;
+                let token_client = token::Client::new(&env, &token_addr);
+                token_client.transfer(&env.current_contract_address(), &user, &accrued_after);
+                balance::set_reward_pool_balance(&env, reward_pool - accrued_after);
+            }
+            balance::set_accrued_reward(&env, &user, 0);
+        }
+
+        // Unstake full position — clean up this pool's state
+        balance::set_shares(&env, &user, 0);
+        balance::set_total_shares(&env, total_shares - shares);
+        let new_total_deposited = total_deposited
+            .checked_sub(position_amount)
+            .ok_or(VaultError::ArithmeticError)?;
+        balance::set_total_deposited(&env, new_total_deposited);
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StakedAtLedger(user.clone()));
+        let total_stakers = balance::get_total_stakers(&env);
+        if total_stakers > 0 {
+            balance::set_total_stakers(&env, total_stakers - 1);
+        }
+        Self::remove_from_staker_list(&env, &user);
+        balance::set_reward_checkpoint_ledger(&env, &user, env.ledger().sequence());
+        balance::set_last_claim_ledger(&env, &user, env.ledger().sequence());
+
+        // Transfer tokens to user so they can stake on target
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&env.current_contract_address(), &user, &position_amount);
+
+        // Call stake on the target pool
+        use soroban_sdk::IntoVal;
+        let args: Vec<soroban_sdk::Val> = (user.clone(), position_amount).into_val(&env);
+        env.invoke_contract::<i128>(
+            &target_pool,
+            &symbol_short!("stake"),
+            args,
+        );
+
+        Self::record_stake_snapshot(&env, &user, 0);
+        Self::update_leaderboard(&env, &user, 0);
+
+        events::migrated(
+            &env,
+            &user,
+            position_amount,
+            rewards_settled,
+            &target_pool,
+            env.ledger().sequence(),
+        );
+        events::position_closed(&env, &user);
+        balance::set_last_updated_ledger(&env, env.ledger().sequence());
+
+        Ok(position_amount)
+    }
+
+    // ── Issue #220: rounding policy ───────────────────────────────────────────
+
+    /// Admin: set the rounding policy for sub-unit division.
+    pub fn set_rounding_policy(
+        env: Env,
+        policy: RoundingPolicy,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        balance::set_rounding_policy(&env, &policy);
+        Ok(())
+    }
+
+    /// Read-only query for the current rounding policy.
+    pub fn get_rounding_policy(env: Env) -> RoundingPolicy {
+        balance::get_rounding_policy(&env)
+    }
+
+    /// Apply the configured rounding policy to a division operation.
+    ///
+    /// - Floor:   `a / b` (default, current behaviour)
+    /// - Ceiling: `(a + b - 1) / b`
+    /// - Nearest: `(a + b/2) / b`
+    pub fn apply_rounding(env: Env, numerator: i128, denominator: i128) -> i128 {
+        if denominator == 0 {
+            return 0;
+        }
+        let policy = balance::get_rounding_policy(&env);
+        match policy {
+            RoundingPolicy::Floor => numerator / denominator,
+            RoundingPolicy::Ceiling => {
+                (numerator + denominator - 1) / denominator
+            }
+            RoundingPolicy::Nearest => {
+                (numerator + denominator / 2) / denominator
+            }
+        }
     }
 }
