@@ -122,8 +122,8 @@ pub enum VaultError {
     /// Reserved for future bulk-KYC updates; no current public function returns
     /// this variant.
     BatchKycTooLarge = 39,
-    /// Reserved for future caller-supplied rate conversion flows; no current
-    /// public function returns this variant.
+    /// Returned by `set_dynamic_fee_config()` when `base_fee_bps > max_fee_bps`
+    /// or `utilization_threshold_bps` exceeds 10 000 (100%).
     InvalidRate = 40,
     /// Custom error message exceeds MAX_ERROR_MESSAGE_LENGTH (150 characters).
     MessageTooLong = 41,

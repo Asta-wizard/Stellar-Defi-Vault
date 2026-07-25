@@ -227,6 +227,20 @@ pub struct ClaimWindow {
     pub window_started_at: u32,
 }
 
+/// Dynamic unstake fee model configured via `set_dynamic_fee_config` (issue #213).
+///
+/// Below `utilization_threshold_bps` pool utilization, the unstake fee is
+/// `base_fee_bps`. Above it, the fee interpolates linearly up to
+/// `max_fee_bps` at 100% utilization. While a config is set, `unstake` uses
+/// this dynamic fee instead of the static fee from `set_unstake_fee_bps`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynamicFeeConfig {
+    pub base_fee_bps: u32,
+    pub max_fee_bps: u32,
+    pub utilization_threshold_bps: u32,
+}
+
 /// Single entry in the on-chain changelog exposed by `get_changelog`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]

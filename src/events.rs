@@ -443,3 +443,26 @@ pub fn migration_target_set(env: &Env, admin: &Address, target_pool: &Address, l
     env.events()
         .publish(topics, (target_pool.clone(), ledger));
 }
+
+/// Emitted when the admin sets or updates the dynamic unstake fee config.
+///
+/// Topics: `("dyn_fee_u", admin)`.
+/// Data: `(base_fee_bps, max_fee_bps, utilization_threshold_bps, ledger)`.
+pub fn dynamic_fee_config_updated(
+    env: &Env,
+    admin: &Address,
+    base_fee_bps: u32,
+    max_fee_bps: u32,
+    utilization_threshold_bps: u32,
+) {
+    let topics = (symbol_short!("dyn_fee_u"), admin);
+    env.events().publish(
+        topics,
+        (
+            base_fee_bps,
+            max_fee_bps,
+            utilization_threshold_bps,
+            env.ledger().sequence(),
+        ),
+    );
+}

@@ -872,6 +872,107 @@ fn test_unstake_fee_applies_after_lock_penalty() {
     assert_eq!(f.vault.get_reward_pool_balance(), 45_000);
 }
 
+// ── dynamic unstake fee (Issue #213) ─────────────────────────────────────────
+
+#[test]
+fn test_set_dynamic_fee_config_requires_admin_auth() {
+    let f = VaultFixture::new();
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+}
+
+#[test]
+fn test_set_dynamic_fee_config_base_above_max_rejected() {
+    let f = VaultFixture::new();
+    let result = f
+        .vault
+        .try_set_dynamic_fee_config(&f.admin, &1000, &100, &5000);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}
+
+#[test]
+fn test_set_dynamic_fee_config_threshold_above_100_percent_rejected() {
+    let f = VaultFixture::new();
+    let result = f
+        .vault
+        .try_set_dynamic_fee_config(&f.admin, &100, &1000, &10_001);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}
+
+#[test]
+fn test_pool_utilization_bps_tracks_cap_ratio() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 0);
+
+    f.vault.deposit(&f.alice, &400_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 4000); // 40%
+}
+
+#[test]
+fn test_pool_utilization_bps_zero_with_no_cap() {
+    let f = VaultFixture::new();
+    f.vault.deposit(&f.alice, &400_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 0);
+}
+
+#[test]
+fn test_dynamic_fee_below_threshold_returns_base_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000); // base 1%, max 10%, threshold 50%
+    f.vault.deposit(&f.alice, &400_000); // 40% utilization, below the 50% threshold
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 100);
+}
+
+#[test]
+fn test_dynamic_fee_at_max_utilization_returns_max_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &1_000_000); // 100% utilization
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 1000);
+}
+
+#[test]
+fn test_dynamic_fee_midpoint_interpolates() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &750_000); // 75% utilization: halfway between 50% and 100%
+
+    // Halfway between base (100) and max (1000) is 550.
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 550);
+}
+
+#[test]
+fn test_dynamic_fee_no_pool_cap_returns_base_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &1_000_000); // no cap set, so utilization is always 0
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 100);
+}
+
+#[test]
+fn test_unstake_uses_dynamic_fee_instead_of_static_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_unstake_fee_bps(&f.admin, &500); // static 5%, should be ignored once dynamic is set
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000); // dynamic 1% below threshold
+    f.vault.deposit(&f.alice, &400_000); // 40% utilization, below threshold -> 1% fee
+
+    let token_before = f.token.balance(&f.alice);
+    let amount_back = f.vault.withdraw(&f.alice, &200_000);
+
+    // 1% of 200_000 = 2_000 fee -> 198_000 returned, not the static 5% (190_000).
+    assert_eq!(amount_back, 198_000);
+    assert_eq!(f.token.balance(&f.alice), token_before + 198_000);
+    assert_eq!(f.vault.get_reward_pool_balance(), 2_000);
+}
+
 // ── governance vote weight snapshots (Issue #31) ─────────────────────────────
 
 #[test]

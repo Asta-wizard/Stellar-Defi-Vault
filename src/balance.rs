@@ -1,5 +1,6 @@
 use crate::storage::{
-    ChangelogEntry, ClaimWindow, DataKey, DayBucket, RateHistoryEntry, ReferralStats, VestingEntry,
+    ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig, RateHistoryEntry,
+    ReferralStats, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
@@ -764,6 +765,18 @@ pub fn get_activity_log(env: &Env) -> Vec<DayBucket> {
         .instance()
         .get(&symbol_short!("act_log"))
         .unwrap_or(Vec::new(env))
+}
+
+// ── Issue #213: dynamic unstake fee config ───────────────────────────────────
+
+pub fn get_dynamic_fee_config(env: &Env) -> Option<DynamicFeeConfig> {
+    env.storage().instance().get(&symbol_short!("dyn_fee"))
+}
+
+pub fn set_dynamic_fee_config(env: &Env, config: &DynamicFeeConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("dyn_fee"), config);
 }
 
 pub fn set_activity_log(env: &Env, log: &Vec<DayBucket>) {
