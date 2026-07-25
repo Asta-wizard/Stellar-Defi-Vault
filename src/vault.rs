@@ -10,8 +10,8 @@ use crate::{
         ContractMetadata, DataKey, DayBucket, EpochState, InterfaceId, LeaderboardEntry, PauseInfo,
         PauseReason, PoolConfig, PoolHealthReport, PoolStats, RateHistoryEntry,
         ReferralLeaderboardEntry, RoundingPolicy, StakeAction, StakeHistoryEntry, StakePosition,
-        StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition, UnstakeCheckResult,
+        UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -2442,7 +2442,7 @@ impl VaultContract {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let total_shares = balance::get_total_shares(env);
         let total_deposited = balance::get_total_deposited(env);
@@ -2609,7 +2609,7 @@ impl VaultContract {
             balance::set_referral_stats(env, &referrer, &stats);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let lock_period: u32 = env
             .storage()
@@ -3363,7 +3363,7 @@ impl VaultContract {
         let current_day = env.ledger().sequence() / LEDGERS_PER_DAY;
         let mut log = balance::get_activity_log(env);
 
-        if log.len() > 0 {
+        if !log.is_empty() {
             let last_idx = log.len() - 1;
             let mut last = log.get(last_idx).unwrap();
             if last.day_index == current_day {
@@ -3456,7 +3456,7 @@ impl VaultContract {
             return Err(VaultError::InsufficientRewardPool);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let vesting_period: u32 = env
             .storage()
@@ -3560,7 +3560,7 @@ impl VaultContract {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let mut total_shares = balance::get_total_shares(env);
         let mut total_deposited = balance::get_total_deposited(env);
