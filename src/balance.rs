@@ -1,5 +1,6 @@
 use crate::storage::{
-    ChangelogEntry, ClaimWindow, DataKey, DayBucket, RateHistoryEntry, ReferralStats, VestingEntry,
+    ChangelogEntry, ClaimWindow, DataKey, DayBucket, GovernanceProposal, RateHistoryEntry,
+    ReferralStats, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
@@ -853,4 +854,52 @@ pub fn set_yield_deployed(env: &Env, amount: i128) {
     env.storage()
         .instance()
         .set(&symbol_short!("yld_dep"), &amount);
+}
+
+// ── Issue #216: governance voting ─────────────────────────────────────────────
+
+pub fn get_next_proposal_id(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("prop_nid"))
+        .unwrap_or(0)
+}
+
+pub fn set_next_proposal_id(env: &Env, id: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("prop_nid"), &id);
+}
+
+pub fn get_open_proposal_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("prop_opn"))
+        .unwrap_or(0)
+}
+
+pub fn set_open_proposal_count(env: &Env, count: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("prop_opn"), &count);
+}
+
+pub fn get_proposal(env: &Env, id: u32) -> Option<GovernanceProposal> {
+    let key = (Symbol::new(env, "prop"), id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_proposal(env: &Env, id: u32, proposal: &GovernanceProposal) {
+    let key = (Symbol::new(env, "prop"), id);
+    env.storage().persistent().set(&key, proposal);
+}
+
+pub fn has_voted(env: &Env, proposal_id: u32, voter: &Address) -> bool {
+    let key = (Symbol::new(env, "voted"), proposal_id, voter.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_voted(env: &Env, proposal_id: u32, voter: &Address) {
+    let key = (Symbol::new(env, "voted"), proposal_id, voter.clone());
+    env.storage().persistent().set(&key, &true);
 }

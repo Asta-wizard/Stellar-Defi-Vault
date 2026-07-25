@@ -7,11 +7,11 @@ use crate::{
     nft::StakeReceiptNFTClient,
     storage::{
         BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses,
-        ContractMetadata, DataKey, DayBucket, EpochState, InterfaceId, LeaderboardEntry, PauseInfo,
-        PauseReason, PoolConfig, PoolHealthReport, PoolStats, RateHistoryEntry,
-        ReferralLeaderboardEntry, RoundingPolicy, StakeAction, StakeHistoryEntry, StakePosition,
-        StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition, UnstakeCheckResult,
-        UserStats, UserSummary, VestingEntry,
+        ContractMetadata, DataKey, DayBucket, EpochState, GovernanceProposal, InterfaceId,
+        LeaderboardEntry, PauseInfo, PauseReason, PoolConfig, PoolHealthReport, PoolStats,
+        ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, RoundingPolicy, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, TaxReport,
+        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -36,6 +36,8 @@ pub(crate) const REFILL_ALERT_DAYS: u32 = 30;
 /// Fraction of total_staked reserved as a liquidity buffer, never deployed to
 /// yield (issue #215). 20% in basis points.
 pub(crate) const YIELD_BUFFER_BPS: u32 = 2_000;
+/// Maximum number of simultaneously open governance proposals (issue #216).
+pub(crate) const MAX_OPEN_PROPOSALS: u32 = 10;
 
 #[contract]
 pub struct VaultContract;
@@ -5090,6 +5092,178 @@ impl VaultContract {
         let admin_addr = admin::get_admin(&env)?;
         events::yield_withdrawn(&env, &admin_addr, returned, env.ledger().sequence());
         Ok(())
+    }
+
+    // ── Issue #216: governance voting ──────────────────────────────────────────
+
+    /// Any staker may propose a change to a pool parameter.
+    ///
+    /// Reverts with `PositionNotFound` if the caller has no active position,
+    /// or `MaxPositionsReached` if 10 proposals are already open.
+    pub fn create_proposal(
+        env: Env,
+        user: Address,
+        parameter: ProposableParam,
+        new_value: i128,
+        duration_ledgers: u32,
+    ) -> Result<u32, VaultError> {
+        user.require_auth();
+        if balance::get_shares(&env, &user) == 0 {
+            return Err(VaultError::PositionNotFound);
+        }
+        if balance::get_open_proposal_count(&env) >= MAX_OPEN_PROPOSALS {
+            return Err(VaultError::MaxPositionsReached);
+        }
+
+        let id = balance::get_next_proposal_id(&env);
+        let ends_at = env.ledger().sequence().saturating_add(duration_ledgers);
+        let proposal = GovernanceProposal {
+            id,
+            parameter,
+            new_value,
+            votes_for: 0,
+            votes_against: 0,
+            ends_at,
+            enacted: false,
+        };
+        balance::set_proposal(&env, id, &proposal);
+        balance::set_next_proposal_id(&env, id + 1);
+        balance::set_open_proposal_count(&env, balance::get_open_proposal_count(&env) + 1);
+        events::proposal_created(&env, &user, id, ends_at);
+        Ok(id)
+    }
+
+    /// Vote on an open proposal, weighted by the caller's staked token amount
+    /// at the time of the call. Voting power is not adjusted retroactively if
+    /// the caller stakes more (or less) after voting.
+    ///
+    /// Reverts with `PositionNotFound` if the proposal does not exist or the
+    /// caller has no active position, `TooManyStakers` if the caller already
+    /// voted on this proposal, or `BatchKycTooLarge` if voting has ended or
+    /// the proposal was already enacted.
+    pub fn vote(
+        env: Env,
+        user: Address,
+        proposal_id: u32,
+        support: bool,
+    ) -> Result<(), VaultError> {
+        user.require_auth();
+        let mut proposal =
+            balance::get_proposal(&env, proposal_id).ok_or(VaultError::PositionNotFound)?;
+
+        let shares = balance::get_shares(&env, &user);
+        if shares == 0 {
+            return Err(VaultError::PositionNotFound);
+        }
+        if balance::has_voted(&env, proposal_id, &user) {
+            return Err(VaultError::TooManyStakers);
+        }
+        if proposal.enacted || env.ledger().sequence() > proposal.ends_at {
+            return Err(VaultError::BatchKycTooLarge);
+        }
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let weight = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        if support {
+            proposal.votes_for = proposal
+                .votes_for
+                .checked_add(weight)
+                .ok_or(VaultError::ArithmeticError)?;
+        } else {
+            proposal.votes_against = proposal
+                .votes_against
+                .checked_add(weight)
+                .ok_or(VaultError::ArithmeticError)?;
+        }
+        balance::set_proposal(&env, proposal_id, &proposal);
+        balance::set_voted(&env, proposal_id, &user);
+        events::proposal_voted(
+            &env,
+            &user,
+            proposal_id,
+            support,
+            weight,
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
+    /// Enact a proposal after its voting period ends. Callable by anyone
+    /// (permissionless keeper call) — the change only applies if
+    /// `votes_for > votes_against`; otherwise the proposal is still marked
+    /// enacted (so it cannot be retried) but no parameter changes.
+    ///
+    /// Reverts with `PositionNotFound` if the proposal does not exist,
+    /// `AlreadyInitialized` if it was already enacted, or `EpochNotFinalized`
+    /// if the voting period has not ended yet.
+    pub fn enact_proposal(env: Env, proposal_id: u32) -> Result<(), VaultError> {
+        let mut proposal =
+            balance::get_proposal(&env, proposal_id).ok_or(VaultError::PositionNotFound)?;
+        if proposal.enacted {
+            return Err(VaultError::AlreadyInitialized);
+        }
+        if env.ledger().sequence() <= proposal.ends_at {
+            return Err(VaultError::EpochNotFinalized);
+        }
+
+        proposal.enacted = true;
+        if proposal.votes_for > proposal.votes_against {
+            match proposal.parameter {
+                ProposableParam::RewardRate => {
+                    let rate = u32::try_from(proposal.new_value)
+                        .map_err(|_| VaultError::ArithmeticError)?;
+                    Self::validate_rate_bps(rate)?;
+                    balance::set_reward_rate_bps(&env, rate);
+                }
+                ProposableParam::UnstakeFee => {
+                    let bps = u32::try_from(proposal.new_value)
+                        .map_err(|_| VaultError::ArithmeticError)?;
+                    if bps > MAX_UNSTAKE_FEE_BPS {
+                        return Err(VaultError::UnstakeFeeTooHigh);
+                    }
+                    balance::set_unstake_fee_bps(&env, bps);
+                }
+                ProposableParam::PoolCap => {
+                    if proposal.new_value < 0 {
+                        return Err(VaultError::ZeroAmount);
+                    }
+                    balance::set_pool_cap(&env, proposal.new_value);
+                }
+                ProposableParam::MinStake => {
+                    if proposal.new_value < 0 {
+                        return Err(VaultError::ZeroAmount);
+                    }
+                    balance::set_min_stake(&env, proposal.new_value);
+                }
+            }
+        }
+
+        let total_votes = proposal
+            .votes_for
+            .checked_add(proposal.votes_against)
+            .ok_or(VaultError::ArithmeticError)?;
+        balance::set_proposal(&env, proposal_id, &proposal);
+        let open_count = balance::get_open_proposal_count(&env);
+        if open_count > 0 {
+            balance::set_open_proposal_count(&env, open_count - 1);
+        }
+        events::proposal_enacted(
+            &env,
+            proposal_id,
+            proposal.parameter,
+            proposal.new_value,
+            total_votes,
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
+    /// Read-only query for a governance proposal by id.
+    pub fn get_proposal(env: Env, id: u32) -> Option<GovernanceProposal> {
+        balance::get_proposal(&env, id)
     }
 
     // ── Reward refill alert helper ─────────────────────────────────────────────

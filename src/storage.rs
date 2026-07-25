@@ -473,3 +473,32 @@ pub enum RoundingPolicy {
     Ceiling,
     Nearest,
 }
+
+// ── Issue #216: governance voting ────────────────────────────────────────────
+
+/// Pool parameter a governance proposal can change (issue #216).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ProposableParam {
+    RewardRate,
+    UnstakeFee,
+    PoolCap,
+    MinStake,
+}
+
+/// A governance proposal to change a pool parameter, created via
+/// `create_proposal` and resolved via `enact_proposal` (issue #216).
+///
+/// Voting power is the staker's token amount at the time of the `vote` call,
+/// not adjusted retroactively if the staker's position changes afterward.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct GovernanceProposal {
+    pub id: u32,
+    pub parameter: ProposableParam,
+    pub new_value: i128,
+    pub votes_for: i128,
+    pub votes_against: i128,
+    pub ends_at: u32,
+    pub enacted: bool,
+}

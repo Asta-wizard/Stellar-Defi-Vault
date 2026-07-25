@@ -464,3 +464,42 @@ pub fn yield_withdrawn(env: &Env, admin: &Address, amount_returned: i128, ledger
     let topics = (symbol_short!("yld_wdrw"), admin);
     env.events().publish(topics, (amount_returned, ledger));
 }
+
+// ── Issue #216: governance voting ─────────────────────────────────────────────
+
+/// Emitted when a staker creates a new governance proposal.
+pub fn proposal_created(env: &Env, proposer: &Address, proposal_id: u32, ends_at: u32) {
+    let topics = (symbol_short!("prop_new"), proposer);
+    env.events().publish(topics, (proposal_id, ends_at));
+}
+
+/// Emitted when a staker votes on a governance proposal.
+pub fn proposal_voted(
+    env: &Env,
+    voter: &Address,
+    proposal_id: u32,
+    support: bool,
+    weight: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("prop_vote"), voter);
+    env.events()
+        .publish(topics, (proposal_id, support, weight, ledger));
+}
+
+/// Emitted when a governance proposal is enacted (whether or not it passed).
+///
+/// Topics: `("prop_enct",)`.
+/// Data: `(id, parameter, new_value, total_votes, ledger)`.
+pub fn proposal_enacted(
+    env: &Env,
+    id: u32,
+    parameter: crate::storage::ProposableParam,
+    new_value: i128,
+    total_votes: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("prop_enct"),);
+    env.events()
+        .publish(topics, (id, parameter, new_value, total_votes, ledger));
+}

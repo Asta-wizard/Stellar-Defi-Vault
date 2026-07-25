@@ -11,7 +11,7 @@ use soroban_sdk::{
 use crate::{
     errors::VaultError,
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
-    storage::{ChangelogEntry, PauseReason, RoundingPolicy, UnstakeCheckResult},
+    storage::{ChangelogEntry, PauseReason, ProposableParam, RoundingPolicy, UnstakeCheckResult},
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
         CONTRACT_VERSION, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
@@ -4006,4 +4006,177 @@ fn test_withdraw_from_yield_exceeds_deployed_rejected() {
 
     let result = f.vault.try_withdraw_from_yield(&f.admin, &500_001);
     assert_eq!(result, Err(Ok(VaultError::InsufficientRewardPool)));
+}
+
+// ── Issue #216: governance voting ────────────────────────────────────────────
+
+#[test]
+fn test_create_proposal_requires_active_position() {
+    let f = VaultFixture::new();
+    let result =
+        f.vault
+            .try_create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &1000_u32);
+    assert_eq!(result, Err(Ok(VaultError::PositionNotFound)));
+}
+
+#[test]
+fn test_proposal_passes_with_majority() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &700_000);
+    f.vault.stake(&f.bob, &300_000);
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.vote(&f.alice, &id, &true);
+    f.vault.vote(&f.bob, &id, &false);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 700_000);
+    assert_eq!(proposal.votes_against, 300_000);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert!(proposal.enacted);
+    assert_eq!(f.vault.get_reward_rate_bps(), 500);
+}
+
+#[test]
+fn test_proposal_fails_without_majority() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+    let original_rate = f.vault.get_reward_rate_bps();
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.vote(&f.alice, &id, &true);
+    f.vault.vote(&f.bob, &id, &false);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert!(proposal.enacted);
+    // Parameter is unchanged since votes_against > votes_for.
+    assert_eq!(f.vault.get_reward_rate_bps(), original_rate);
+}
+
+#[test]
+fn test_double_vote_rejected() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    f.vault.vote(&f.alice, &id, &true);
+    let result = f.vault.try_vote(&f.alice, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::TooManyStakers)));
+}
+
+#[test]
+fn test_non_staker_cannot_vote() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    let result = f.vault.try_vote(&f.bob, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::PositionNotFound)));
+}
+
+#[test]
+fn test_vote_after_deadline_rejected() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    let result = f.vault.try_vote(&f.alice, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::BatchKycTooLarge)));
+}
+
+#[test]
+fn test_enact_before_deadline_rejected() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    let result = f.vault.try_enact_proposal(&id);
+    assert_eq!(result, Err(Ok(VaultError::EpochNotFinalized)));
+}
+
+#[test]
+fn test_double_enact_rejected() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+    let result = f.vault.try_enact_proposal(&id);
+    assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
+}
+
+#[test]
+fn test_max_open_proposals_enforced() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+
+    for _ in 0..10 {
+        f.vault
+            .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &1000_u32);
+    }
+
+    let result =
+        f.vault
+            .try_create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &1000_u32);
+    assert_eq!(result, Err(Ok(VaultError::MaxPositionsReached)));
+}
+
+#[test]
+fn test_enacting_proposal_frees_open_slot() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &500_000);
+
+    let mut last_id = 0;
+    for _ in 0..10 {
+        last_id = f
+            .vault
+            .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &100_u32);
+    }
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&last_id);
+
+    // A slot freed up, so a new proposal can be created.
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::MinStake, &1_i128, &1000_u32);
+    assert!(f.vault.get_proposal(&id).is_some());
+}
+
+#[test]
+fn test_get_proposal_returns_none_for_unknown_id() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_proposal(&999), None);
 }
