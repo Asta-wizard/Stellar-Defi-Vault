@@ -227,6 +227,34 @@ pub struct ClaimWindow {
     pub window_started_at: u32,
 }
 
+/// Dynamic unstake fee model configured via `set_dynamic_fee_config` (issue #213).
+///
+/// Below `utilization_threshold_bps` pool utilization, the unstake fee is
+/// `base_fee_bps`. Above it, the fee interpolates linearly up to
+/// `max_fee_bps` at 100% utilization. While a config is set, `unstake` uses
+/// this dynamic fee instead of the static fee from `set_unstake_fee_bps`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynamicFeeConfig {
+    pub base_fee_bps: u32,
+    pub max_fee_bps: u32,
+    pub utilization_threshold_bps: u32,
+}
+
+/// Composite staker reputation score returned by `get_reputation_score` (issue #214).
+///
+/// Each sub-score is bounded to 2500 basis points; `total_score` is the sum,
+/// bounded to 10 000 (100%). All zero for an address with no active position.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReputationScore {
+    pub duration_score: u32,
+    pub consistency_score: u32,
+    pub size_score: u32,
+    pub streak_score: u32,
+    pub total_score: u32,
+}
+
 /// Single entry in the on-chain changelog exposed by `get_changelog`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]

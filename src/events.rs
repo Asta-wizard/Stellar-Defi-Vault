@@ -378,6 +378,8 @@ pub fn yield_source_removed(env: &Env, admin: &Address, source: &Address) {
 // ── Issue #157: pool name events ──────────────────────────────────────────────
 
 /// Emitted when the admin sets or updates the pool name via `set_pool_name`.
+// `set_pool_name` itself is not currently wired up; kept for a future feature.
+#[allow(dead_code)]
 pub fn pool_name_updated(env: &Env, admin: &Address, name: &soroban_sdk::String) {
     let topics = (symbol_short!("nm_upd"), admin);
     env.events()
@@ -414,7 +416,8 @@ pub fn paused_with_reason(
     ledger: u32,
 ) {
     let topics = (symbol_short!("paused"), admin);
-    env.events().publish(topics, (reason.clone(), message.clone(), ledger));
+    env.events()
+        .publish(topics, (*reason, message.clone(), ledger));
 }
 
 // ── Issue #218: pool-to-pool migration ──────────────────────────────────────
@@ -438,8 +441,30 @@ pub fn migrated(
 /// Emitted when the migration target pool is set.
 pub fn migration_target_set(env: &Env, admin: &Address, target_pool: &Address, ledger: u32) {
     let topics = (symbol_short!("mig_tgt"), admin);
-    env.events()
-        .publish(topics, (target_pool.clone(), ledger));
+    env.events().publish(topics, (target_pool.clone(), ledger));
+}
+
+/// Emitted when the admin sets or updates the dynamic unstake fee config.
+///
+/// Topics: `("dyn_fee_u", admin)`.
+/// Data: `(base_fee_bps, max_fee_bps, utilization_threshold_bps, ledger)`.
+pub fn dynamic_fee_config_updated(
+    env: &Env,
+    admin: &Address,
+    base_fee_bps: u32,
+    max_fee_bps: u32,
+    utilization_threshold_bps: u32,
+) {
+    let topics = (symbol_short!("dyn_fee_u"), admin);
+    env.events().publish(
+        topics,
+        (
+            base_fee_bps,
+            max_fee_bps,
+            utilization_threshold_bps,
+            env.ledger().sequence(),
+        ),
+    );
 }
 
 // ── Issue #182: webhook URL config ───────────────────────────────────────────

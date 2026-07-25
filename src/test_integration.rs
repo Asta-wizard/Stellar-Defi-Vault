@@ -733,7 +733,10 @@ fn test_paused_event_includes_ledger() {
     let vault = VaultContractClient::new(&env, &vault_id);
     vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
 
-    vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&env, "test"));
+    vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&env, "test"),
+    );
 
     let events = env.events().all();
     let matched: std::vec::Vec<_> = events
@@ -848,7 +851,10 @@ fn test_slash_works_while_paused() {
     vault.stake(&alice, &100_000);
 
     // pause the contract
-    vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&env, "test"));
+    vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&env, "test"),
+    );
 
     // should still be able to slash
     let slashed = vault.slash(&admin, &alice, &30_000);

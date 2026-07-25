@@ -313,7 +313,10 @@ fn test_preview_redeem_matches_actual_withdraw() {
 #[test]
 fn test_pause_blocks_deposit() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let result = f.vault.try_deposit(&f.alice, &100_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -323,7 +326,10 @@ fn test_pause_blocks_deposit() {
 fn test_pause_blocks_withdraw() {
     let f = VaultFixture::new();
     f.vault.deposit(&f.alice, &100_000);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let result = f.vault.try_withdraw(&f.alice, &100_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -332,7 +338,10 @@ fn test_pause_blocks_withdraw() {
 #[test]
 fn test_unpause_restores_operations() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     f.vault.unpause();
 
     let shares = f.vault.deposit(&f.alice, &100_000);
@@ -348,7 +357,10 @@ fn test_is_paused_defaults_to_false() {
 #[test]
 fn test_is_paused_returns_true_after_pause() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert!(f.vault.is_paused());
 }
 
@@ -359,7 +371,10 @@ fn test_transfer_admin() {
     let f = VaultFixture::new();
     f.vault.transfer_admin(&f.bob);
     // Bob is now admin — he should be able to pause
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 }
 
 #[test]
@@ -417,7 +432,10 @@ fn test_add_yield_requires_admin_auth() {
 fn test_add_yield_paused_blocks() {
     let f = VaultFixture::new();
     f.token_admin.mint(&f.admin, &50_000);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let result = f.vault.try_add_yield(&f.admin, &50_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -591,7 +609,10 @@ fn test_withdraw_emits_event() {
 fn test_pause_emits_event() {
     let f = VaultFixture::new();
 
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let events = f.env.events().all();
     let paused_events: std::vec::Vec<_> = events
@@ -605,7 +626,10 @@ fn test_pause_emits_event() {
 #[test]
 fn test_unpause_emits_event() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     f.vault.unpause();
 
@@ -719,7 +743,10 @@ fn test_transfer_admin_requires_admin_auth() {
 #[test]
 fn test_pause_requires_admin_auth() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(f.env.auths()[0].0, f.admin);
 }
 
@@ -870,6 +897,107 @@ fn test_unstake_fee_applies_after_lock_penalty() {
     assert_eq!(amount_back, 855_000);
     assert_eq!(f.token.balance(&f.alice), token_before + 855_000);
     assert_eq!(f.vault.get_reward_pool_balance(), 45_000);
+}
+
+// ── dynamic unstake fee (Issue #213) ─────────────────────────────────────────
+
+#[test]
+fn test_set_dynamic_fee_config_requires_admin_auth() {
+    let f = VaultFixture::new();
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+}
+
+#[test]
+fn test_set_dynamic_fee_config_base_above_max_rejected() {
+    let f = VaultFixture::new();
+    let result = f
+        .vault
+        .try_set_dynamic_fee_config(&f.admin, &1000, &100, &5000);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}
+
+#[test]
+fn test_set_dynamic_fee_config_threshold_above_100_percent_rejected() {
+    let f = VaultFixture::new();
+    let result = f
+        .vault
+        .try_set_dynamic_fee_config(&f.admin, &100, &1000, &10_001);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}
+
+#[test]
+fn test_pool_utilization_bps_tracks_cap_ratio() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 0);
+
+    f.vault.deposit(&f.alice, &400_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 4000); // 40%
+}
+
+#[test]
+fn test_pool_utilization_bps_zero_with_no_cap() {
+    let f = VaultFixture::new();
+    f.vault.deposit(&f.alice, &400_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 0);
+}
+
+#[test]
+fn test_dynamic_fee_below_threshold_returns_base_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000); // base 1%, max 10%, threshold 50%
+    f.vault.deposit(&f.alice, &400_000); // 40% utilization, below the 50% threshold
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 100);
+}
+
+#[test]
+fn test_dynamic_fee_at_max_utilization_returns_max_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &1_000_000); // 100% utilization
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 1000);
+}
+
+#[test]
+fn test_dynamic_fee_midpoint_interpolates() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &750_000); // 75% utilization: halfway between 50% and 100%
+
+    // Halfway between base (100) and max (1000) is 550.
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 550);
+}
+
+#[test]
+fn test_dynamic_fee_no_pool_cap_returns_base_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &1_000_000); // no cap set, so utilization is always 0
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 100);
+}
+
+#[test]
+fn test_unstake_uses_dynamic_fee_instead_of_static_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_unstake_fee_bps(&f.admin, &500); // static 5%, should be ignored once dynamic is set
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000); // dynamic 1% below threshold
+    f.vault.deposit(&f.alice, &400_000); // 40% utilization, below threshold -> 1% fee
+
+    let token_before = f.token.balance(&f.alice);
+    let amount_back = f.vault.withdraw(&f.alice, &200_000);
+
+    // 1% of 200_000 = 2_000 fee -> 198_000 returned, not the static 5% (190_000).
+    assert_eq!(amount_back, 198_000);
+    assert_eq!(f.token.balance(&f.alice), token_before + 198_000);
+    assert_eq!(f.vault.get_reward_pool_balance(), 2_000);
 }
 
 // ── governance vote weight snapshots (Issue #31) ─────────────────────────────
@@ -1404,7 +1532,10 @@ fn test_admin_action_count_increments() {
         "Count should increment after each admin action"
     );
 
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(f.vault.get_admin_action_count(), before + 2);
 
     f.vault.unpause();
@@ -1427,7 +1558,10 @@ fn test_admin_action_set_reward_rate_emits_audit_event() {
 #[test]
 fn test_admin_action_pause_emits_audit_event() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let events = f.env.events().all();
     let audit_events: std::vec::Vec<_> = events
@@ -1465,7 +1599,10 @@ fn test_admin_action_count_increments_across_all_admin_fns() {
     expected += 1;
     assert_eq!(f.vault.get_admin_action_count(), expected);
 
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     expected += 1;
     assert_eq!(f.vault.get_admin_action_count(), expected);
 
@@ -2135,7 +2272,10 @@ fn test_get_pool_config_returns_all_fields() {
 #[test]
 fn test_get_pool_config_reflects_paused_state() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let config = f.vault.get_pool_config();
     assert!(config.paused);
@@ -2484,7 +2624,10 @@ fn test_can_unstake_insufficient_amount_too_much() {
 fn test_can_unstake_pool_paused() {
     let f = VaultFixture::new();
     f.vault.stake(&f.alice, &100_000);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(
         f.vault.can_unstake(&f.alice, &100_000),
         UnstakeCheckResult::PoolPaused
@@ -2703,6 +2846,156 @@ fn test_streak_too_many_active_users_rejected() {
     assert_eq!(result, Err(Ok(VaultError::TooManyActiveUsers)));
 }
 
+// ── Issue #214: staker reputation score ──────────────────────────────────────
+
+#[test]
+fn test_reputation_score_brand_new_staker_is_zero() {
+    let f = VaultFixture::new();
+    let stranger = Address::generate(&f.env);
+
+    let score = f.vault.get_reputation_score(&stranger);
+
+    assert_eq!(score.duration_score, 0);
+    assert_eq!(score.consistency_score, 0);
+    assert_eq!(score.size_score, 0);
+    assert_eq!(score.streak_score, 0);
+    assert_eq!(score.total_score, 0);
+}
+
+#[test]
+fn test_reputation_score_duration_scales_up_to_one_year_cap() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Halfway through the first year: duration_score truncates to 0 (integer
+    // division of age / STELLAR_LEDGERS_PER_YEAR is 0 until a full year passes).
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR / 2);
+    let mid_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(mid_score.duration_score, 0);
+
+    // A full year (and beyond) caps duration_score at its maximum. The second
+    // check stays within the fixture's max_entry_ttl (10_000_000 ledgers) -
+    // going further would trip the test environment's synthetic "archived
+    // entry" panic, which is a testutils-only artifact, not contract behavior.
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+    let year_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(year_score.duration_score, 2500);
+
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR + LEDGERS_PER_DAY);
+    let later_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(later_score.duration_score, 2500); // still capped, not multiplied
+}
+
+#[test]
+fn test_reputation_score_consistency_decreases_per_claim() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    // Max allowed rate so a claim is non-zero after just one day, keeping
+    // ledger advances well under the fixture's max_entry_ttl.
+    f.vault.set_reward_rate_bps(&50_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // No claims yet: consistency starts at the maximum.
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2500);
+
+    set_ledger(&f.env, 1 + LEDGERS_PER_DAY);
+    f.vault.claim(&f.alice);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2400); // -100 for the first claim
+
+    set_ledger(&f.env, 1 + LEDGERS_PER_DAY * 2);
+    f.vault.claim(&f.alice);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2300); // -100 for the second claim
+}
+
+#[test]
+fn test_reputation_score_consistency_floors_at_zero() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.set_reward_rate_bps(&50_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    for i in 0..30 {
+        set_ledger(&f.env, 1 + LEDGERS_PER_DAY * (i + 1));
+        f.vault.claim(&f.alice);
+    }
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 0); // 30 claims * 100 saturates at 0, not underflow
+}
+
+#[test]
+fn test_reputation_score_size_reflects_percentage_of_pool() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &750_000);
+    f.vault.stake(&f.bob, &250_000);
+
+    // Alice holds 75% of the pool (7500 bps) -> size_score = 7500 / 4 = 1875.
+    let alice_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(alice_score.size_score, 1875);
+
+    // Bob holds 25% of the pool (2500 bps) -> size_score = 2500 / 4 = 625.
+    let bob_score = f.vault.get_reputation_score(&f.bob);
+    assert_eq!(bob_score.size_score, 625);
+}
+
+#[test]
+fn test_reputation_score_size_caps_at_full_pool() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000); // sole staker: 100% of the pool
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.size_score, 2500);
+}
+
+#[test]
+fn test_reputation_score_streak_scales_and_caps_at_four_waves() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    let users = soroban_sdk::Vec::from_array(&f.env, [f.alice.clone()]);
+
+    f.vault.record_wave_activity(&f.admin, &1, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 625); // 1 wave * 625
+
+    f.vault.record_wave_activity(&f.admin, &2, &users);
+    f.vault.record_wave_activity(&f.admin, &3, &users);
+    f.vault.record_wave_activity(&f.admin, &4, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 2500); // 4 waves * 625, at the cap
+
+    f.vault.record_wave_activity(&f.admin, &5, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 2500); // 5th consecutive wave: still capped
+}
+
+#[test]
+fn test_reputation_score_total_is_sum_of_components() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000); // sole staker
+
+    let users = soroban_sdk::Vec::from_array(&f.env, [f.alice.clone()]);
+    f.vault.record_wave_activity(&f.admin, &1, &users); // streak_score = 625
+
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR); // duration_score = 2500
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    // duration 2500 + consistency 2500 (no claims) + size 2500 (100% of pool) + streak 625
+    assert_eq!(score.total_score, 8125);
+    assert_eq!(
+        score.total_score,
+        score.duration_score + score.consistency_score + score.size_score + score.streak_score
+    );
+}
+
 // ── Issue #70: zero address validation in initialize ─────────────────────────
 
 #[test]
@@ -2777,14 +3070,20 @@ fn test_last_updated_ledger_after_claim() {
 fn test_last_updated_ledger_after_pause() {
     let f = VaultFixture::new();
     set_ledger(&f.env, 400);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(f.vault.get_last_updated_ledger(), 400);
 }
 
 #[test]
 fn test_last_updated_ledger_after_unpause() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     set_ledger(&f.env, 500);
     f.vault.unpause();
     assert_eq!(f.vault.get_last_updated_ledger(), 500);
@@ -3356,7 +3655,10 @@ fn test_changelog_records_rate_change() {
 #[test]
 fn test_changelog_records_pause_and_unpause() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     f.vault.unpause();
     let log: Vec<ChangelogEntry> = f.vault.get_changelog();
     assert_eq!(log.len(), 2);
@@ -3379,7 +3681,10 @@ fn test_changelog_drops_oldest_when_full() {
     let total = MAX_CHANGELOG_ENTRIES + 1;
     for i in 0..total {
         if i % 2 == 0 {
-            f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+            f.vault.pause(
+                &PauseReason::Other,
+                &soroban_sdk::String::from_str(&f.env, "test"),
+            );
         } else {
             f.vault.unpause();
         }
