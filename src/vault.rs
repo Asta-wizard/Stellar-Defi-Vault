@@ -892,6 +892,64 @@ impl VaultContract {
         Ok(balance::get_pool_cap(&env))
     }
 
+    // ── Issue #213: dynamic unstake fee ────────────────────────────────────────
+
+    /// Admin: configure the dynamic unstake fee model.
+    ///
+    /// Once set, `unstake` charges a fee that scales with pool utilization
+    /// instead of the static fee from `set_unstake_fee_bps`: below
+    /// `utilization_threshold_bps` the fee is `base_fee_bps`; above it, the fee
+    /// interpolates linearly up to `max_fee_bps` at 100% utilization. This
+    /// discourages large exits during high-demand periods and rewards patient
+    /// stakers. If no pool cap is set, utilization is always 0 and the fee is
+    /// always `base_fee_bps`.
+    ///
+    /// Reverts with `InvalidRate` if `base_fee_bps > max_fee_bps` or
+    /// `utilization_threshold_bps` exceeds 10 000 (100%).
+    pub fn set_dynamic_fee_config(
+        env: Env,
+        admin: Address,
+        base_fee_bps: u32,
+        max_fee_bps: u32,
+        utilization_threshold_bps: u32,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if base_fee_bps > max_fee_bps || utilization_threshold_bps > BOOST_BPS_BASE {
+            return Err(VaultError::InvalidRate);
+        }
+        let config = DynamicFeeConfig {
+            base_fee_bps,
+            max_fee_bps,
+            utilization_threshold_bps,
+        };
+        balance::set_dynamic_fee_config(&env, &config);
+        let admin = admin::get_admin(&env)?;
+        events::dynamic_fee_config_updated(
+            &env,
+            &admin,
+            base_fee_bps,
+            max_fee_bps,
+            utilization_threshold_bps,
+        );
+        Ok(())
+    }
+
+    /// Read-only query for pool utilization in basis points.
+    ///
+    /// Returns `total_staked * 10_000 / pool_cap`, or `0` if no pool cap is
+    /// set. No auth required.
+    pub fn get_pool_utilization_bps(env: Env) -> u32 {
+        Self::compute_pool_utilization_bps(&env)
+    }
+
+    /// Read-only query for the current unstake fee under the dynamic fee model.
+    ///
+    /// Returns `0` if no dynamic fee config has been set. No auth required.
+    pub fn get_current_dynamic_fee_bps(env: Env) -> u32 {
+        Self::compute_dynamic_fee_bps(&env)
+    }
+
     /// Admin: set a short contact string (email, Discord handle, URL) that
     /// users can query during emergencies such as pauses or exploits.
     ///
@@ -2733,7 +2791,14 @@ impl VaultContract {
         // Unstake fee: charged on the post-penalty amount returned to the user
         // and routed to the reward pool treasury (not burned). Applied after the
         // lock-up penalty so both can be active simultaneously.
-        let unstake_fee_bps = balance::get_unstake_fee_bps(env);
+        //
+        // Issue #213: when a dynamic fee config is set, it replaces the static
+        // fee from `set_unstake_fee_bps` entirely.
+        let unstake_fee_bps = if balance::get_dynamic_fee_config(env).is_some() {
+            Self::compute_dynamic_fee_bps(env)
+        } else {
+            balance::get_unstake_fee_bps(env)
+        };
         let unstake_fee = if unstake_fee_bps > 0 {
             amount_after_penalty
                 .checked_mul(unstake_fee_bps as i128)
@@ -3583,6 +3648,8 @@ impl VaultContract {
 
         let paid = balance::get_total_rewards_paid(env);
         balance::set_total_rewards_paid(env, paid + reward);
+        // Issue #214: track lifetime claim count for the reputation consistency score.
+        balance::increment_user_claim_count(env, staker);
 
         // Issue #217: append to per-user claim history for tax reporting
         let mut claim_history = balance::get_claim_history(env, staker);
@@ -4784,6 +4851,44 @@ impl VaultContract {
         })
     }
 
+    // ── Issue #214: staker reputation score ───────────────────────────────────
+
+    /// Read-only composite reputation score combining stake duration, claim
+    /// consistency, position size, and streak participation into a single
+    /// 0-10000 bps score. Useful for tiered access, airdrops, and governance
+    /// weight. No auth required, no state changes.
+    ///
+    /// Returns all-zero for an address with no active position.
+    pub fn get_reputation_score(env: Env, user: Address) -> ReputationScore {
+        if balance::get_shares(&env, &user) == 0 {
+            return ReputationScore {
+                duration_score: 0,
+                consistency_score: 0,
+                size_score: 0,
+                streak_score: 0,
+                total_score: 0,
+            };
+        }
+
+        let duration_score = Self::compute_duration_score(&env, &user);
+        let consistency_score = Self::compute_consistency_score(&env, &user);
+        let size_score = Self::compute_size_score(env.clone(), user.clone());
+        let streak_score = Self::compute_streak_score(&env, &user);
+        let total_score = duration_score
+            .saturating_add(consistency_score)
+            .saturating_add(size_score)
+            .saturating_add(streak_score)
+            .min(BOOST_BPS_BASE);
+
+        ReputationScore {
+            duration_score,
+            consistency_score,
+            size_score,
+            streak_score,
+            total_score,
+        }
+    }
+
     // ── Referral system ───────────────────────────────────────────────────────
 
     /// Stake `amount` tokens on behalf of `staker`, crediting `referrer` with
@@ -5647,5 +5752,79 @@ impl VaultContract {
             RoundingPolicy::Ceiling => (numerator + denominator - 1) / denominator,
             RoundingPolicy::Nearest => (numerator + denominator / 2) / denominator,
         }
+    }
+
+    // ── Issue #213: dynamic unstake fee helpers ───────────────────────────────
+
+    fn compute_pool_utilization_bps(env: &Env) -> u32 {
+        let cap = balance::get_pool_cap(env);
+        if cap <= 0 {
+            return 0;
+        }
+        let total_staked = balance::get_total_deposited(env);
+        total_staked
+            .checked_mul(BOOST_BPS_BASE as i128)
+            .and_then(|v| v.checked_div(cap))
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0)
+    }
+
+    fn compute_dynamic_fee_bps(env: &Env) -> u32 {
+        let config = match balance::get_dynamic_fee_config(env) {
+            Some(c) => c,
+            None => return 0,
+        };
+        let utilization = Self::compute_pool_utilization_bps(env).min(BOOST_BPS_BASE);
+        if utilization <= config.utilization_threshold_bps {
+            return config.base_fee_bps;
+        }
+        let progress = (utilization - config.utilization_threshold_bps) as u64;
+        let range = (BOOST_BPS_BASE - config.utilization_threshold_bps) as u64;
+        let fee_span = (config.max_fee_bps - config.base_fee_bps) as u64;
+        let extra = fee_span.saturating_mul(progress) / range;
+        config.base_fee_bps + extra as u32
+    }
+
+    // ── Issue #214: staker reputation score helpers ───────────────────────────
+
+    /// `min(position_age_ledgers / STELLAR_LEDGERS_PER_YEAR, 1) * 2500`.
+    /// Returns 0 if the user has never staked.
+    fn compute_duration_score(env: &Env, user: &Address) -> u32 {
+        let staked_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        if staked_at == 0 {
+            return 0;
+        }
+        let age = env.ledger().sequence().saturating_sub(staked_at);
+        let years = (age / STELLAR_LEDGERS_PER_YEAR).min(1);
+        years * REPUTATION_SUB_SCORE_MAX
+    }
+
+    /// Starts at the maximum (2500) for a staker who has never claimed and
+    /// decreases by `REPUTATION_CLAIM_DECAY_BPS` per lifetime claim, floored at
+    /// 0 after 25+ claims — rewards patient stakers who let rewards compound
+    /// rather than claiming frequently.
+    fn compute_consistency_score(env: &Env, user: &Address) -> u32 {
+        let claims = balance::get_user_claim_count(env, user);
+        REPUTATION_SUB_SCORE_MAX.saturating_sub(claims.saturating_mul(REPUTATION_CLAIM_DECAY_BPS))
+    }
+
+    /// `percentage_of_pool_bps / 4`, capped at 2500 (100% of the pool caps out
+    /// the size score at its maximum).
+    fn compute_size_score(env: Env, user: Address) -> u32 {
+        let percentage_bps = Self::percentage_of_pool(env, user);
+        let percentage_bps = u32::try_from(percentage_bps).unwrap_or(0);
+        (percentage_bps / 4).min(REPUTATION_SUB_SCORE_MAX)
+    }
+
+    /// `min(current_streak, 4) * 625` (max 2500 at 4+ consecutive waves).
+    fn compute_streak_score(env: &Env, user: &Address) -> u32 {
+        let streak = balance::get_user_streak(env, user)
+            .map(|s| s.current_streak)
+            .unwrap_or(0);
+        streak.min(4) * 625
     }
 }

@@ -918,6 +918,107 @@ fn test_unstake_fee_applies_after_lock_penalty() {
     assert_eq!(f.vault.get_reward_pool_balance(), 45_000);
 }
 
+// ── dynamic unstake fee (Issue #213) ─────────────────────────────────────────
+
+#[test]
+fn test_set_dynamic_fee_config_requires_admin_auth() {
+    let f = VaultFixture::new();
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+}
+
+#[test]
+fn test_set_dynamic_fee_config_base_above_max_rejected() {
+    let f = VaultFixture::new();
+    let result = f
+        .vault
+        .try_set_dynamic_fee_config(&f.admin, &1000, &100, &5000);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}
+
+#[test]
+fn test_set_dynamic_fee_config_threshold_above_100_percent_rejected() {
+    let f = VaultFixture::new();
+    let result = f
+        .vault
+        .try_set_dynamic_fee_config(&f.admin, &100, &1000, &10_001);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}
+
+#[test]
+fn test_pool_utilization_bps_tracks_cap_ratio() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 0);
+
+    f.vault.deposit(&f.alice, &400_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 4000); // 40%
+}
+
+#[test]
+fn test_pool_utilization_bps_zero_with_no_cap() {
+    let f = VaultFixture::new();
+    f.vault.deposit(&f.alice, &400_000);
+    assert_eq!(f.vault.get_pool_utilization_bps(), 0);
+}
+
+#[test]
+fn test_dynamic_fee_below_threshold_returns_base_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000); // base 1%, max 10%, threshold 50%
+    f.vault.deposit(&f.alice, &400_000); // 40% utilization, below the 50% threshold
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 100);
+}
+
+#[test]
+fn test_dynamic_fee_at_max_utilization_returns_max_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &1_000_000); // 100% utilization
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 1000);
+}
+
+#[test]
+fn test_dynamic_fee_midpoint_interpolates() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &750_000); // 75% utilization: halfway between 50% and 100%
+
+    // Halfway between base (100) and max (1000) is 550.
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 550);
+}
+
+#[test]
+fn test_dynamic_fee_no_pool_cap_returns_base_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000);
+    f.vault.deposit(&f.alice, &1_000_000); // no cap set, so utilization is always 0
+
+    assert_eq!(f.vault.get_current_dynamic_fee_bps(), 100);
+}
+
+#[test]
+fn test_unstake_uses_dynamic_fee_instead_of_static_fee() {
+    let f = VaultFixture::new();
+    f.vault.set_pool_cap(&1_000_000);
+    f.vault.set_unstake_fee_bps(&f.admin, &500); // static 5%, should be ignored once dynamic is set
+    f.vault.set_dynamic_fee_config(&f.admin, &100, &1000, &5000); // dynamic 1% below threshold
+    f.vault.deposit(&f.alice, &400_000); // 40% utilization, below threshold -> 1% fee
+
+    let token_before = f.token.balance(&f.alice);
+    let amount_back = f.vault.withdraw(&f.alice, &200_000);
+
+    // 1% of 200_000 = 2_000 fee -> 198_000 returned, not the static 5% (190_000).
+    assert_eq!(amount_back, 198_000);
+    assert_eq!(f.token.balance(&f.alice), token_before + 198_000);
+    assert_eq!(f.vault.get_reward_pool_balance(), 2_000);
+}
+
 // ── governance vote weight snapshots (Issue #31) ─────────────────────────────
 
 #[test]
@@ -2762,6 +2863,156 @@ fn test_streak_too_many_active_users_rejected() {
     }
     let result = f.vault.try_record_wave_activity(&f.admin, &1, &users);
     assert_eq!(result, Err(Ok(VaultError::TooManyActiveUsers)));
+}
+
+// ── Issue #214: staker reputation score ──────────────────────────────────────
+
+#[test]
+fn test_reputation_score_brand_new_staker_is_zero() {
+    let f = VaultFixture::new();
+    let stranger = Address::generate(&f.env);
+
+    let score = f.vault.get_reputation_score(&stranger);
+
+    assert_eq!(score.duration_score, 0);
+    assert_eq!(score.consistency_score, 0);
+    assert_eq!(score.size_score, 0);
+    assert_eq!(score.streak_score, 0);
+    assert_eq!(score.total_score, 0);
+}
+
+#[test]
+fn test_reputation_score_duration_scales_up_to_one_year_cap() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Halfway through the first year: duration_score truncates to 0 (integer
+    // division of age / STELLAR_LEDGERS_PER_YEAR is 0 until a full year passes).
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR / 2);
+    let mid_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(mid_score.duration_score, 0);
+
+    // A full year (and beyond) caps duration_score at its maximum. The second
+    // check stays within the fixture's max_entry_ttl (10_000_000 ledgers) -
+    // going further would trip the test environment's synthetic "archived
+    // entry" panic, which is a testutils-only artifact, not contract behavior.
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+    let year_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(year_score.duration_score, 2500);
+
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR + LEDGERS_PER_DAY);
+    let later_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(later_score.duration_score, 2500); // still capped, not multiplied
+}
+
+#[test]
+fn test_reputation_score_consistency_decreases_per_claim() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    // Max allowed rate so a claim is non-zero after just one day, keeping
+    // ledger advances well under the fixture's max_entry_ttl.
+    f.vault.set_reward_rate_bps(&50_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // No claims yet: consistency starts at the maximum.
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2500);
+
+    set_ledger(&f.env, 1 + LEDGERS_PER_DAY);
+    f.vault.claim(&f.alice);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2400); // -100 for the first claim
+
+    set_ledger(&f.env, 1 + LEDGERS_PER_DAY * 2);
+    f.vault.claim(&f.alice);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2300); // -100 for the second claim
+}
+
+#[test]
+fn test_reputation_score_consistency_floors_at_zero() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.set_reward_rate_bps(&50_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    for i in 0..30 {
+        set_ledger(&f.env, 1 + LEDGERS_PER_DAY * (i + 1));
+        f.vault.claim(&f.alice);
+    }
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 0); // 30 claims * 100 saturates at 0, not underflow
+}
+
+#[test]
+fn test_reputation_score_size_reflects_percentage_of_pool() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &750_000);
+    f.vault.stake(&f.bob, &250_000);
+
+    // Alice holds 75% of the pool (7500 bps) -> size_score = 7500 / 4 = 1875.
+    let alice_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(alice_score.size_score, 1875);
+
+    // Bob holds 25% of the pool (2500 bps) -> size_score = 2500 / 4 = 625.
+    let bob_score = f.vault.get_reputation_score(&f.bob);
+    assert_eq!(bob_score.size_score, 625);
+}
+
+#[test]
+fn test_reputation_score_size_caps_at_full_pool() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000); // sole staker: 100% of the pool
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.size_score, 2500);
+}
+
+#[test]
+fn test_reputation_score_streak_scales_and_caps_at_four_waves() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    let users = soroban_sdk::Vec::from_array(&f.env, [f.alice.clone()]);
+
+    f.vault.record_wave_activity(&f.admin, &1, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 625); // 1 wave * 625
+
+    f.vault.record_wave_activity(&f.admin, &2, &users);
+    f.vault.record_wave_activity(&f.admin, &3, &users);
+    f.vault.record_wave_activity(&f.admin, &4, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 2500); // 4 waves * 625, at the cap
+
+    f.vault.record_wave_activity(&f.admin, &5, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 2500); // 5th consecutive wave: still capped
+}
+
+#[test]
+fn test_reputation_score_total_is_sum_of_components() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000); // sole staker
+
+    let users = soroban_sdk::Vec::from_array(&f.env, [f.alice.clone()]);
+    f.vault.record_wave_activity(&f.admin, &1, &users); // streak_score = 625
+
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR); // duration_score = 2500
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    // duration 2500 + consistency 2500 (no claims) + size 2500 (100% of pool) + streak 625
+    assert_eq!(score.total_score, 8125);
+    assert_eq!(
+        score.total_score,
+        score.duration_score + score.consistency_score + score.size_score + score.streak_score
+    );
 }
 
 // ── Issue #70: zero address validation in initialize ─────────────────────────
