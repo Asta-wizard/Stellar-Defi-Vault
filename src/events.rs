@@ -50,6 +50,60 @@ pub fn rate_changed(env: &Env, old_rate_bps: u32, new_rate_bps: u32) {
     );
 }
 
+/// Issue #206: emitted by `rollback_last_rate_change()`.
+pub fn rate_rolled_back(env: &Env, restored_rate: u32, discarded_rate: u32) {
+    let topics = (symbol_short!("rate_rbk"),);
+    env.events().publish(
+        topics,
+        (restored_rate, discarded_rate, env.ledger().sequence()),
+    );
+}
+
+/// Issue #207: emitted alongside `stake`/`unstake` for cross-chain bridge
+/// relayers, when bridge event emission is enabled.
+pub fn bridge_packet(env: &Env, packet: &crate::storage::BridgePacket) {
+    let topics = (symbol_short!("bridge_pk"), packet.source_address.clone());
+    env.events().publish(
+        topics,
+        (
+            packet.sequence,
+            packet.amount,
+            packet.action.clone(),
+            packet.timestamp_ledger,
+        ),
+    );
+}
+
+/// Issue #209: emitted by `position_split()`.
+pub fn position_split(env: &Env, user: &Address, original_amount: i128, split_amount: i128) {
+    let topics = (symbol_short!("pos_split"), user);
+    env.events().publish(
+        topics,
+        (original_amount, split_amount, env.ledger().sequence()),
+    );
+}
+
+/// Issue #205: emitted by `swap_and_stake()` after the swap and stake both
+/// succeed.
+pub fn swapped_and_staked(
+    env: &Env,
+    user: &Address,
+    input_token: &Address,
+    input_amount: i128,
+    stake_amount_received: i128,
+) {
+    let topics = (symbol_short!("swap_stk"), user);
+    env.events().publish(
+        topics,
+        (
+            input_token,
+            input_amount,
+            stake_amount_received,
+            env.ledger().sequence(),
+        ),
+    );
+}
+
 pub fn pool_cap_updated(env: &Env, admin: &Address, new_cap: i128) {
     let topics = (symbol_short!("cap_upd"), admin);
     env.events()

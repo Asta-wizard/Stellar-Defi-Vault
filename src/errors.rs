@@ -158,3 +158,51 @@ pub enum VaultError {
     /// Reverts with NotInEpochMode error if pool is not configured for epoch mode.
     NotInEpochMode = 50,
 }
+
+/// Soroban caps every `#[contracterror]`/`#[contracttype]` enum at 50 variants
+/// (`ScSpecUdtUnionV0::cases` is a `VecM<_, 50>` in stellar-xdr) — `VaultError`
+/// above is already at exactly that cap, so new error cases for issues #205,
+/// #206, and #209 can't be added to it. This second, separate error enum
+/// holds just those new cases, plus mirrors of the handful of `VaultError`
+/// cases the new functions can also hit (via the `From` impl below, so `?`
+/// still works normally at call sites).
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VaultExtError {
+    /// Mirrors `VaultError::Unauthorized`.
+    Unauthorized = 1,
+    /// Mirrors `VaultError::NotInitialized`.
+    NotInitialized = 2,
+    /// Mirrors `VaultError::ZeroAmount`.
+    ZeroAmount = 3,
+    /// Mirrors `VaultError::ArithmeticError`.
+    ArithmeticError = 4,
+    /// Returned by `rollback_last_rate_change()` when there is no previous
+    /// rate to restore, or it was already rolled back (issue #206).
+    RollbackUnavailable = 5,
+    /// Returned by `swap_and_stake()` when the DEX swap's output amount is
+    /// below the caller-supplied `min_stake_amount` (issue #205).
+    SlippageExceeded = 6,
+    /// Returned by `swap_and_stake()` when `input_token` is not registered
+    /// with a DEX router capable of swapping it to the stake token, or when
+    /// no DEX router has been configured at all (issue #205).
+    UnsupportedInputToken = 7,
+    /// Returned by `position_split()` when `split_amount` is not strictly
+    /// between 0 and the caller's current position amount (issue #209).
+    InvalidSplitAmount = 8,
+}
+
+impl From<VaultError> for VaultExtError {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::Unauthorized => VaultExtError::Unauthorized,
+            VaultError::NotInitialized => VaultExtError::NotInitialized,
+            VaultError::ZeroAmount => VaultExtError::ZeroAmount,
+            VaultError::ArithmeticError => VaultExtError::ArithmeticError,
+            // Any other VaultError reaching here (shouldn't happen given how
+            // these functions are written) maps to the closest generic case.
+            _ => VaultExtError::Unauthorized,
+        }
+    }
+}

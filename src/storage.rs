@@ -69,6 +69,14 @@ pub enum DataKey {
     EpochLedgers,
     EpochRewardPerEpoch,
     EpochRewardFactor(u32),
+    // NOTE: DataKey is already at Soroban's 50-variant cap for
+    // #[contracttype] enums (ScSpecUdtUnionV0::cases is VecM<_, 50> in
+    // stellar-xdr) — adding a 51st variant makes the #[contracttype] derive
+    // panic at compile time. New storage introduced by issues #205/#206/
+    // #207/#209 uses raw Symbol-keyed storage instead (see balance.rs),
+    // matching the pattern already established here for the same reason
+    // (e.g. symbol_short!("pool_cp"), symbol_short!("sl_tr"), the
+    // Symbol::new(env, "prop")/"voted" tuple keys above).
 }
 
 /// Storage key for an individual epoch snapshot.
@@ -542,4 +550,19 @@ pub struct GovernanceProposal {
     pub votes_against: i128,
     pub ends_at: u32,
     pub enacted: bool,
+}
+
+// ── Issue #207: cross-chain bridge relayer hook ──────────────────────────────
+
+/// Packet data emitted alongside `stake`/`unstake`, shaped for cross-chain
+/// bridge relayers (issue #207). Supplementary only — never read by, or
+/// required for, core stake/unstake logic.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BridgePacket {
+    pub sequence: u64,
+    pub source_address: Address,
+    pub amount: i128,
+    pub action: String,
+    pub timestamp_ledger: u32,
 }

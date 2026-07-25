@@ -1,6 +1,6 @@
 use crate::storage::{
     ChangelogEntry, ClaimWindow, DataKey, DayBucket, GovernanceProposal, RateHistoryEntry,
-    ReferralStats, VestingEntry,
+    ReferralStats, StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -935,4 +935,79 @@ pub fn has_voted(env: &Env, proposal_id: u32, voter: &Address) -> bool {
 pub fn set_voted(env: &Env, proposal_id: u32, voter: &Address) {
     let key = (Symbol::new(env, "voted"), proposal_id, voter.clone());
     env.storage().persistent().set(&key, &true);
+}
+
+// ── Issue #206: single-level reward-rate rollback ────────────────────────────
+// DataKey is already at Soroban's 50-variant cap (see the note in
+// storage.rs), so these use raw Symbol keys instead of a DataKey variant —
+// the same workaround this file already uses for symbol_short!("pool_cp"),
+// symbol_short!("sl_tr"), etc.
+
+pub fn get_previous_rate(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("prevrate"))
+}
+
+pub fn set_previous_rate(env: &Env, rate_bps: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("prevrate"), &rate_bps);
+}
+
+pub fn clear_previous_rate(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("prevrate"));
+}
+
+// ── Issue #207: cross-chain bridge relayer hook ──────────────────────────────
+
+pub fn get_bridge_packet_sequence(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("brpktseq"))
+        .unwrap_or(0)
+}
+
+pub fn set_bridge_packet_sequence(env: &Env, seq: u64) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("brpktseq"), &seq);
+}
+
+pub fn is_bridge_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("brenabld"))
+        .unwrap_or(false)
+}
+
+pub fn set_bridge_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("brenabld"), &enabled);
+}
+
+// ── Issue #209: additive split positions ─────────────────────────────────────
+
+pub fn get_split_positions(env: &Env, user: &Address) -> Vec<StakePosition> {
+    let key = (Symbol::new(env, "splitpos"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_split_positions(env: &Env, user: &Address, positions: &Vec<StakePosition>) {
+    let key = (Symbol::new(env, "splitpos"), user.clone());
+    env.storage().persistent().set(&key, positions);
+}
+
+// ── Issue #205: DEX router used by swap_and_stake ────────────────────────────
+
+pub fn get_dex_router(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&symbol_short!("dexroutr"))
+}
+
+pub fn set_dex_router(env: &Env, router: &Address) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("dexroutr"), router);
 }
