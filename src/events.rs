@@ -416,7 +416,8 @@ pub fn paused_with_reason(
     ledger: u32,
 ) {
     let topics = (symbol_short!("paused"), admin);
-    env.events().publish(topics, (reason.clone(), message.clone(), ledger));
+    env.events()
+        .publish(topics, (*reason, message.clone(), ledger));
 }
 
 // ── Issue #218: pool-to-pool migration ──────────────────────────────────────
@@ -440,8 +441,7 @@ pub fn migrated(
 /// Emitted when the migration target pool is set.
 pub fn migration_target_set(env: &Env, admin: &Address, target_pool: &Address, ledger: u32) {
     let topics = (symbol_short!("mig_tgt"), admin);
-    env.events()
-        .publish(topics, (target_pool.clone(), ledger));
+    env.events().publish(topics, (target_pool.clone(), ledger));
 }
 
 /// Emitted when the admin sets or updates the dynamic unstake fee config.
