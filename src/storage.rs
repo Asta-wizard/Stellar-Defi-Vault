@@ -289,6 +289,19 @@ pub struct PoolHealthReport {
     pub is_solvent_7_days: bool,
 }
 
+/// Effective reward rate breakdown returned by `reward_multiplier_preview` (issue #181).
+///
+/// Each `*_multiplier_bps` field defaults to 10000 (1x) if that boost mechanism
+/// is not active for the user. `effective_rate_bps` is the fully stacked rate.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RewardMultiplierBreakdown {
+    pub base_rate_bps: i128,
+    pub tier_multiplier_bps: i128,
+    pub campaign_multiplier_bps: i128,
+    pub effective_rate_bps: i128,
+}
+
 /// Aggregate score used by `staking_efficiency_score`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]

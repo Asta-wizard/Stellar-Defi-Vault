@@ -503,3 +503,18 @@ pub fn proposal_enacted(
     env.events()
         .publish(topics, (id, parameter, new_value, total_votes, ledger));
 }
+
+// ── Issue #182: webhook URL config ───────────────────────────────────────────
+
+/// Emitted when the admin sets or clears the stake-event webhook URL.
+///
+/// `url` is `None` when the webhook has just been cleared.
+pub fn webhook_url_updated(
+    env: &Env,
+    admin: &Address,
+    url: &Option<soroban_sdk::String>,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("whk_url"), admin);
+    env.events().publish(topics, (url.clone(), ledger));
+}
