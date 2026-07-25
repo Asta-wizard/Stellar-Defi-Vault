@@ -10,8 +10,8 @@ use crate::{
         ContractMetadata, DataKey, DayBucket, EpochState, InterfaceId, LeaderboardEntry, PauseInfo,
         PauseReason, PoolConfig, PoolHealthReport, PoolStats, RateHistoryEntry,
         ReferralLeaderboardEntry, RoundingPolicy, StakeAction, StakeHistoryEntry, StakePosition,
-        StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition, UnstakeCheckResult,
+        UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -441,13 +441,7 @@ impl VaultContract {
         events::admin_action_pause(&env, &admin);
         balance::increment_admin_action_count(&env);
         balance::set_last_updated_ledger(&env, current_ledger);
-        Self::append_changelog(
-            &env,
-            &admin,
-            String::from_str(&env, "paused"),
-            0,
-            1,
-        );
+        Self::append_changelog(&env, &admin, String::from_str(&env, "paused"), 0, 1);
         Ok(())
     }
 
@@ -2442,7 +2436,7 @@ impl VaultContract {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let total_shares = balance::get_total_shares(env);
         let total_deposited = balance::get_total_deposited(env);
@@ -2609,7 +2603,7 @@ impl VaultContract {
             balance::set_referral_stats(env, &referrer, &stats);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let lock_period: u32 = env
             .storage()
@@ -3363,7 +3357,7 @@ impl VaultContract {
         let current_day = env.ledger().sequence() / LEDGERS_PER_DAY;
         let mut log = balance::get_activity_log(env);
 
-        if log.len() > 0 {
+        if !log.is_empty() {
             let last_idx = log.len() - 1;
             let mut last = log.get(last_idx).unwrap();
             if last.day_index == current_day {
@@ -3456,7 +3450,7 @@ impl VaultContract {
             return Err(VaultError::InsufficientRewardPool);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let vesting_period: u32 = env
             .storage()
@@ -3560,7 +3554,7 @@ impl VaultContract {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr = Self::token_address(&env)?;
+        let token_addr = Self::token_address(env)?;
 
         let mut total_shares = balance::get_total_shares(env);
         let mut total_deposited = balance::get_total_deposited(env);
@@ -5060,12 +5054,7 @@ impl VaultContract {
     /// No auth required — users can query their own or others' public data.
     /// The report sums all claimed events in the range, counts them, and
     /// computes the average staked position across stake snapshots.
-    pub fn get_tax_report(
-        env: Env,
-        user: Address,
-        ledger_from: u32,
-        ledger_to: u32,
-    ) -> TaxReport {
+    pub fn get_tax_report(env: Env, user: Address, ledger_from: u32, ledger_to: u32) -> TaxReport {
         let history = balance::get_claim_history(&env, &user);
         let mut total_rewards_claimed: i128 = 0;
         let mut claim_count: u32 = 0;
@@ -5088,9 +5077,7 @@ impl VaultContract {
         while j < stake_history.len() {
             let (snapshot_ledger, snapshot_amount) = stake_history.get(j).unwrap();
             if snapshot_ledger >= ledger_from && snapshot_ledger <= ledger_to {
-                sum_amount = sum_amount
-                    .checked_add(snapshot_amount)
-                    .unwrap_or(i128::MAX);
+                sum_amount = sum_amount.checked_add(snapshot_amount).unwrap_or(i128::MAX);
                 snapshot_count = snapshot_count.saturating_add(1);
             }
             j += 1;
@@ -5155,8 +5142,8 @@ impl VaultContract {
     pub fn migrate_to_new_pool(env: Env, user: Address) -> Result<i128, VaultError> {
         user.require_auth();
 
-        let target_pool = balance::get_migration_target(&env)
-            .ok_or(VaultError::PositionNotFound)?;
+        let target_pool =
+            balance::get_migration_target(&env).ok_or(VaultError::PositionNotFound)?;
 
         let shares = balance::get_shares(&env, &user);
         if shares == 0 {
@@ -5213,11 +5200,7 @@ impl VaultContract {
         // Call stake on the target pool
         use soroban_sdk::IntoVal;
         let args: Vec<soroban_sdk::Val> = (user.clone(), position_amount).into_val(&env);
-        env.invoke_contract::<i128>(
-            &target_pool,
-            &symbol_short!("stake"),
-            args,
-        );
+        env.invoke_contract::<i128>(&target_pool, &symbol_short!("stake"), args);
 
         Self::record_stake_snapshot(&env, &user, 0);
         Self::update_leaderboard(&env, &user, 0);
@@ -5239,10 +5222,7 @@ impl VaultContract {
     // ── Issue #220: rounding policy ───────────────────────────────────────────
 
     /// Admin: set the rounding policy for sub-unit division.
-    pub fn set_rounding_policy(
-        env: Env,
-        policy: RoundingPolicy,
-    ) -> Result<(), VaultError> {
+    pub fn set_rounding_policy(env: Env, policy: RoundingPolicy) -> Result<(), VaultError> {
         admin::require_admin(&env)?;
         balance::set_rounding_policy(&env, &policy);
         Ok(())
@@ -5265,12 +5245,8 @@ impl VaultContract {
         let policy = balance::get_rounding_policy(&env);
         match policy {
             RoundingPolicy::Floor => numerator / denominator,
-            RoundingPolicy::Ceiling => {
-                (numerator + denominator - 1) / denominator
-            }
-            RoundingPolicy::Nearest => {
-                (numerator + denominator / 2) / denominator
-            }
+            RoundingPolicy::Ceiling => (numerator + denominator - 1) / denominator,
+            RoundingPolicy::Nearest => (numerator + denominator / 2) / denominator,
         }
     }
 }

@@ -506,6 +506,8 @@ pub fn get_user_total_claimed(env: &Env, user: &Address) -> i128 {
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
+// Not currently wired into any claim path; kept for a future accounting feature.
+#[allow(dead_code)]
 pub fn add_user_total_claimed(env: &Env, user: &Address, amount: i128) {
     let current = get_user_total_claimed(env, user);
     let key = (Symbol::new(env, "t_claimed"), user.clone());
@@ -572,14 +574,18 @@ pub fn set_initialized_at_ledger(env: &Env, ledger: u32) {
 }
 
 // ── Custom error messages (frontend metadata) ────────────────────────────────
+// Not currently wired into any public entrypoint; kept for a future feature.
 
 /// Maximum length for custom error messages (150 characters).
+#[allow(dead_code)]
 pub const MAX_ERROR_MESSAGE_LENGTH: u32 = 150;
 
 /// Maximum number of custom error messages stored (20 messages).
+#[allow(dead_code)]
 pub const MAX_ERROR_MESSAGES: u32 = 20;
 
 /// Get list of all error codes that have custom messages set.
+#[allow(dead_code)]
 pub fn get_error_message_codes(env: &Env) -> Vec<u32> {
     let key = symbol_short!("err_codes");
     env.storage()
@@ -589,6 +595,7 @@ pub fn get_error_message_codes(env: &Env) -> Vec<u32> {
 }
 
 /// Set the list of error codes that have custom messages.
+#[allow(dead_code)]
 fn set_error_message_codes(env: &Env, codes: &Vec<u32>) {
     let key = symbol_short!("err_codes");
     env.storage().persistent().set(&key, codes);
@@ -596,6 +603,7 @@ fn set_error_message_codes(env: &Env, codes: &Vec<u32>) {
 
 /// Get custom error message for a specific error code.
 /// Uses tuple key to avoid DataKey enum limit.
+#[allow(dead_code)]
 pub fn get_error_message(env: &Env, error_code: u32) -> Option<soroban_sdk::String> {
     let key = (Symbol::new(env, "err_msg"), error_code);
     env.storage().persistent().get(&key)
@@ -604,6 +612,7 @@ pub fn get_error_message(env: &Env, error_code: u32) -> Option<soroban_sdk::Stri
 /// Set custom error message for a specific error code.
 /// Enforces MAX_ERROR_MESSAGES limit by removing oldest when full.
 /// Uses tuple key to avoid DataKey enum limit.
+#[allow(dead_code)]
 pub fn set_error_message(env: &Env, error_code: u32, message: &soroban_sdk::String) {
     // Store the message using tuple key
     let key = (Symbol::new(env, "err_msg"), error_code);
@@ -758,9 +767,7 @@ pub fn get_activity_log(env: &Env) -> Vec<DayBucket> {
 }
 
 pub fn set_activity_log(env: &Env, log: &Vec<DayBucket>) {
-    env.storage()
-        .instance()
-        .set(&symbol_short!("act_log"), log);
+    env.storage().instance().set(&symbol_short!("act_log"), log);
 }
 
 // ── Issue #217: per-user claim history for tax reporting ─────────────────────
@@ -783,9 +790,7 @@ pub fn set_claim_history(env: &Env, user: &Address, history: &Vec<(u32, i128)>) 
 // ── Issue #219: pause info ───────────────────────────────────────────────────
 
 pub fn get_pause_info(env: &Env) -> Option<crate::storage::PauseInfo> {
-    env.storage()
-        .instance()
-        .get(&symbol_short!("ps_info"))
+    env.storage().instance().get(&symbol_short!("ps_info"))
 }
 
 pub fn set_pause_info(env: &Env, info: &crate::storage::PauseInfo) {
