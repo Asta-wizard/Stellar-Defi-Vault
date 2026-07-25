@@ -33,6 +33,9 @@ pub(crate) const MAX_UNSTAKE_FEE_BPS: u32 = 500;
 pub(crate) const LEDGERS_PER_DAY: u32 = 17_280;
 /// Days of runway below which a refill alert is emitted.
 pub(crate) const REFILL_ALERT_DAYS: u32 = 30;
+/// Fraction of total_staked reserved as a liquidity buffer, never deployed to
+/// yield (issue #215). 20% in basis points.
+pub(crate) const YIELD_BUFFER_BPS: u32 = 2_000;
 
 #[contract]
 pub struct VaultContract;
@@ -4973,6 +4976,120 @@ impl VaultContract {
 
     pub fn get_total_rewards_added(env: Env) -> i128 {
         balance::get_total_rewards_added(&env)
+    }
+
+    // ── Issue #215: yield farming hook ─────────────────────────────────────────
+    //
+    // The registered yield protocol contract must implement:
+    // - `deposit(depositor: Address, amount: i128)` — notified after tokens
+    //   are transferred to it; no return value.
+    // - `withdraw(token: Address, recipient: Address, amount: i128) -> i128` —
+    //   transfers `amount` (or more, including any accrued yield) of `token`
+    //   to `recipient` and returns the actual amount transferred.
+
+    /// Admin: register the external yield protocol contract.
+    pub fn set_yield_protocol(
+        env: Env,
+        admin: Address,
+        protocol_contract: Address,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        balance::set_yield_protocol(&env, &protocol_contract);
+        let admin_addr = admin::get_admin(&env)?;
+        events::yield_protocol_set(&env, &admin_addr, &protocol_contract);
+        Ok(())
+    }
+
+    /// Read-only query for the registered yield protocol contract.
+    pub fn get_yield_protocol(env: Env) -> Option<Address> {
+        balance::get_yield_protocol(&env)
+    }
+
+    /// Read-only query for the amount currently deployed to the yield protocol.
+    pub fn get_yield_deployed(env: Env) -> i128 {
+        balance::get_yield_deployed(&env)
+    }
+
+    /// Read-only query for the idle balance available to deploy to yield.
+    ///
+    /// `contract_balance - buffer`, where `buffer` is 20% of `total_staked`
+    /// (`YIELD_BUFFER_BPS`), floored at 0. The buffer ensures the contract
+    /// always retains enough liquidity for immediate unstakes.
+    pub fn available_for_yield(env: Env) -> Result<i128, VaultError> {
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        let total_staked = balance::get_total_deposited(&env);
+        let buffer = total_staked
+            .checked_mul(YIELD_BUFFER_BPS as i128)
+            .and_then(|v| v.checked_div(BOOST_BPS_BASE as i128))
+            .ok_or(VaultError::ArithmeticError)?;
+        Ok((contract_balance - buffer).max(0))
+    }
+
+    /// Admin: deploy idle stake tokens to the registered yield protocol.
+    ///
+    /// Reverts with `NotInitialized` if no protocol is registered, or
+    /// `PoolCapReached` if `amount` exceeds `available_for_yield()`.
+    pub fn deploy_to_yield(env: Env, admin: Address, amount: i128) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        let protocol = balance::get_yield_protocol(&env).ok_or(VaultError::NotInitialized)?;
+        let available = Self::available_for_yield(env.clone())?;
+        if amount > available {
+            return Err(VaultError::PoolCapReached);
+        }
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&env.current_contract_address(), &protocol, &amount);
+
+        use soroban_sdk::IntoVal;
+        let args: Vec<soroban_sdk::Val> = (env.current_contract_address(), amount).into_val(&env);
+        env.invoke_contract::<()>(&protocol, &symbol_short!("deposit"), args);
+
+        let deployed = balance::get_yield_deployed(&env)
+            .checked_add(amount)
+            .ok_or(VaultError::ArithmeticError)?;
+        balance::set_yield_deployed(&env, deployed);
+
+        let admin_addr = admin::get_admin(&env)?;
+        events::yield_deployed(&env, &admin_addr, amount, env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Admin: withdraw stake tokens (plus any accrued yield) from the
+    /// registered yield protocol back into the vault.
+    ///
+    /// Reverts with `NotInitialized` if no protocol is registered, or
+    /// `InsufficientRewardPool` if `amount` exceeds `get_yield_deployed()`.
+    pub fn withdraw_from_yield(env: Env, admin: Address, amount: i128) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        let protocol = balance::get_yield_protocol(&env).ok_or(VaultError::NotInitialized)?;
+        let deployed = balance::get_yield_deployed(&env);
+        if amount > deployed {
+            return Err(VaultError::InsufficientRewardPool);
+        }
+
+        let token_addr = Self::token_address(&env)?;
+        use soroban_sdk::IntoVal;
+        let args: Vec<soroban_sdk::Val> =
+            (token_addr, env.current_contract_address(), amount).into_val(&env);
+        let returned: i128 = env.invoke_contract(&protocol, &symbol_short!("withdraw"), args);
+
+        balance::set_yield_deployed(&env, deployed - amount);
+
+        let admin_addr = admin::get_admin(&env)?;
+        events::yield_withdrawn(&env, &admin_addr, returned, env.ledger().sequence());
+        Ok(())
     }
 
     // ── Reward refill alert helper ─────────────────────────────────────────────

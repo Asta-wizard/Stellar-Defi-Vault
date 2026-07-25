@@ -443,3 +443,24 @@ pub fn migration_target_set(env: &Env, admin: &Address, target_pool: &Address, l
     let topics = (symbol_short!("mig_tgt"), admin);
     env.events().publish(topics, (target_pool.clone(), ledger));
 }
+
+// ── Issue #215: yield farming hook ────────────────────────────────────────────
+
+/// Emitted when the admin registers the external yield protocol.
+pub fn yield_protocol_set(env: &Env, admin: &Address, protocol: &Address) {
+    let topics = (symbol_short!("yld_p_set"), admin);
+    env.events()
+        .publish(topics, (protocol.clone(), env.ledger().sequence()));
+}
+
+/// Emitted when idle stake tokens are deployed to the yield protocol.
+pub fn yield_deployed(env: &Env, admin: &Address, amount: i128, ledger: u32) {
+    let topics = (symbol_short!("yld_dep"), admin);
+    env.events().publish(topics, (amount, ledger));
+}
+
+/// Emitted when tokens (plus any accrued yield) are withdrawn from the yield protocol.
+pub fn yield_withdrawn(env: &Env, admin: &Address, amount_returned: i128, ledger: u32) {
+    let topics = (symbol_short!("yld_wdrw"), admin);
+    env.events().publish(topics, (amount_returned, ledger));
+}

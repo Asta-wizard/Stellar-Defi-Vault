@@ -5,7 +5,9 @@ use soroban_sdk::contracterror;
 #[repr(u32)]
 pub enum VaultError {
     /// Returned by initialize-dependent getters and stake/unstake flows when
-    /// the admin, token, or other required contract state has not been stored yet.
+    /// the admin, token, or other required contract state has not been stored
+    /// yet, and by `deploy_to_yield()` / `withdraw_from_yield()` when no yield
+    /// protocol has been registered via `set_yield_protocol()`.
     NotInitialized = 1,
     /// Returned by initialize() when the vault has already been initialized.
     AlreadyInitialized = 2,
@@ -44,7 +46,9 @@ pub enum VaultError {
     /// base rate or the tier ledgers are not strictly increasing.
     InvalidBoostSchedule = 13,
     /// Returned by `claim()`, `stake_and_claim()`, and `claim_epoch_rewards()`
-    /// when the reward pool does not hold enough tokens to pay the claim.
+    /// when the reward pool does not hold enough tokens to pay the claim, and
+    /// by `withdraw_from_yield()` when the requested amount exceeds what is
+    /// currently tracked as deployed to the yield protocol.
     InsufficientRewardPool = 14,
     /// Returned by `revoke_delegate()` when the caller revokes the wrong
     /// delegate, and by `stake_for()` when the caller is not the approved
@@ -97,7 +101,8 @@ pub enum VaultError {
     /// stopped the contract.
     ContractStopped = 30,
     /// Returned by staking entrypoints when the new deposit would exceed the
-    /// configured pool cap.
+    /// configured pool cap, and by `deploy_to_yield()` when the requested
+    /// amount exceeds `available_for_yield()` (the 20% liquidity buffer).
     PoolCapReached = 31,
     /// Returned by `set_pool_description()` when the description exceeds 200
     /// characters.

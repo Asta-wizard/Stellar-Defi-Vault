@@ -829,3 +829,28 @@ pub fn set_rounding_policy(env: &Env, policy: &crate::storage::RoundingPolicy) {
         .instance()
         .set(&symbol_short!("rnd_pol"), policy);
 }
+
+// ── Issue #215: yield farming hook ────────────────────────────────────────────
+
+pub fn get_yield_protocol(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&symbol_short!("yld_prot"))
+}
+
+pub fn set_yield_protocol(env: &Env, protocol: &Address) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("yld_prot"), protocol);
+}
+
+pub fn get_yield_deployed(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("yld_dep"))
+        .unwrap_or(0)
+}
+
+pub fn set_yield_deployed(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("yld_dep"), &amount);
+}
