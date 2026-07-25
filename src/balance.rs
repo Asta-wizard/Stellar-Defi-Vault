@@ -1,8 +1,6 @@
 use crate::storage::{
-    AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, FeeRecipient,
-    GovernanceProposal, MultisigConfig, PendingAction, RateHistoryEntry, ReferralStats,
-    VestingEntry,
-    ChangelogEntry, ClaimWindow, DataKey, DayBucket, GovernanceProposal, RateHistoryEntry,
+    AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig,
+    FeeRecipient, GovernanceProposal, MultisigConfig, PendingAction, RateHistoryEntry,
     ReferralStats, StakePosition, VestingEntry,
 };
 
@@ -1120,4 +1118,271 @@ pub fn next_proposal_id(env: &Env) -> u32 {
         .instance()
         .set(&symbol_short!("propidct"), &(id + 1));
     id
+}
+
+// ── Missing helper functions for existing vault features ──────────────────────
+
+pub fn get_stake_rate_limit(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("stk_rtl"))
+        .unwrap_or(0)
+}
+
+pub fn set_stake_rate_limit(env: &Env, limit: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("stk_rtl"), &limit);
+}
+
+pub fn get_last_stake_ledger(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "lst_stk"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_last_stake_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "lst_stk"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
+pub fn get_claim_rate_limit(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("clm_rtl"))
+        .unwrap_or(0)
+}
+
+pub fn set_claim_rate_limit(env: &Env, limit: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("clm_rtl"), &limit);
+}
+
+pub fn get_last_claim_action_ledger(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "lst_clm"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_last_claim_action_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "lst_clm"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
+// ── Issue #198: penalty redistribution ───────────────────────────────────────
+
+pub fn get_penalty_redistribution_mode(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("pen_rdst"))
+        .unwrap_or(false)
+}
+
+pub fn set_penalty_redistribution_mode(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("pen_rdst"), &enabled);
+}
+
+// ── Issue #199: insurance fund ────────────────────────────────────────────────
+
+pub fn set_insurance_rate_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("ins_rate"), &bps);
+}
+
+pub fn get_insurance_rate_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("ins_rate"))
+        .unwrap_or(0)
+}
+
+pub fn get_insurance_fund_balance(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("ins_fund"))
+        .unwrap_or(0)
+}
+
+pub fn set_insurance_fund_balance(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("ins_fund"), &amount);
+}
+
+// ── Issue #200: delegation chain ──────────────────────────────────────────────
+
+pub fn get_delegation_chain(env: &Env, user: &Address) -> Option<crate::storage::DelegationChain> {
+    let key = (Symbol::new(env, "dchain"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_delegation_chain(env: &Env, user: &Address, chain: &crate::storage::DelegationChain) {
+    let key = (Symbol::new(env, "dchain"), user.clone());
+    env.storage().persistent().set(&key, chain);
+}
+
+pub fn remove_delegation_chain(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "dchain"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #202: bootstrap ─────────────────────────────────────────────────────
+
+pub fn set_bootstrap_config(env: &Env, config: &crate::storage::BootstrapConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("bootcfg"), config);
+}
+
+pub fn get_bootstrap_config(env: &Env) -> Option<crate::storage::BootstrapConfig> {
+    env.storage().instance().get(&symbol_short!("bootcfg"))
+}
+
+pub fn clear_bootstrap_config(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("bootcfg"));
+}
+
+// ── Issue #213: dynamic fee config ────────────────────────────────────────────
+
+pub fn set_dynamic_fee_config(env: &Env, config: &DynamicFeeConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("dfeecfg"), config);
+}
+
+pub fn get_dynamic_fee_config(env: &Env) -> Option<DynamicFeeConfig> {
+    env.storage().instance().get(&symbol_short!("dfeecfg"))
+}
+
+// ── Issue #214: user claim count (for reputation consistency score) ────────────
+
+pub fn get_user_claim_count(env: &Env, user: &Address) -> u32 {
+    let key = (Symbol::new(env, "clm_cnt"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn increment_user_claim_count(env: &Env, user: &Address) {
+    let current = get_user_claim_count(env, user);
+    let key = (Symbol::new(env, "clm_cnt"), user.clone());
+    env.storage().persistent().set(&key, &(current + 1));
+}
+
+// ── Issue #210: Merkle Reward Distribution ────────────────────────────────────
+
+pub fn set_merkle_root(env: &Env, root: &crate::storage::MerkleRoot) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("merkle"), root);
+}
+
+pub fn get_merkle_root(env: &Env) -> Option<crate::storage::MerkleRoot> {
+    env.storage().instance().get(&symbol_short!("merkle"))
+}
+
+pub fn is_merkle_claimed(env: &Env, user: &Address, epoch: u32) -> bool {
+    let key = (Symbol::new(env, "mrk_clm"), user.clone(), epoch);
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_merkle_claimed(env: &Env, user: &Address, epoch: u32) {
+    let key = (Symbol::new(env, "mrk_clm"), user.clone(), epoch);
+    env.storage().persistent().set(&key, &true);
+}
+
+// ── Issue #211: Staking Tournament Competition ────────────────────────────────
+
+pub fn set_tournament(env: &Env, tournament: &crate::storage::Tournament) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("tourney"), tournament);
+}
+
+pub fn get_tournament(env: &Env) -> Option<crate::storage::Tournament> {
+    env.storage().instance().get(&symbol_short!("tourney"))
+}
+
+pub fn remove_tournament(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("tourney"));
+}
+
+pub fn get_tournament_score(env: &Env, user: &Address) -> i128 {
+    let key = (Symbol::new(env, "tour_scr"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_tournament_score(env: &Env, user: &Address, score: i128) {
+    let key = (Symbol::new(env, "tour_scr"), user.clone());
+    env.storage().persistent().set(&key, &score);
+}
+
+pub fn get_tournament_participants(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("tour_par"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_tournament_participants(env: &Env, participants: &Vec<Address>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("tour_par"), participants);
+}
+
+pub fn add_tournament_participant(env: &Env, user: &Address) {
+    let mut participants = get_tournament_participants(env);
+    let mut exists = false;
+    for i in 0..participants.len() {
+        if participants.get(i).unwrap() == *user {
+            exists = true;
+            break;
+        }
+    }
+    if !exists {
+        participants.push_back(user.clone());
+        set_tournament_participants(env, &participants);
+    }
+}
+
+// ── Issue #212: Buyback & Burn ────────────────────────────────────────────────
+
+pub fn buyback_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("bybk_enb"))
+        .unwrap_or(false)
+}
+
+pub fn set_buyback_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("bybk_enb"), &enabled);
+}
+
+pub fn get_buyback_threshold(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("bybk_thr"))
+        .unwrap_or(0)
+}
+
+pub fn set_buyback_threshold(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("bybk_thr"), &amount);
+}
+
+pub fn get_total_tokens_burned(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("tot_burn"))
+        .unwrap_or(0)
+}
+
+pub fn add_tokens_burned(env: &Env, amount: i128) {
+    let total = get_total_tokens_burned(env) + amount;
+    env.storage()
+        .instance()
+        .set(&symbol_short!("tot_burn"), &total);
 }

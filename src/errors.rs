@@ -220,17 +220,42 @@ pub enum VaultExtError {
     ProposalNotReady = 17,
     /// Returned by `rollback_last_rate_change()` when there is no previous
     /// rate to restore, or it was already rolled back (issue #206).
-    RollbackUnavailable = 5,
+    RollbackUnavailable = 18,
     /// Returned by `swap_and_stake()` when the DEX swap's output amount is
     /// below the caller-supplied `min_stake_amount` (issue #205).
-    SlippageExceeded = 6,
+    SlippageExceeded = 19,
     /// Returned by `swap_and_stake()` when `input_token` is not registered
     /// with a DEX router capable of swapping it to the stake token, or when
     /// no DEX router has been configured at all (issue #205).
-    UnsupportedInputToken = 7,
+    UnsupportedInputToken = 20,
     /// Returned by `position_split()` when `split_amount` is not strictly
     /// between 0 and the caller's current position amount (issue #209).
-    InvalidSplitAmount = 8,
+    InvalidSplitAmount = 21,
+    /// Returned by `claim_merkle_reward()` when the Merkle proof is invalid.
+    MerkleInvalidProof = 22,
+    /// Returned by `claim_merkle_reward()` when the user has already claimed
+    /// for the given epoch.
+    MerkleAlreadyClaimed = 23,
+    /// Returned by `create_tournament()` when a tournament is already active.
+    TournamentAlreadyExists = 24,
+    /// Returned by `finalize_tournament()` when the tournament has not ended yet.
+    TournamentNotEnded = 25,
+    /// Returned by `finalize_tournament()` when no tournament exists.
+    TournamentNotFound = 26,
+    /// Returned by `compare_pools()` when more than 5 external pools are supplied.
+    TooManyPools = 27,
+    /// Returned by `execute_buyback()` when buyback is not enabled.
+    BuybackNotEnabled = 28,
+    /// Returned by `execute_buyback()` when accrued fees are below the threshold.
+    BuybackThresholdNotMet = 29,
+    /// Returned by stake/claim rate-limit checks (issue #201).
+    RateLimitExceeded = 30,
+    /// Returned by `start_bootstrap()` when `initial_rate < base_rate`.
+    InvalidBootstrapConfig = 31,
+    /// Returned by delegation chain operations when a cycle is detected (issue #200).
+    CircularDelegation = 32,
+    /// Returned when a delegation chain would exceed the maximum length (issue #200).
+    ChainTooLong = 33,
 }
 
 impl From<VaultError> for VaultExtError {
