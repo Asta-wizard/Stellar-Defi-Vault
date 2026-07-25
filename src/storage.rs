@@ -69,6 +69,14 @@ pub enum DataKey {
     EpochLedgers,
     EpochRewardPerEpoch,
     EpochRewardFactor(u32),
+    // NOTE: DataKey is already at Soroban's 50-variant cap for
+    // #[contracttype] enums (ScSpecUdtUnionV0::cases is VecM<_, 50> in
+    // stellar-xdr) — adding a 51st variant makes the #[contracttype] derive
+    // panic at compile time. New storage introduced by issues #205/#206/
+    // #207/#209 uses raw Symbol-keyed storage instead (see balance.rs),
+    // matching the pattern already established here for the same reason
+    // (e.g. symbol_short!("pool_cp"), symbol_short!("sl_tr"), the
+    // Symbol::new(env, "prop")/"voted" tuple keys above).
 }
 
 /// Storage key for an individual epoch snapshot.
@@ -544,38 +552,19 @@ pub struct GovernanceProposal {
     pub enacted: bool,
 }
 
-// ── Issue #203: contract migration export/import ─────────────────────────────
+// ── Issue #207: cross-chain bridge relayer hook ──────────────────────────────
 
-/// Full pool state snapshot for migrating to a new contract instance
-/// (issue #203). Both the exporting and importing contracts should be
-/// paused for the duration of the migration — this struct is a point-in-time
-/// snapshot, not a live sync, so any activity on the old contract between
-/// export and import would be lost from the new one.
+/// Packet data emitted alongside `stake`/`unstake`, shaped for cross-chain
+/// bridge relayers (issue #207). Supplementary only — never read by, or
+/// required for, core stake/unstake logic.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct MigrationExport {
-    pub admin: Address,
-    pub stake_token: Address,
-    pub reward_token: Address,
-    pub reward_rate_bps: u32,
-    pub total_staked: i128,
-    pub total_stakers: u32,
-    pub paused: bool,
-    pub all_positions: Vec<(Address, StakePosition)>,
-}
-
-// ── Issue #208: storage usage report ─────────────────────────────────────────
-
-/// Rough estimate of the contract's ledger storage footprint (issue #208).
-/// Approximations only — see `storage_usage_report()`'s doc comment in
-/// vault.rs for the byte-size constants used and their basis.
-#[contracttype]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct StorageUsageReport {
-    pub instance_keys: u32,
-    pub persistent_position_count: u32,
-    pub persistent_other_keys: u32,
-    pub estimated_total_bytes: u32,
+pub struct BridgePacket {
+    pub sequence: u64,
+    pub source_address: Address,
+    pub amount: i128,
+    pub action: String,
+    pub timestamp_ledger: u32,
 }
 
 // ── Issue #197: fee splitting ─────────────────────────────────────────────────

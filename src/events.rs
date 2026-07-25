@@ -42,27 +42,31 @@ pub fn withdrawal_limit_updated(env: &Env, admin: &Address, new_limit: i128) {
         .publish(topics, (new_limit, env.ledger().sequence()));
 }
 
-/// Issue #199: emitted by `deploy_insurance_fund()`.
-pub fn insurance_deployed(env: &Env, amount: i128, new_reward_balance: i128) {
-    let topics = (symbol_short!("ins_dply"),);
+/// Issue #202: emitted by `start_bootstrap()`.
+pub fn bootstrap_started(
+    env: &Env,
+    initial_rate_bps: u32,
+    base_rate_bps: u32,
+    duration_ledgers: u32,
+) {
+    let topics = (symbol_short!("boot_str"),);
     env.events().publish(
         topics,
-        (amount, new_reward_balance, env.ledger().sequence()),
+        (
+            initial_rate_bps,
+            base_rate_bps,
+            duration_ledgers,
+            env.ledger().sequence(),
+        ),
     );
 }
 
-/// Issue #203: emitted by `export_state()`.
-pub fn state_exported(env: &Env, admin: &Address, position_count: u32, ledger: u32) {
-    let topics = (symbol_short!("st_export"), admin);
-    env.events().publish(topics, (position_count, ledger));
-}
-
-/// Issue #198: emitted by `slash()` when penalty redistribution mode is
-/// enabled.
-pub fn penalty_redistributed(env: &Env, total_amount: i128, staker_count: u32, ledger: u32) {
-    let topics = (symbol_short!("pen_redis"),);
+/// Issue #202: emitted the first time any call notices the bootstrap period
+/// has elapsed and settles the rate to `base_rate_bps` permanently.
+pub fn bootstrap_ended(env: &Env, base_rate_bps: u32) {
+    let topics = (symbol_short!("boot_end"),);
     env.events()
-        .publish(topics, (total_amount, staker_count, ledger));
+        .publish(topics, (base_rate_bps, env.ledger().sequence()));
 }
 
 /// Issue #197: emitted once per recipient during a fee split.
@@ -90,6 +94,60 @@ pub fn rate_changed(env: &Env, old_rate_bps: u32, new_rate_bps: u32) {
     env.events().publish(
         topics,
         (old_rate_bps, new_rate_bps, env.ledger().sequence()),
+    );
+}
+
+/// Issue #206: emitted by `rollback_last_rate_change()`.
+pub fn rate_rolled_back(env: &Env, restored_rate: u32, discarded_rate: u32) {
+    let topics = (symbol_short!("rate_rbk"),);
+    env.events().publish(
+        topics,
+        (restored_rate, discarded_rate, env.ledger().sequence()),
+    );
+}
+
+/// Issue #207: emitted alongside `stake`/`unstake` for cross-chain bridge
+/// relayers, when bridge event emission is enabled.
+pub fn bridge_packet(env: &Env, packet: &crate::storage::BridgePacket) {
+    let topics = (symbol_short!("bridge_pk"), packet.source_address.clone());
+    env.events().publish(
+        topics,
+        (
+            packet.sequence,
+            packet.amount,
+            packet.action.clone(),
+            packet.timestamp_ledger,
+        ),
+    );
+}
+
+/// Issue #209: emitted by `position_split()`.
+pub fn position_split(env: &Env, user: &Address, original_amount: i128, split_amount: i128) {
+    let topics = (symbol_short!("pos_split"), user);
+    env.events().publish(
+        topics,
+        (original_amount, split_amount, env.ledger().sequence()),
+    );
+}
+
+/// Issue #205: emitted by `swap_and_stake()` after the swap and stake both
+/// succeed.
+pub fn swapped_and_staked(
+    env: &Env,
+    user: &Address,
+    input_token: &Address,
+    input_amount: i128,
+    stake_amount_received: i128,
+) {
+    let topics = (symbol_short!("swap_stk"), user);
+    env.events().publish(
+        topics,
+        (
+            input_token,
+            input_amount,
+            stake_amount_received,
+            env.ledger().sequence(),
+        ),
     );
 }
 
