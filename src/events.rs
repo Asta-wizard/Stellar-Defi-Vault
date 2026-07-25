@@ -19,11 +19,6 @@ pub fn withdraw(
         .publish(topics, (shares_burned, amount_returned, ledger));
 }
 
-pub fn paused(env: &Env, admin: &Address, ledger: u32) {
-    let topics = (symbol_short!("paused"), admin);
-    env.events().publish(topics, (ledger,));
-}
-
 pub fn unpaused(env: &Env, admin: &Address, ledger: u32) {
     let topics = (symbol_short!("unpaused"), admin);
     env.events().publish(topics, (ledger,));
@@ -406,4 +401,43 @@ pub fn emergency_contact_updated(env: &Env, admin: &Address, contact: &soroban_s
     let topics = (symbol_short!("emg_cnt"), admin);
     env.events()
         .publish(topics, (contact.clone(), env.ledger().sequence()));
+}
+
+// ── Issue #219: pause with reason ────────────────────────────────────────────
+
+/// Emitted when the admin pauses the pool with a reason and message.
+pub fn paused_with_reason(
+    env: &Env,
+    admin: &Address,
+    reason: &crate::storage::PauseReason,
+    message: &soroban_sdk::String,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("paused"), admin);
+    env.events().publish(topics, (reason.clone(), message.clone(), ledger));
+}
+
+// ── Issue #218: pool-to-pool migration ──────────────────────────────────────
+
+/// Emitted when a user migrates their position to a target pool.
+pub fn migrated(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    rewards_settled: i128,
+    target_pool: &Address,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("migrated"), user);
+    env.events().publish(
+        topics,
+        (amount, rewards_settled, target_pool.clone(), ledger),
+    );
+}
+
+/// Emitted when the migration target pool is set.
+pub fn migration_target_set(env: &Env, admin: &Address, target_pool: &Address, ledger: u32) {
+    let topics = (symbol_short!("mig_tgt"), admin);
+    env.events()
+        .publish(topics, (target_pool.clone(), ledger));
 }

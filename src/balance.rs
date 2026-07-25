@@ -762,3 +762,65 @@ pub fn set_activity_log(env: &Env, log: &Vec<DayBucket>) {
         .instance()
         .set(&symbol_short!("act_log"), log);
 }
+
+// ── Issue #217: per-user claim history for tax reporting ─────────────────────
+
+pub const MAX_CLAIM_HISTORY: u32 = 100;
+
+pub fn get_claim_history(env: &Env, user: &Address) -> Vec<(u32, i128)> {
+    let key = (Symbol::new(env, "clm_hist"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_claim_history(env: &Env, user: &Address, history: &Vec<(u32, i128)>) {
+    let key = (Symbol::new(env, "clm_hist"), user.clone());
+    env.storage().persistent().set(&key, history);
+}
+
+// ── Issue #219: pause info ───────────────────────────────────────────────────
+
+pub fn get_pause_info(env: &Env) -> Option<crate::storage::PauseInfo> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("ps_info"))
+}
+
+pub fn set_pause_info(env: &Env, info: &crate::storage::PauseInfo) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("ps_info"), info);
+}
+
+pub fn clear_pause_info(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("ps_info"));
+}
+
+// ── Issue #218: migration target ─────────────────────────────────────────────
+
+pub fn get_migration_target(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&symbol_short!("mig_tgt"))
+}
+
+pub fn set_migration_target(env: &Env, target: &Address) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("mig_tgt"), target);
+}
+
+// ── Issue #220: rounding policy ──────────────────────────────────────────────
+
+pub fn get_rounding_policy(env: &Env) -> crate::storage::RoundingPolicy {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rnd_pol"))
+        .unwrap_or(crate::storage::RoundingPolicy::Floor)
+}
+
+pub fn set_rounding_policy(env: &Env, policy: &crate::storage::RoundingPolicy) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("rnd_pol"), policy);
+}

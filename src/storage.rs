@@ -315,16 +315,6 @@ pub struct UserSummary {
     pub pool_share_bps: i128,
 }
 
-/// Result of `get_boost_tier_progress`: how far a user is toward the next boost tier.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct BoostTierProgress {
-    pub current_tier: u32,
-    pub current_multiplier_bps: i128,
-    pub next_tier_in_ledgers: Option<u32>,
-    pub next_multiplier_bps: Option<i128>,
-}
-
 // ── Issue #105: stake/unstake history ────────────────────────────────────────
 
 /// Discriminant for a stake history entry.
@@ -424,16 +414,6 @@ pub struct ContractAddresses {
     pub reward_token: Address,
 }
 
-/// Progress toward the next boost tier, returned by `get_boost_tier_progress`.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct BoostTierProgress {
-    pub current_tier: u32,
-    pub current_multiplier_bps: i128,
-    pub next_tier_in_ledgers: Option<u32>,
-    pub next_multiplier_bps: Option<i128>,
-}
-
 /// One day-bucket in the rolling 7-day activity heatmap.
 ///
 /// `day_index` = `current_ledger / LEDGERS_PER_DAY` (see `vault::LEDGERS_PER_DAY`).
@@ -445,4 +425,51 @@ pub struct DayBucket {
     pub stake_count: u32,
     pub unstake_count: u32,
     pub claim_count: u32,
+}
+
+// ── Issue #219: pause reason ─────────────────────────────────────────────────
+
+/// Reason categories for pool pauses (issue #219).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PauseReason {
+    Maintenance,
+    SecurityIncident,
+    RateReconfiguration,
+    CapAdjustment,
+    Other,
+}
+
+/// Full pause state stored when the pool is paused (issue #219).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PauseInfo {
+    pub reason: PauseReason,
+    pub message: String,
+    pub paused_at: u32,
+}
+
+// ── Issue #217: tax reporting ────────────────────────────────────────────────
+
+/// Annual tax report summary for a user (issue #217).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaxReport {
+    pub user: Address,
+    pub ledger_from: u32,
+    pub ledger_to: u32,
+    pub total_rewards_claimed: i128,
+    pub average_stake_amount: i128,
+    pub claim_count: u32,
+}
+
+// ── Issue #220: rounding policy ──────────────────────────────────────────────
+
+/// Rounding behaviour for sub-unit division in share and reward math (issue #220).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RoundingPolicy {
+    Floor,
+    Ceiling,
+    Nearest,
 }
