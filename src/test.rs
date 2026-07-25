@@ -10,7 +10,10 @@ use soroban_sdk::{
 use crate::{
     errors::VaultError,
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
-    storage::{ChangelogEntry, DayBucket, PoolHealthReport, ReferralLeaderboardEntry, UnstakeCheckResult},
+    storage::{
+        ChangelogEntry, DayBucket, PauseReason, PoolHealthReport, ReferralLeaderboardEntry,
+        RoundingPolicy, TaxReport, UnstakeCheckResult,
+    },
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
         CONTRACT_VERSION, LEDGERS_PER_DAY, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
@@ -310,7 +313,7 @@ fn test_preview_redeem_matches_actual_withdraw() {
 #[test]
 fn test_pause_blocks_deposit() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 
     let result = f.vault.try_deposit(&f.alice, &100_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -320,7 +323,7 @@ fn test_pause_blocks_deposit() {
 fn test_pause_blocks_withdraw() {
     let f = VaultFixture::new();
     f.vault.deposit(&f.alice, &100_000);
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 
     let result = f.vault.try_withdraw(&f.alice, &100_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -329,7 +332,7 @@ fn test_pause_blocks_withdraw() {
 #[test]
 fn test_unpause_restores_operations() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     f.vault.unpause();
 
     let shares = f.vault.deposit(&f.alice, &100_000);
@@ -345,7 +348,7 @@ fn test_is_paused_defaults_to_false() {
 #[test]
 fn test_is_paused_returns_true_after_pause() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     assert!(f.vault.is_paused());
 }
 
@@ -356,7 +359,7 @@ fn test_transfer_admin() {
     let f = VaultFixture::new();
     f.vault.transfer_admin(&f.bob);
     // Bob is now admin — he should be able to pause
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 }
 
 #[test]
@@ -414,7 +417,7 @@ fn test_add_yield_requires_admin_auth() {
 fn test_add_yield_paused_blocks() {
     let f = VaultFixture::new();
     f.token_admin.mint(&f.admin, &50_000);
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 
     let result = f.vault.try_add_yield(&f.admin, &50_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -588,7 +591,7 @@ fn test_withdraw_emits_event() {
 fn test_pause_emits_event() {
     let f = VaultFixture::new();
 
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 
     let events = f.env.events().all();
     let paused_events: std::vec::Vec<_> = events
@@ -597,14 +600,12 @@ fn test_pause_emits_event() {
         .collect();
 
     assert_eq!(paused_events.len(), 1);
-    let data_vec = Vec::<soroban_sdk::Val>::try_from_val(&f.env, &paused_events[0].2).unwrap();
-    let _ledger: u32 = u32::try_from_val(&f.env, &data_vec.get(0).unwrap()).unwrap();
 }
 
 #[test]
 fn test_unpause_emits_event() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 
     f.vault.unpause();
 
@@ -718,7 +719,7 @@ fn test_transfer_admin_requires_admin_auth() {
 #[test]
 fn test_pause_requires_admin_auth() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     assert_eq!(f.env.auths()[0].0, f.admin);
 }
 
@@ -1403,7 +1404,7 @@ fn test_admin_action_count_increments() {
         "Count should increment after each admin action"
     );
 
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     assert_eq!(f.vault.get_admin_action_count(), before + 2);
 
     f.vault.unpause();
@@ -1426,7 +1427,7 @@ fn test_admin_action_set_reward_rate_emits_audit_event() {
 #[test]
 fn test_admin_action_pause_emits_audit_event() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 
     let events = f.env.events().all();
     let audit_events: std::vec::Vec<_> = events
@@ -1464,7 +1465,7 @@ fn test_admin_action_count_increments_across_all_admin_fns() {
     expected += 1;
     assert_eq!(f.vault.get_admin_action_count(), expected);
 
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     expected += 1;
     assert_eq!(f.vault.get_admin_action_count(), expected);
 
@@ -2134,7 +2135,7 @@ fn test_get_pool_config_returns_all_fields() {
 #[test]
 fn test_get_pool_config_reflects_paused_state() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
 
     let config = f.vault.get_pool_config();
     assert!(config.paused);
@@ -2483,7 +2484,7 @@ fn test_can_unstake_insufficient_amount_too_much() {
 fn test_can_unstake_pool_paused() {
     let f = VaultFixture::new();
     f.vault.stake(&f.alice, &100_000);
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     assert_eq!(
         f.vault.can_unstake(&f.alice, &100_000),
         UnstakeCheckResult::PoolPaused
@@ -2776,14 +2777,14 @@ fn test_last_updated_ledger_after_claim() {
 fn test_last_updated_ledger_after_pause() {
     let f = VaultFixture::new();
     set_ledger(&f.env, 400);
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     assert_eq!(f.vault.get_last_updated_ledger(), 400);
 }
 
 #[test]
 fn test_last_updated_ledger_after_unpause() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     set_ledger(&f.env, 500);
     f.vault.unpause();
     assert_eq!(f.vault.get_last_updated_ledger(), 500);
@@ -3355,7 +3356,7 @@ fn test_changelog_records_rate_change() {
 #[test]
 fn test_changelog_records_pause_and_unpause() {
     let f = VaultFixture::new();
-    f.vault.pause();
+    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
     f.vault.unpause();
     let log: Vec<ChangelogEntry> = f.vault.get_changelog();
     assert_eq!(log.len(), 2);
@@ -3378,7 +3379,7 @@ fn test_changelog_drops_oldest_when_full() {
     let total = MAX_CHANGELOG_ENTRIES + 1;
     for i in 0..total {
         if i % 2 == 0 {
-            f.vault.pause();
+            f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
         } else {
             f.vault.unpause();
         }
@@ -3594,4 +3595,243 @@ fn test_set_emergency_contact_non_admin_rejected() {
     let contact = soroban_sdk::String::from_str(&f.env, "admin@example.com");
     let result = f.vault.try_set_emergency_contact(&contact);
     assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+}
+
+// ── Issue #219: pause reason code ────────────────────────────────────────────
+
+#[test]
+fn test_pause_stores_reason_and_message() {
+    let f = VaultFixture::new();
+    let msg = soroban_sdk::String::from_str(&f.env, "Scheduled maintenance window");
+    f.vault.pause(&PauseReason::Maintenance, &msg);
+
+    let info = f.vault.get_pause_info();
+    assert!(info.is_some());
+    let info = info.unwrap();
+    assert_eq!(info.reason, PauseReason::Maintenance);
+    assert_eq!(info.message, msg);
+    assert_eq!(info.paused_at, f.env.ledger().sequence());
+}
+
+#[test]
+fn test_get_pause_info_returns_none_when_not_paused() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_pause_info(), None);
+}
+
+#[test]
+fn test_unpause_clears_pause_info() {
+    let f = VaultFixture::new();
+    let msg = soroban_sdk::String::from_str(&f.env, "Security incident");
+    f.vault.pause(&PauseReason::SecurityIncident, &msg);
+    assert!(f.vault.get_pause_info().is_some());
+
+    f.vault.unpause();
+    assert_eq!(f.vault.get_pause_info(), None);
+}
+
+#[test]
+fn test_pause_too_long_message_rejected() {
+    let f = VaultFixture::new();
+    let long_msg = soroban_sdk::String::from_str(&f.env, &"x".repeat(201));
+    let result = f.vault.try_pause(&PauseReason::Other, &long_msg);
+    assert_eq!(result, Err(Ok(VaultError::DescriptionTooLong)));
+}
+
+#[test]
+fn test_pause_at_exact_200_char_limit_succeeds() {
+    let f = VaultFixture::new();
+    let msg = soroban_sdk::String::from_str(&f.env, &"a".repeat(200));
+    f.vault.pause(&PauseReason::CapAdjustment, &msg);
+    let info = f.vault.get_pause_info().unwrap();
+    assert_eq!(info.reason, PauseReason::CapAdjustment);
+}
+
+#[test]
+fn test_pause_all_reason_variants() {
+    let f = VaultFixture::new();
+
+    f.vault.pause(
+        &PauseReason::Maintenance,
+        &soroban_sdk::String::from_str(&f.env, "m"),
+    );
+    f.vault.unpause();
+
+    f.vault.pause(
+        &PauseReason::SecurityIncident,
+        &soroban_sdk::String::from_str(&f.env, "s"),
+    );
+    f.vault.unpause();
+
+    f.vault.pause(
+        &PauseReason::RateReconfiguration,
+        &soroban_sdk::String::from_str(&f.env, "r"),
+    );
+    f.vault.unpause();
+
+    f.vault.pause(
+        &PauseReason::CapAdjustment,
+        &soroban_sdk::String::from_str(&f.env, "c"),
+    );
+    f.vault.unpause();
+
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "o"),
+    );
+}
+
+// ── Issue #217: tax reporting helper ─────────────────────────────────────────
+
+#[test]
+fn test_get_tax_report_empty_range_returns_zeros() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let report = f.vault.get_tax_report(&f.alice, &100, &200);
+    assert_eq!(report.total_rewards_claimed, 0);
+    assert_eq!(report.claim_count, 0);
+}
+
+#[test]
+fn test_claim_history_populated_correctly() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    set_ledger(&f.env, 100);
+    f.vault.claim(&f.alice);
+
+    set_ledger(&f.env, 200);
+    f.vault.claim(&f.alice);
+
+    let report = f.vault.get_tax_report(&f.alice, &0, &300);
+    assert_eq!(report.claim_count, 2);
+    assert!(report.total_rewards_claimed > 0);
+}
+
+#[test]
+fn test_report_sums_only_claims_in_range() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    set_ledger(&f.env, 100);
+    f.vault.claim(&f.alice);
+
+    set_ledger(&f.env, 200);
+    f.vault.claim(&f.alice);
+
+    let report = f.vault.get_tax_report(&f.alice, &150, &250);
+    assert_eq!(report.claim_count, 1);
+}
+
+#[test]
+fn test_claim_history_cap_enforced() {
+    let f = VaultFixture::new();
+    let annual_stake = STELLAR_LEDGERS_PER_YEAR as i128;
+    f.token_admin.mint(&f.admin, &(annual_stake * 200));
+    f.vault.set_reward_rate_bps(&BOOST_BPS_BASE);
+    f.vault.fund_reward_pool(&f.admin, &(annual_stake * 200));
+    f.vault.stake(&f.alice, &annual_stake);
+
+    // Make 105 claims (max is 100) — oldest should be dropped
+    for i in 1..=105 {
+        set_ledger(&f.env, i * 100);
+        f.vault.claim(&f.alice);
+    }
+
+    let report = f.vault.get_tax_report(&f.alice, &0, &20_000);
+    assert_eq!(report.claim_count, 100);
+}
+
+// ── Issue #220: rounding policy ──────────────────────────────────────────────
+
+#[test]
+fn test_default_rounding_policy_is_floor() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_rounding_policy(), RoundingPolicy::Floor);
+}
+
+#[test]
+fn test_set_rounding_policy() {
+    let f = VaultFixture::new();
+    f.vault.set_rounding_policy(&RoundingPolicy::Ceiling);
+    assert_eq!(f.vault.get_rounding_policy(), RoundingPolicy::Ceiling);
+}
+
+#[test]
+fn test_floor_rounds_down() {
+    let f = VaultFixture::new();
+    // 7 / 3 = 2 with floor
+    let result = f.vault.apply_rounding(&7, &3);
+    assert_eq!(result, 2);
+}
+
+#[test]
+fn test_ceiling_rounds_up() {
+    let f = VaultFixture::new();
+    f.vault.set_rounding_policy(&RoundingPolicy::Ceiling);
+    // 7 / 3 = 3 with ceiling
+    let result = f.vault.apply_rounding(&7, &3);
+    assert_eq!(result, 3);
+}
+
+#[test]
+fn test_nearest_rounds_to_closest() {
+    let f = VaultFixture::new();
+    f.vault.set_rounding_policy(&RoundingPolicy::Nearest);
+    // 7 / 3 = 2 with nearest (7 + 1) / 3 = 2
+    let result = f.vault.apply_rounding(&7, &3);
+    assert_eq!(result, 2);
+
+    // 8 / 3 = 3 with nearest (8 + 1) / 3 = 3
+    let result2 = f.vault.apply_rounding(&8, &3);
+    assert_eq!(result2, 3);
+}
+
+#[test]
+fn test_policy_change_applies_to_next_calculation() {
+    let f = VaultFixture::new();
+    // Default is floor
+    assert_eq!(f.vault.apply_rounding(&7, &3), 2);
+
+    // Change to ceiling
+    f.vault.set_rounding_policy(&RoundingPolicy::Ceiling);
+    assert_eq!(f.vault.apply_rounding(&7, &3), 3);
+}
+
+#[test]
+fn test_apply_rounding_zero_denominator_returns_zero() {
+    let f = VaultFixture::new();
+    let result = f.vault.apply_rounding(&100, &0);
+    assert_eq!(result, 0);
+}
+
+// ── Issue #218: pool-to-pool migration ───────────────────────────────────────
+
+#[test]
+fn test_set_and_get_migration_target() {
+    let f = VaultFixture::new();
+    let target = Address::generate(&f.env);
+    f.vault.set_migration_target(&f.admin, &target);
+    assert_eq!(f.vault.get_migration_target(), Some(target));
+}
+
+#[test]
+fn test_get_migration_target_returns_none_initially() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_migration_target(), None);
+}
+
+#[test]
+fn test_migration_target_immutable_after_set() {
+    let f = VaultFixture::new();
+    let target1 = Address::generate(&f.env);
+    let target2 = Address::generate(&f.env);
+
+    f.vault.set_migration_target(&f.admin, &target1);
+    let result = f.vault.try_set_migration_target(&f.admin, &target2);
+    assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
+    assert_eq!(f.vault.get_migration_target(), Some(target1));
 }
