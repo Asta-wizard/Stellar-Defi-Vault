@@ -577,3 +577,67 @@ pub struct StorageUsageReport {
     pub persistent_other_keys: u32,
     pub estimated_total_bytes: u32,
 }
+
+// ── Issue #197: fee splitting ─────────────────────────────────────────────────
+
+/// One recipient of a proportional fee split (issue #197).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecipient {
+    pub address: Address,
+    pub share_bps: u32,
+}
+
+// ── Issue #195: timelocked admin actions ─────────────────────────────────────
+
+/// A queued admin action awaiting its timelock delay (issue #195).
+///
+/// Execution support (see `execute_action()` in vault.rs) is implemented for
+/// `AdminAction::SetRewardRate` and `AdminAction::Pause`/`Unpause` — the
+/// issue's own notes call these out as "the primary candidates" for
+/// timelock. Queuing any other `AdminAction` is allowed (the queue/cancel
+/// lifecycle itself is generic), but executing one reverts with
+/// `ActionNotFound` rather than silently doing nothing, since safely
+/// decoding+dispatching arbitrary opaque `Bytes` for every admin action in
+/// this contract is a much larger dispatcher than this issue's stated scope.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAction {
+    pub id: u32,
+    pub action_type: AdminAction,
+    pub params: soroban_sdk::Bytes,
+    pub queued_at: u32,
+    pub executable_at: u32,
+}
+
+// ── Issue #196: multi-sig admin ──────────────────────────────────────────────
+
+/// Multisig configuration: up to 5 admin addresses and an M-of-N approval
+/// threshold (issue #196). Additive and optional — see the scope note on
+/// `initialize_multisig()` in vault.rs for why this does not replace the
+/// existing single `Admin` key.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultisigConfig {
+    pub admins: Vec<Address>,
+    pub threshold: u32,
+}
+
+/// A multisig proposal awaiting approvals (issue #196). Named
+/// `AdminProposal` rather than the issue's literal `Proposal` to avoid
+/// confusion with the existing, unrelated `GovernanceProposal` (staker
+/// voting on pool parameters, issue #216) already in this file.
+///
+/// Same execution-dispatch scope note as `PendingAction` above: only
+/// `AdminAction::SetRewardRate` and `Pause`/`Unpause` are actually
+/// executable once threshold is reached; other action types can be
+/// proposed and approved but revert on execution.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminProposal {
+    pub id: u32,
+    pub action_type: AdminAction,
+    pub params: soroban_sdk::Bytes,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+}

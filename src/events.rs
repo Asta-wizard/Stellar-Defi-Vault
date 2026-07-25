@@ -65,6 +65,26 @@ pub fn penalty_redistributed(env: &Env, total_amount: i128, staker_count: u32, l
         .publish(topics, (total_amount, staker_count, ledger));
 }
 
+/// Issue #197: emitted once per recipient during a fee split.
+pub fn fee_distributed(env: &Env, recipient: &Address, amount: i128, ledger: u32) {
+    let topics = (symbol_short!("fee_dist"), recipient);
+    env.events().publish(topics, (amount, ledger));
+}
+
+/// Issue #195: emitted by `queue_action()`.
+pub fn action_queued(env: &Env, action_id: u32, executable_at: u32) {
+    let topics = (symbol_short!("act_queue"),);
+    env.events()
+        .publish(topics, (action_id, executable_at, env.ledger().sequence()));
+}
+
+/// Issue #195: emitted by `execute_action()`.
+pub fn action_executed(env: &Env, action_id: u32) {
+    let topics = (symbol_short!("act_exec"),);
+    env.events()
+        .publish(topics, (action_id, env.ledger().sequence()));
+}
+
 pub fn rate_changed(env: &Env, old_rate_bps: u32, new_rate_bps: u32) {
     let topics = (symbol_short!("rate_chg"),);
     env.events().publish(
