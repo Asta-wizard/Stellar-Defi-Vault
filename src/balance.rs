@@ -816,9 +816,7 @@ pub fn set_claim_history(env: &Env, user: &Address, history: &Vec<(u32, i128)>) 
 // ── Issue #219: pause info ───────────────────────────────────────────────────
 
 pub fn get_pause_info(env: &Env) -> Option<crate::storage::PauseInfo> {
-    env.storage()
-        .instance()
-        .get(&symbol_short!("ps_info"))
+    env.storage().instance().get(&symbol_short!("ps_info"))
 }
 
 pub fn set_pause_info(env: &Env, info: &crate::storage::PauseInfo) {

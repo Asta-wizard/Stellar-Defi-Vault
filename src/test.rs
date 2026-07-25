@@ -313,7 +313,10 @@ fn test_preview_redeem_matches_actual_withdraw() {
 #[test]
 fn test_pause_blocks_deposit() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let result = f.vault.try_deposit(&f.alice, &100_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -323,7 +326,10 @@ fn test_pause_blocks_deposit() {
 fn test_pause_blocks_withdraw() {
     let f = VaultFixture::new();
     f.vault.deposit(&f.alice, &100_000);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let result = f.vault.try_withdraw(&f.alice, &100_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -332,7 +338,10 @@ fn test_pause_blocks_withdraw() {
 #[test]
 fn test_unpause_restores_operations() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     f.vault.unpause();
 
     let shares = f.vault.deposit(&f.alice, &100_000);
@@ -348,7 +357,10 @@ fn test_is_paused_defaults_to_false() {
 #[test]
 fn test_is_paused_returns_true_after_pause() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert!(f.vault.is_paused());
 }
 
@@ -359,7 +371,10 @@ fn test_transfer_admin() {
     let f = VaultFixture::new();
     f.vault.transfer_admin(&f.bob);
     // Bob is now admin — he should be able to pause
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 }
 
 #[test]
@@ -417,7 +432,10 @@ fn test_add_yield_requires_admin_auth() {
 fn test_add_yield_paused_blocks() {
     let f = VaultFixture::new();
     f.token_admin.mint(&f.admin, &50_000);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let result = f.vault.try_add_yield(&f.admin, &50_000);
     assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
@@ -591,7 +609,10 @@ fn test_withdraw_emits_event() {
 fn test_pause_emits_event() {
     let f = VaultFixture::new();
 
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let events = f.env.events().all();
     let paused_events: std::vec::Vec<_> = events
@@ -605,7 +626,10 @@ fn test_pause_emits_event() {
 #[test]
 fn test_unpause_emits_event() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     f.vault.unpause();
 
@@ -719,7 +743,10 @@ fn test_transfer_admin_requires_admin_auth() {
 #[test]
 fn test_pause_requires_admin_auth() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(f.env.auths()[0].0, f.admin);
 }
 
@@ -1505,7 +1532,10 @@ fn test_admin_action_count_increments() {
         "Count should increment after each admin action"
     );
 
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(f.vault.get_admin_action_count(), before + 2);
 
     f.vault.unpause();
@@ -1528,7 +1558,10 @@ fn test_admin_action_set_reward_rate_emits_audit_event() {
 #[test]
 fn test_admin_action_pause_emits_audit_event() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let events = f.env.events().all();
     let audit_events: std::vec::Vec<_> = events
@@ -1566,7 +1599,10 @@ fn test_admin_action_count_increments_across_all_admin_fns() {
     expected += 1;
     assert_eq!(f.vault.get_admin_action_count(), expected);
 
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     expected += 1;
     assert_eq!(f.vault.get_admin_action_count(), expected);
 
@@ -2236,7 +2272,10 @@ fn test_get_pool_config_returns_all_fields() {
 #[test]
 fn test_get_pool_config_reflects_paused_state() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
 
     let config = f.vault.get_pool_config();
     assert!(config.paused);
@@ -2585,7 +2624,10 @@ fn test_can_unstake_insufficient_amount_too_much() {
 fn test_can_unstake_pool_paused() {
     let f = VaultFixture::new();
     f.vault.stake(&f.alice, &100_000);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(
         f.vault.can_unstake(&f.alice, &100_000),
         UnstakeCheckResult::PoolPaused
@@ -3028,14 +3070,20 @@ fn test_last_updated_ledger_after_claim() {
 fn test_last_updated_ledger_after_pause() {
     let f = VaultFixture::new();
     set_ledger(&f.env, 400);
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     assert_eq!(f.vault.get_last_updated_ledger(), 400);
 }
 
 #[test]
 fn test_last_updated_ledger_after_unpause() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     set_ledger(&f.env, 500);
     f.vault.unpause();
     assert_eq!(f.vault.get_last_updated_ledger(), 500);
@@ -3607,7 +3655,10 @@ fn test_changelog_records_rate_change() {
 #[test]
 fn test_changelog_records_pause_and_unpause() {
     let f = VaultFixture::new();
-    f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+    f.vault.pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "test"),
+    );
     f.vault.unpause();
     let log: Vec<ChangelogEntry> = f.vault.get_changelog();
     assert_eq!(log.len(), 2);
@@ -3630,7 +3681,10 @@ fn test_changelog_drops_oldest_when_full() {
     let total = MAX_CHANGELOG_ENTRIES + 1;
     for i in 0..total {
         if i % 2 == 0 {
-            f.vault.pause(&PauseReason::Other, &soroban_sdk::String::from_str(&f.env, "test"));
+            f.vault.pause(
+                &PauseReason::Other,
+                &soroban_sdk::String::from_str(&f.env, "test"),
+            );
         } else {
             f.vault.unpause();
         }
