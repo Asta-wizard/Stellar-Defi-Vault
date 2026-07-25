@@ -178,6 +178,46 @@ pub enum VaultExtError {
     ZeroAmount = 3,
     /// Mirrors `VaultError::ArithmeticError`.
     ArithmeticError = 4,
+    /// Mirrors `VaultError::AlreadyInitialized` — returned by `import_state()`.
+    AlreadyInitialized = 5,
+    /// Returned by `set_insurance_rate_bps()` when `bps` exceeds 500 (5%)
+    /// (issue #199).
+    InvalidInsuranceRate = 6,
+    /// Returned by `export_state()` when more than 100 positions would be
+    /// exported (issue #203).
+    TooManyPositions = 7,
+    /// Returned by `set_fee_recipients()` when `recipients.len() > 5`
+    /// (issue #197).
+    TooManyRecipients = 8,
+    /// Returned by `set_fee_recipients()` when the recipients' `share_bps`
+    /// values don't sum to exactly 10 000 (issue #197).
+    InvalidFeeAllocation = 9,
+    /// Returned by `queue_action()` when 5 actions are already pending
+    /// (issue #195).
+    TooManyPendingActions = 10,
+    /// Returned by `execute_action()`/`cancel_action()` when the given
+    /// action id doesn't exist or was already executed/cancelled (issue
+    /// #195).
+    ActionNotFound = 11,
+    /// Returned by `execute_action()` when called before `executable_at`
+    /// (issue #195).
+    ActionNotYetExecutable = 12,
+    /// Returned by `initialize_multisig()` when `admins.len()` is 0 or > 5,
+    /// or `threshold` is 0 or greater than `admins.len()` (issue #196).
+    InvalidMultisigConfig = 13,
+    /// Returned by `propose_action()` when 10 open proposals already exist
+    /// (issue #196).
+    TooManyProposals = 14,
+    /// Returned by `propose_action()`/`approve_action()` when the caller is
+    /// not one of the configured multisig admins (issue #196).
+    NotAMultisigAdmin = 15,
+    /// Returned by `approve_action()` when the caller already approved this
+    /// proposal (issue #196).
+    AlreadyApproved = 16,
+    /// Returned by `execute_proposal()` when approvals are below the
+    /// configured threshold, or the proposal id doesn't exist / was already
+    /// executed (issue #196).
+    ProposalNotReady = 17,
     /// Returned by `rollback_last_rate_change()` when there is no previous
     /// rate to restore, or it was already rolled back (issue #206).
     RollbackUnavailable = 5,

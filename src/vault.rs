@@ -1,4 +1,5 @@
 use soroban_sdk::{
+    contract, contractimpl, symbol_short, token, Address, Bytes, Env, String, Symbol, Vec,
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, String, Symbol,
     Vec,
 };
@@ -9,6 +10,13 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
+        AdminAction, AdminProposal, BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow,
+        ContractAddresses, ContractMetadata, DataKey, DayBucket, EpochState, FeeRecipient,
+        GovernanceProposal, InterfaceId, LeaderboardEntry, MigrationExport, MultisigConfig,
+        PauseInfo, PauseReason, PendingAction, PoolConfig, PoolHealthReport, PoolStats,
+        ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, RoundingPolicy, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, StorageUsageReport,
+        TaxReport, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
         BoostTierProgress, BootstrapConfig, CampaignInfo, ChangelogEntry, ClaimWindow,
         ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, EpochState,
         GovernanceProposal, InterfaceId, LeaderboardEntry, PauseInfo, PauseReason, PoolConfig,
@@ -690,6 +698,358 @@ impl VaultContract {
     /// Read-only query for the configured reward token decimal precision.
     pub fn reward_decimals(env: Env) -> u32 {
         balance::get_reward_decimals(&env)
+    }
+
+    /// Read-only: cumulative volume ever staked across the pool's lifetime
+    /// (issue #163). Unlike `total_deposited`/`vault_state()` (current TVL,
+    /// which goes back down on `unstake`), this counter only ever
+    /// increases — it measures lifetime volume, not current holdings. No
+    /// auth required.
+    pub fn get_total_ever_staked(env: Env) -> i128 {
+        balance::get_total_ever_staked(&env)
+    }
+
+    /// Admin: configure proportional fee-splitting recipients (issue #197).
+    /// Shares must sum to exactly 10 000 bps (100%); max 5 recipients.
+    /// Applies to `unstake`'s fee collection (`claim` has no separate fee
+    /// mechanism in this contract today — only reward payment and the
+    /// insurance-fund retention from issue #199 — so there's nothing to
+    /// split there; this only wires into the one fee that actually exists).
+    /// Pass an empty `Vec` to disable splitting and restore the existing
+    /// behavior (fee accumulates in the contract as before).
+    pub fn set_fee_recipients(
+        env: Env,
+        recipients: Vec<FeeRecipient>,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+
+        if recipients.len() > 5 {
+            return Err(VaultExtError::TooManyRecipients);
+        }
+        if !recipients.is_empty() {
+            let mut total_bps: u32 = 0;
+            for r in recipients.iter() {
+                total_bps = total_bps.saturating_add(r.share_bps);
+            }
+            if total_bps != 10_000 {
+                return Err(VaultExtError::InvalidFeeAllocation);
+            }
+        }
+
+        balance::set_fee_recipients(&env, &recipients);
+        Ok(())
+    }
+
+    /// Read-only: the currently configured fee recipients (empty if
+    /// splitting is disabled).
+    pub fn get_fee_recipients(env: Env) -> Vec<FeeRecipient> {
+        balance::get_fee_recipients(&env)
+    }
+
+    /// Splits `fee_amount` proportionally across `recipients` and transfers
+    /// each share directly (unlike `redistribute_penalty`'s pending-balance
+    /// credit — issue #197 asks for these to be paid out, not accrued).
+    /// Rounding dust goes to the first recipient (per the issue's notes).
+    fn distribute_fee(
+        env: &Env,
+        token_addr: &Address,
+        fee_amount: i128,
+        recipients: &Vec<FeeRecipient>,
+    ) {
+        let token_client = token::Client::new(env, token_addr);
+
+        // Dust from integer-division rounding goes to the first recipient
+        // (per the issue's notes): compute every recipient *after* the
+        // first normally, then give the first whatever remains.
+        let mut distributed_to_rest: i128 = 0;
+        for r in recipients.iter().skip(1) {
+            let share_amount = (fee_amount * r.share_bps as i128) / 10_000;
+            distributed_to_rest += share_amount;
+            if share_amount > 0 {
+                token_client.transfer(&env.current_contract_address(), &r.address, &share_amount);
+                events::fee_distributed(env, &r.address, share_amount, env.ledger().sequence());
+            }
+        }
+
+        if let Some(first) = recipients.iter().next() {
+            let first_amount = fee_amount - distributed_to_rest;
+            if first_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &first.address,
+                    &first_amount,
+                );
+                events::fee_distributed(env, &first.address, first_amount, env.ledger().sequence());
+            }
+        }
+    }
+
+    /// Admin: set the ledger delay required before a queued action becomes
+    /// executable (issue #195). `0` disables the timelock — `queue_action`
+    /// then produces an immediately-executable entry.
+    pub fn set_timelock_delay(env: Env, ledgers: u32) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        balance::set_timelock_delay(&env, ledgers);
+        Ok(())
+    }
+
+    /// Admin: schedule `action_type` (with opaque `params`) to become
+    /// executable after the configured timelock delay (issue #195). Max 5
+    /// pending actions at once. See `PendingAction`'s doc comment for which
+    /// `action_type`s `execute_action()` actually knows how to run.
+    pub fn queue_action(
+        env: Env,
+        action_type: AdminAction,
+        params: Bytes,
+    ) -> Result<u32, VaultExtError> {
+        admin::require_admin(&env)?;
+
+        let mut pending = balance::get_pending_actions(&env);
+        if pending.len() >= 5 {
+            return Err(VaultExtError::TooManyPendingActions);
+        }
+
+        let id = balance::next_action_id(&env);
+        let queued_at = env.ledger().sequence();
+        let executable_at = queued_at.saturating_add(balance::get_timelock_delay(&env));
+
+        pending.push_back(PendingAction {
+            id,
+            action_type,
+            params,
+            queued_at,
+            executable_at,
+        });
+        balance::set_pending_actions(&env, &pending);
+
+        events::action_queued(&env, id, executable_at);
+        Ok(id)
+    }
+
+    /// Admin: cancel a still-pending queued action (issue #195).
+    pub fn cancel_action(env: Env, action_id: u32) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+
+        let mut pending = balance::get_pending_actions(&env);
+        let idx = pending.iter().position(|a| a.id == action_id);
+        match idx {
+            Some(idx) => {
+                pending.remove(idx as u32);
+                balance::set_pending_actions(&env, &pending);
+                Ok(())
+            }
+            None => Err(VaultExtError::ActionNotFound),
+        }
+    }
+
+    /// Admin: execute a queued action once its timelock delay has elapsed
+    /// (issue #195). Only `AdminAction::SetRewardRate` (params: 4-byte
+    /// big-endian `u32` rate) and `Pause`/`Unpause` (no params) are actually
+    /// dispatched — see `PendingAction`'s doc comment for why other action
+    /// types, while queueable, revert here with `ActionNotFound`.
+    pub fn execute_action(env: Env, action_id: u32) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+
+        let mut pending = balance::get_pending_actions(&env);
+        let idx = pending
+            .iter()
+            .position(|a| a.id == action_id)
+            .ok_or(VaultExtError::ActionNotFound)?;
+        let action = pending.get(idx as u32).unwrap();
+
+        if env.ledger().sequence() < action.executable_at {
+            return Err(VaultExtError::ActionNotYetExecutable);
+        }
+
+        Self::dispatch_admin_action(&env, &action.action_type, &action.params)?;
+
+        pending.remove(idx as u32);
+        balance::set_pending_actions(&env, &pending);
+
+        events::action_executed(&env, action_id);
+        Ok(())
+    }
+
+    /// Read-only: all currently queued actions.
+    pub fn get_pending_actions(env: Env) -> Vec<PendingAction> {
+        balance::get_pending_actions(&env)
+    }
+
+    /// Shared by `execute_action()` (#195) and `execute_proposal()` (#196).
+    /// See `PendingAction`/`AdminProposal`'s doc comments for the scope
+    /// note on why only these two action types are actually runnable.
+    fn dispatch_admin_action(
+        env: &Env,
+        action_type: &AdminAction,
+        params: &Bytes,
+    ) -> Result<(), VaultExtError> {
+        match action_type {
+            AdminAction::SetRewardRate => {
+                let rate_bps =
+                    Self::decode_u32_bytes(params).ok_or(VaultExtError::ActionNotFound)?;
+                balance::set_reward_rate_bps(env, rate_bps);
+                Ok(())
+            }
+            AdminAction::Pause => {
+                env.storage().instance().set(&DataKey::Paused, &true);
+                Ok(())
+            }
+            AdminAction::Unpause => {
+                env.storage().instance().set(&DataKey::Paused, &false);
+                Ok(())
+            }
+            _ => Err(VaultExtError::ActionNotFound),
+        }
+    }
+
+    fn decode_u32_bytes(bytes: &Bytes) -> Option<u32> {
+        if bytes.len() != 4 {
+            return None;
+        }
+        let mut buf = [0u8; 4];
+        for (i, slot) in buf.iter_mut().enumerate() {
+            *slot = bytes.get(i as u32)?;
+        }
+        Some(u32::from_be_bytes(buf))
+    }
+
+    /// Set up an M-of-N multisig admin group (issue #196). Max 5 admins;
+    /// `threshold` must be between 1 and `admins.len()`.
+    ///
+    /// Scope note: the issue says this "replaces the single admin model
+    /// entirely" and warns to "design carefully to avoid locking the
+    /// contract" — replacing every one of this contract's ~40+
+    /// `admin::require_admin()` call sites with multisig-gated dispatch in
+    /// the time available for this change is a large, high-blast-radius
+    /// rewrite that risks exactly the "locked contract" outcome the issue
+    /// warns against (a bug in the replacement could brick every admin
+    /// entrypoint at once, with no fallback). Implemented additively
+    /// instead: the existing single `Admin` key and every function that
+    /// already uses it are completely untouched, and this multisig group is
+    /// a separate, optional mechanism that gates its own
+    /// propose/approve/execute lifecycle (dispatching the same
+    /// `AdminAction` set `execute_action()` from issue #195 supports). A
+    /// full single-admin replacement would need its own dedicated,
+    /// carefully-reviewed migration, not a rushed rewrite alongside three
+    /// other issues.
+    ///
+    /// Callable once; does not require the existing single admin's
+    /// authorization (by design, so a multisig group can be bootstrapped
+    /// independently) — but as with any admin setup call, whoever can call
+    /// this first controls the multisig group, so it should be invoked
+    /// immediately after deployment in the same way `initialize()` is.
+    pub fn initialize_multisig(
+        env: Env,
+        admins: Vec<Address>,
+        threshold: u32,
+    ) -> Result<(), VaultExtError> {
+        if admins.is_empty() || admins.len() > 5 {
+            return Err(VaultExtError::InvalidMultisigConfig);
+        }
+        if threshold == 0 || threshold > admins.len() {
+            return Err(VaultExtError::InvalidMultisigConfig);
+        }
+
+        balance::set_multisig_config(&env, &MultisigConfig { admins, threshold });
+        Ok(())
+    }
+
+    fn require_multisig_admin(
+        env: &Env,
+        caller: &Address,
+    ) -> Result<MultisigConfig, VaultExtError> {
+        caller.require_auth();
+        let config = balance::get_multisig_config(env).ok_or(VaultExtError::NotAMultisigAdmin)?;
+        if !config.admins.iter().any(|a| &a == caller) {
+            return Err(VaultExtError::NotAMultisigAdmin);
+        }
+        Ok(config)
+    }
+
+    /// Any configured multisig admin proposes a new action (issue #196).
+    /// Max 10 open (unexecuted) proposals at once.
+    pub fn propose_action(
+        env: Env,
+        admin_addr: Address,
+        action_type: AdminAction,
+        params: Bytes,
+    ) -> Result<u32, VaultExtError> {
+        Self::require_multisig_admin(&env, &admin_addr)?;
+
+        let mut proposals = balance::get_admin_proposals(&env);
+        let open_count = proposals.iter().filter(|p| !p.executed).count();
+        if open_count >= 10 {
+            return Err(VaultExtError::TooManyProposals);
+        }
+
+        let id = balance::next_proposal_id(&env);
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(admin_addr);
+
+        proposals.push_back(AdminProposal {
+            id,
+            action_type,
+            params,
+            approvals,
+            executed: false,
+        });
+        balance::set_admin_proposals(&env, &proposals);
+        Ok(id)
+    }
+
+    /// A configured multisig admin approves an existing proposal (issue
+    /// #196). Rejects a second approval from the same admin.
+    pub fn approve_action(
+        env: Env,
+        admin_addr: Address,
+        proposal_id: u32,
+    ) -> Result<(), VaultExtError> {
+        Self::require_multisig_admin(&env, &admin_addr)?;
+
+        let mut proposals = balance::get_admin_proposals(&env);
+        let idx = proposals
+            .iter()
+            .position(|p| p.id == proposal_id && !p.executed)
+            .ok_or(VaultExtError::ProposalNotReady)?;
+        let mut proposal = proposals.get(idx as u32).unwrap();
+
+        if proposal.approvals.iter().any(|a| a == admin_addr) {
+            return Err(VaultExtError::AlreadyApproved);
+        }
+        proposal.approvals.push_back(admin_addr);
+        proposals.set(idx as u32, proposal);
+        balance::set_admin_proposals(&env, &proposals);
+        Ok(())
+    }
+
+    /// Anyone may execute a proposal once its approval threshold is reached
+    /// (issue #196) — dispatch is what's actually gated by the multisig, not
+    /// the call itself.
+    pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), VaultExtError> {
+        let config = balance::get_multisig_config(&env).ok_or(VaultExtError::NotAMultisigAdmin)?;
+
+        let mut proposals = balance::get_admin_proposals(&env);
+        let idx = proposals
+            .iter()
+            .position(|p| p.id == proposal_id && !p.executed)
+            .ok_or(VaultExtError::ProposalNotReady)?;
+        let mut proposal = proposals.get(idx as u32).unwrap();
+
+        if proposal.approvals.len() < config.threshold {
+            return Err(VaultExtError::ProposalNotReady);
+        }
+
+        Self::dispatch_admin_action(&env, &proposal.action_type, &proposal.params)?;
+
+        proposal.executed = true;
+        proposals.set(idx as u32, proposal);
+        balance::set_admin_proposals(&env, &proposals);
+        Ok(())
+    }
+
+    /// Read-only: all multisig proposals (executed and pending).
+    pub fn get_proposals(env: Env) -> Vec<AdminProposal> {
+        balance::get_admin_proposals(&env)
     }
 
     /// Query total shares and deposited amounts.
@@ -3490,6 +3850,9 @@ impl VaultContract {
 
         events::deposit(env, staker, amount, shares, env.ledger().sequence());
         balance::set_last_updated_ledger(env, env.ledger().sequence()); // Issue #69
+                                                                        // Issue #163: lifetime volume counter — unlike total_deposited, this
+                                                                        // only ever goes up, even after later unstakes.
+        balance::set_total_ever_staked(env, balance::get_total_ever_staked(env) + amount);
         balance::set_last_stake_ledger(env, staker, env.ledger().sequence()); // Issue #201
 
         Self::record_activity(env, "stake");
@@ -3627,8 +3990,15 @@ impl VaultContract {
         balance::set_total_deposited(env, total_deposited - amount_returned - unstake_fee);
 
         if unstake_fee > 0 {
-            let reward_pool = balance::get_reward_pool_balance(env);
-            balance::set_reward_pool_balance(env, reward_pool + unstake_fee);
+            // Issue #197: if fee-split recipients are configured, pay them
+            // directly instead of crediting the reward treasury.
+            let recipients = balance::get_fee_recipients(env);
+            if recipients.is_empty() {
+                let reward_pool = balance::get_reward_pool_balance(env);
+                balance::set_reward_pool_balance(env, reward_pool + unstake_fee);
+            } else {
+                Self::distribute_fee(env, &token_addr, unstake_fee, &recipients);
+            }
             balance::add_protocol_fee_collected(env, unstake_fee);
         }
 

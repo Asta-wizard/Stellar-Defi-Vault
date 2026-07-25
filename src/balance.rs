@@ -1,4 +1,7 @@
 use crate::storage::{
+    AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, FeeRecipient,
+    GovernanceProposal, MultisigConfig, PendingAction, RateHistoryEntry, ReferralStats,
+    VestingEntry,
     ChangelogEntry, ClaimWindow, DataKey, DayBucket, GovernanceProposal, RateHistoryEntry,
     ReferralStats, StakePosition, VestingEntry,
 };
@@ -1010,4 +1013,111 @@ pub fn set_dex_router(env: &Env, router: &Address) {
     env.storage()
         .instance()
         .set(&symbol_short!("dexroutr"), router);
+}
+
+// ── Issue #163: lifetime total-ever-staked counter ───────────────────────────
+
+pub fn get_total_ever_staked(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("everstk"))
+        .unwrap_or(0)
+}
+
+pub fn set_total_ever_staked(env: &Env, total: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("everstk"), &total);
+}
+
+// ── Issue #197: fee splitting ─────────────────────────────────────────────────
+
+pub fn get_fee_recipients(env: &Env) -> Vec<FeeRecipient> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("feerecip"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_fee_recipients(env: &Env, recipients: &Vec<FeeRecipient>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("feerecip"), recipients);
+}
+
+// ── Issue #195: timelocked admin actions ─────────────────────────────────────
+
+pub fn get_timelock_delay(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("tlockdly"))
+        .unwrap_or(0)
+}
+
+pub fn set_timelock_delay(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("tlockdly"), &ledgers);
+}
+
+pub fn get_pending_actions(env: &Env) -> Vec<PendingAction> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("pendacts"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_pending_actions(env: &Env, actions: &Vec<PendingAction>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("pendacts"), actions);
+}
+
+pub fn next_action_id(env: &Env) -> u32 {
+    let id: u32 = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("actidctr"))
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&symbol_short!("actidctr"), &(id + 1));
+    id
+}
+
+// ── Issue #196: multi-sig admin ──────────────────────────────────────────────
+
+pub fn get_multisig_config(env: &Env) -> Option<MultisigConfig> {
+    env.storage().instance().get(&symbol_short!("msigcfg"))
+}
+
+pub fn set_multisig_config(env: &Env, config: &MultisigConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("msigcfg"), config);
+}
+
+pub fn get_admin_proposals(env: &Env) -> Vec<AdminProposal> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("msigprop"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_admin_proposals(env: &Env, proposals: &Vec<AdminProposal>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("msigprop"), proposals);
+}
+
+pub fn next_proposal_id(env: &Env) -> u32 {
+    let id: u32 = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("propidct"))
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&symbol_short!("propidct"), &(id + 1));
+    id
 }

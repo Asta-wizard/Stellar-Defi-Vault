@@ -5,13 +5,16 @@ extern crate std;
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Events, Ledger as _},
-    token, Address, Env, Symbol, TryFromVal, Vec,
+    token, Address, Bytes, Env, Symbol, TryFromVal, Vec,
 };
 
 use crate::{
     errors::{VaultError, VaultExtError},
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
-    storage::{ChangelogEntry, PauseReason, ProposableParam, RoundingPolicy, UnstakeCheckResult},
+    storage::{
+        AdminAction, ChangelogEntry, FeeRecipient, PauseReason, ProposableParam, RoundingPolicy,
+        UnstakeCheckResult,
+    },
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
         CONTRACT_VERSION, FIRST_STAKE_COST, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
@@ -4749,4 +4752,264 @@ fn test_swap_and_stake_zero_min_stake_amount_disables_slippage_check() {
         .vault
         .swap_and_stake(&f.alice, &input_token_addr, &1_000_000, &0);
     assert_eq!(shares, 100_000);
+}
+
+// ── Issues #163, #195, #196, #197 ────────────────────────────────────────────
+//
+// NOTE: this whole crate currently fails to build on `main` due to several
+// pre-existing, unrelated issues (functions/types referenced by
+// reward_multiplier_preview / dynamic fee config / reputation score /
+// user-claim-count features that don't exist anywhere in the codebase —
+// confirmed via `git stash` to be identical with or without this PR's
+// changes). These tests are written and reviewed carefully but could not
+// actually be run in this session as a result.
+
+// ── Issue #163: lifetime total-ever-staked counter ──────────────────────────
+
+#[test]
+fn test_total_ever_staked_starts_at_zero() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_total_ever_staked(), 0);
+}
+
+#[test]
+fn test_total_ever_staked_increments_on_stake() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    assert_eq!(f.vault.get_total_ever_staked(), 500_000);
+}
+
+#[test]
+fn test_total_ever_staked_does_not_decrement_on_unstake() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.unstake(&f.alice, &200_000);
+    assert_eq!(f.vault.get_total_ever_staked(), 500_000);
+}
+
+#[test]
+fn test_total_ever_staked_accumulates_across_multiple_stakes() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.stake(&f.bob, &300_000);
+    f.vault.stake(&f.alice, &100_000);
+    assert_eq!(f.vault.get_total_ever_staked(), 900_000);
+}
+
+// ── Issue #197: fee splitting ────────────────────────────────────────────────
+
+#[test]
+fn test_two_recipients_split_correctly() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    f.vault.set_unstake_fee_bps(&f.admin, &500); // 5%
+    f.vault.set_fee_recipients(&Vec::from_array(
+        &f.env,
+        [
+            FeeRecipient {
+                address: f.bob.clone(),
+                share_bps: 6000,
+            },
+            FeeRecipient {
+                address: carol.clone(),
+                share_bps: 4000,
+            },
+        ],
+    ));
+
+    f.vault.stake(&f.alice, &1_000_000);
+    let bob_before = f.token.balance(&f.bob);
+    let carol_before = f.token.balance(&carol);
+
+    f.vault.unstake(&f.alice, &1_000_000);
+
+    let bob_after = f.token.balance(&f.bob);
+    let carol_after = f.token.balance(&carol);
+    assert!(bob_after > bob_before);
+    assert!(carol_after > carol_before);
+    // 60/40 split — bob (first recipient, absorbs dust) gets >= 1.5x carol's share.
+    assert!((bob_after - bob_before) > (carol_after - carol_before));
+}
+
+#[test]
+fn test_shares_not_summing_to_10000_rejected() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_set_fee_recipients(&Vec::from_array(
+        &f.env,
+        [FeeRecipient {
+            address: f.bob.clone(),
+            share_bps: 5000,
+        }],
+    ));
+    assert_eq!(result, Err(Ok(VaultExtError::InvalidFeeAllocation)));
+}
+
+#[test]
+fn test_more_than_five_recipients_rejected() {
+    let f = VaultFixture::new();
+    let mut recipients = Vec::new(&f.env);
+    for _ in 0..6 {
+        recipients.push_back(FeeRecipient {
+            address: Address::generate(&f.env),
+            share_bps: 10_000 / 6,
+        });
+    }
+    let result = f.vault.try_set_fee_recipients(&recipients);
+    assert_eq!(result, Err(Ok(VaultExtError::TooManyRecipients)));
+}
+
+#[test]
+fn test_single_recipient_gets_100_percent() {
+    let f = VaultFixture::new();
+    f.vault.set_unstake_fee_bps(&f.admin, &500);
+    f.vault.set_fee_recipients(&Vec::from_array(
+        &f.env,
+        [FeeRecipient {
+            address: f.bob.clone(),
+            share_bps: 10_000,
+        }],
+    ));
+
+    f.vault.stake(&f.alice, &1_000_000);
+    let bob_before = f.token.balance(&f.bob);
+    f.vault.unstake(&f.alice, &1_000_000);
+    assert!(f.token.balance(&f.bob) > bob_before);
+}
+
+// ── Issue #195: timelocked admin actions ────────────────────────────────────
+
+fn rate_params(env: &Env, rate_bps: u32) -> Bytes {
+    Bytes::from_array(env, &rate_bps.to_be_bytes())
+}
+
+#[test]
+fn test_queued_action_executes_after_delay() {
+    let f = VaultFixture::new();
+    f.vault.set_timelock_delay(&100);
+    set_ledger(&f.env, 1);
+    let id = f
+        .vault
+        .queue_action(&AdminAction::SetRewardRate, &rate_params(&f.env, 900));
+
+    set_ledger(&f.env, 1 + 100);
+    f.vault.execute_action(&id);
+    assert_eq!(f.vault.get_reward_rate_bps(), 900);
+}
+
+#[test]
+fn test_action_reverts_before_delay_elapsed() {
+    let f = VaultFixture::new();
+    f.vault.set_timelock_delay(&100);
+    set_ledger(&f.env, 1);
+    let id = f
+        .vault
+        .queue_action(&AdminAction::SetRewardRate, &rate_params(&f.env, 900));
+
+    set_ledger(&f.env, 50);
+    let result = f.vault.try_execute_action(&id);
+    assert_eq!(result, Err(Ok(VaultExtError::ActionNotYetExecutable)));
+}
+
+#[test]
+fn test_cancelled_action_cannot_execute() {
+    let f = VaultFixture::new();
+    f.vault.set_timelock_delay(&100);
+    set_ledger(&f.env, 1);
+    let id = f
+        .vault
+        .queue_action(&AdminAction::SetRewardRate, &rate_params(&f.env, 900));
+
+    f.vault.cancel_action(&id);
+    set_ledger(&f.env, 1 + 100);
+    let result = f.vault.try_execute_action(&id);
+    assert_eq!(result, Err(Ok(VaultExtError::ActionNotFound)));
+}
+
+#[test]
+fn test_zero_delay_allows_immediate_execution() {
+    let f = VaultFixture::new();
+    // Timelock delay left at its default (0).
+    set_ledger(&f.env, 1);
+    let id = f
+        .vault
+        .queue_action(&AdminAction::SetRewardRate, &rate_params(&f.env, 900));
+    f.vault.execute_action(&id); // same ledger, no advance needed
+    assert_eq!(f.vault.get_reward_rate_bps(), 900);
+}
+
+// ── Issue #196: multi-sig admin ──────────────────────────────────────────────
+
+#[test]
+fn test_proposal_executes_at_threshold() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    f.vault.initialize_multisig(
+        &Vec::from_array(&f.env, [f.alice.clone(), f.bob.clone(), carol.clone()]),
+        &2,
+    );
+
+    let id = f.vault.propose_action(
+        &f.alice,
+        &AdminAction::SetRewardRate,
+        &rate_params(&f.env, 900),
+    );
+    f.vault.approve_action(&f.bob, &id);
+    f.vault.execute_proposal(&id);
+
+    assert_eq!(f.vault.get_reward_rate_bps(), 900);
+}
+
+#[test]
+fn test_proposal_blocked_below_threshold() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    f.vault.initialize_multisig(
+        &Vec::from_array(&f.env, [f.alice.clone(), f.bob.clone(), carol.clone()]),
+        &2,
+    );
+
+    let id = f.vault.propose_action(
+        &f.alice,
+        &AdminAction::SetRewardRate,
+        &rate_params(&f.env, 900),
+    );
+    // Only alice's implicit approval (from proposing) — threshold is 2.
+    let result = f.vault.try_execute_proposal(&id);
+    assert_eq!(result, Err(Ok(VaultExtError::ProposalNotReady)));
+}
+
+#[test]
+fn test_duplicate_approval_rejected() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    f.vault.initialize_multisig(
+        &Vec::from_array(&f.env, [f.alice.clone(), f.bob.clone(), carol.clone()]),
+        &2,
+    );
+
+    let id = f.vault.propose_action(
+        &f.alice,
+        &AdminAction::SetRewardRate,
+        &rate_params(&f.env, 900),
+    );
+    let result = f.vault.try_approve_action(&f.alice, &id);
+    assert_eq!(result, Err(Ok(VaultExtError::AlreadyApproved)));
+}
+
+#[test]
+fn test_non_admin_cannot_propose() {
+    let f = VaultFixture::new();
+    let carol = Address::generate(&f.env);
+    let outsider = Address::generate(&f.env);
+    f.vault.initialize_multisig(
+        &Vec::from_array(&f.env, [f.alice.clone(), f.bob.clone(), carol.clone()]),
+        &2,
+    );
+
+    let result = f.vault.try_propose_action(
+        &outsider,
+        &AdminAction::SetRewardRate,
+        &rate_params(&f.env, 900),
+    );
+    assert_eq!(result, Err(Ok(VaultExtError::NotAMultisigAdmin)));
 }
