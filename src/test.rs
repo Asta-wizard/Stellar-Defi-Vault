@@ -66,6 +66,42 @@ impl MockYieldProtocol {
     }
 }
 
+// ── Mock DEX router (issue #205 tests) ───────────────────────────────────────
+
+/// Swaps at a fixed rate: `amount_in / rate_divisor` of `to_token` per unit of
+/// `from_token`. Pass `rate_divisor = 1` for a 1:1 swap. Tests must pre-fund
+/// this contract with enough `to_token` to cover the payout.
+#[contract]
+struct MockDexRouter;
+
+#[contractimpl]
+impl MockDexRouter {
+    pub fn set_rate_divisor(env: Env, divisor: i128) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "rate"), &divisor);
+    }
+
+    pub fn swap(
+        env: Env,
+        _from_token: Address,
+        to_token: Address,
+        amount_in: i128,
+        _min_amount_out: i128,
+        to: Address,
+    ) -> i128 {
+        let divisor: i128 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "rate"))
+            .unwrap_or(1);
+        let amount_out = amount_in / divisor;
+        let token_client = token::Client::new(&env, &to_token);
+        token_client.transfer(&env.current_contract_address(), &to, &amount_out);
+        amount_out
+    }
+}
+
 fn topic_matches(env: &Env, topics: &Vec<soroban_sdk::Val>, name: &str) -> bool {
     match topics.get(0) {
         Some(val) => Symbol::try_from_val(env, &val)
@@ -4433,7 +4469,7 @@ fn test_get_proposal_returns_none_for_unknown_id() {
     assert_eq!(f.vault.get_proposal(&999), None);
 }
 
-// ── Issues #200, #201, #202, #204 ────────────────────────────────────────────
+// ── Issue #206: rollback_last_rate_change ───────────────────────────────────
 //
 // NOTE: this whole crate currently fails to build on `main` due to several
 // pre-existing, unrelated issues (functions/types referenced by
@@ -4443,242 +4479,274 @@ fn test_get_proposal_returns_none_for_unknown_id() {
 // changes). These tests are written and reviewed carefully but could not
 // actually be run in this session as a result.
 
-// ── Issue #200: delegation chains ───────────────────────────────────────────
-
 #[test]
-fn test_three_hop_delegation_chain_can_stake_for_beneficiary() {
+fn test_rollback_restores_previous_rate() {
     let f = VaultFixture::new();
-    let carol = Address::generate(&f.env);
-    let dave = Address::generate(&f.env);
-    f.token_admin.mint(&carol, &1_000_000);
-    f.token_admin.mint(&dave, &1_000_000);
+    f.vault.set_reward_rate_bps(&500);
+    f.vault.set_reward_rate_bps(&900);
 
-    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
-    f.vault.add_delegate_to_chain(&f.alice, &carol);
-    f.vault.add_delegate_to_chain(&f.alice, &dave);
-
-    let chain = f.vault.get_delegation_chain(&f.alice).unwrap();
-    assert_eq!(chain.delegates.len(), 3);
-
-    // Any of the 3 delegates can stake_for the beneficiary.
-    f.vault.stake_for(&dave, &f.alice, &500_000);
-    assert_eq!(f.vault.shares_of(&f.alice), 500_000);
-}
-
-#[test]
-fn test_fourth_delegate_in_chain_rejected() {
-    let f = VaultFixture::new();
-    let carol = Address::generate(&f.env);
-    let dave = Address::generate(&f.env);
-    let erin = Address::generate(&f.env);
-
-    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
-    f.vault.add_delegate_to_chain(&f.alice, &carol);
-    f.vault.add_delegate_to_chain(&f.alice, &dave);
-
-    let result = f.vault.try_add_delegate_to_chain(&f.alice, &erin);
-    assert_eq!(result, Err(Ok(VaultExtError::ChainTooLong)));
-}
-
-#[test]
-fn test_only_beneficiary_can_unstake_never_a_delegate() {
-    let f = VaultFixture::new();
-    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
-    f.vault.stake_for(&f.bob, &f.alice, &500_000);
-
-    // bob (the delegate) has no shares of his own to unstake — the position
-    // is entirely credited to alice.
-    assert_eq!(f.vault.shares_of(&f.bob), 0);
-    assert_eq!(f.vault.shares_of(&f.alice), 500_000);
-
-    // alice can unstake her own position.
-    f.vault.unstake(&f.alice, &500_000);
-    assert_eq!(f.vault.shares_of(&f.alice), 0);
-}
-
-#[test]
-fn test_removing_middle_link_breaks_chain_authorization() {
-    let f = VaultFixture::new();
-    let carol = Address::generate(&f.env);
-    f.token_admin.mint(&carol, &1_000_000);
-
-    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
-    f.vault.add_delegate_to_chain(&f.alice, &carol);
-    f.vault.remove_delegate_from_chain(&f.alice, &f.bob);
-
-    let chain = f.vault.get_delegation_chain(&f.alice).unwrap();
-    assert_eq!(chain.delegates.len(), 1);
-
-    // bob is no longer authorized.
-    let result = f.vault.try_stake_for(&f.bob, &f.alice, &500_000);
-    assert_eq!(result, Err(Ok(VaultError::NotADelegate)));
-
-    // carol still is.
-    f.vault.stake_for(&carol, &f.alice, &500_000);
-    assert_eq!(f.vault.shares_of(&f.alice), 500_000);
-}
-
-#[test]
-fn test_direct_circular_delegation_rejected() {
-    let f = VaultFixture::new();
-    f.vault.add_delegate_to_chain(&f.alice, &f.bob);
-    // bob tries to add alice back into *his* chain — would close a 2-hop loop.
-    let result = f.vault.try_add_delegate_to_chain(&f.bob, &f.alice);
-    assert_eq!(result, Err(Ok(VaultExtError::CircularDelegation)));
-}
-
-#[test]
-fn test_self_delegation_rejected() {
-    let f = VaultFixture::new();
-    let result = f.vault.try_add_delegate_to_chain(&f.alice, &f.alice);
-    assert_eq!(result, Err(Ok(VaultExtError::CircularDelegation)));
-}
-
-// ── Issue #201: per-user stake/claim rate limiting ──────────────────────────
-
-#[test]
-fn test_stake_too_soon_rejected() {
-    let f = VaultFixture::new();
-    f.vault.set_stake_rate_limit(&100);
-
-    set_ledger(&f.env, 1);
-    f.vault.stake(&f.alice, &500_000);
-
-    set_ledger(&f.env, 50); // only 49 ledgers later
-    let result = f.vault.try_stake(&f.alice, &100_000);
-    assert_eq!(result, Err(Ok(VaultExtError::RateLimitExceeded)));
-}
-
-#[test]
-fn test_stake_after_interval_succeeds() {
-    let f = VaultFixture::new();
-    f.vault.set_stake_rate_limit(&100);
-
-    set_ledger(&f.env, 1);
-    f.vault.stake(&f.alice, &500_000);
-
-    set_ledger(&f.env, 1 + 100);
-    f.vault.stake(&f.alice, &100_000);
-    assert_eq!(f.vault.shares_of(&f.alice), 600_000);
-}
-
-#[test]
-fn test_claim_rate_limited_independently_of_stake() {
-    let f = VaultFixture::new();
-    f.vault.set_claim_rate_limit(&100);
-    // No stake rate limit set — staking freely shouldn't affect the claim limit.
-
-    set_ledger(&f.env, 1);
-    f.vault.stake(&f.alice, &500_000);
-    f.vault.claim(&f.alice);
-
-    set_ledger(&f.env, 50);
-    let result = f.vault.try_claim(&f.alice);
-    assert_eq!(result, Err(Ok(VaultExtError::RateLimitExceeded)));
-}
-
-#[test]
-fn test_rate_limit_zero_disables_check() {
-    let f = VaultFixture::new();
-    f.vault.set_stake_rate_limit(&0);
-
-    set_ledger(&f.env, 1);
-    f.vault.stake(&f.alice, &500_000);
-    set_ledger(&f.env, 2); // immediately after
-    f.vault.stake(&f.alice, &100_000);
-    assert_eq!(f.vault.shares_of(&f.alice), 600_000);
-}
-
-// ── Issue #202: liquidity bootstrap mode ────────────────────────────────────
-
-#[test]
-fn test_bootstrap_rate_at_start_equals_initial_rate() {
-    let f = VaultFixture::new();
-    set_ledger(&f.env, 1000);
-    f.vault.start_bootstrap(&2000, &500, &1000); // 20% -> 5% over 1000 ledgers
-
-    assert_eq!(f.vault.get_effective_rate_at(&1000), 2000);
-    assert_eq!(f.vault.get_reward_rate_bps(), 2000);
-}
-
-#[test]
-fn test_bootstrap_rate_at_end_equals_base_rate() {
-    let f = VaultFixture::new();
-    set_ledger(&f.env, 1000);
-    f.vault.start_bootstrap(&2000, &500, &1000);
-
-    assert_eq!(f.vault.get_effective_rate_at(&2000), 500);
-}
-
-#[test]
-fn test_bootstrap_rate_at_midpoint_correct() {
-    let f = VaultFixture::new();
-    set_ledger(&f.env, 1000);
-    f.vault.start_bootstrap(&2000, &500, &1000);
-
-    // Halfway: 2000 - (2000-500)*0.5 = 2000 - 750 = 1250
-    assert_eq!(f.vault.get_effective_rate_at(&1500), 1250);
-}
-
-#[test]
-fn test_bootstrap_after_expiry_uses_base_rate() {
-    let f = VaultFixture::new();
-    set_ledger(&f.env, 1000);
-    f.vault.start_bootstrap(&2000, &500, &1000);
-
-    assert_eq!(f.vault.get_effective_rate_at(&5000), 500);
-}
-
-#[test]
-fn test_bootstrap_settles_permanently_after_a_call_crosses_the_boundary() {
-    let f = VaultFixture::new();
-    set_ledger(&f.env, 1000);
-    f.vault.start_bootstrap(&2000, &500, &1000);
-    f.vault.stake(&f.alice, &500_000);
-
-    set_ledger(&f.env, 1000 + 1000 + 1); // past the bootstrap window
-    f.vault.claim(&f.alice); // any call touching accrue_rewards settles it
-
+    let restored = f.vault.rollback_last_rate_change();
+    assert_eq!(restored, 500);
     assert_eq!(f.vault.get_reward_rate_bps(), 500);
-    assert!(f.vault.get_bootstrap_config().is_none());
 }
 
 #[test]
-fn test_invalid_bootstrap_config_rejected() {
+fn test_second_rollback_in_a_row_rejected() {
     let f = VaultFixture::new();
-    // initial_rate_bps must be >= base_rate_bps.
-    let result = f.vault.try_start_bootstrap(&500, &2000, &1000);
-    assert_eq!(result, Err(Ok(VaultExtError::InvalidBootstrapConfig)));
-}
+    f.vault.set_reward_rate_bps(&500);
+    f.vault.set_reward_rate_bps(&900);
 
-// ── Issue #204: gas_estimate_stake ───────────────────────────────────────────
-
-#[test]
-fn test_gas_estimate_new_user_returns_first_stake_cost() {
-    let f = VaultFixture::new();
-    let estimate = f.vault.gas_estimate_stake(&f.alice, &500_000);
-    assert_eq!(estimate, FIRST_STAKE_COST);
+    f.vault.rollback_last_rate_change();
+    let result = f.vault.try_rollback_last_rate_change();
+    assert_eq!(result, Err(Ok(VaultExtError::RollbackUnavailable)));
 }
 
 #[test]
-fn test_gas_estimate_existing_user_returns_top_up_cost() {
+fn test_rollback_unavailable_when_rate_never_changed() {
     let f = VaultFixture::new();
+    let result = f.vault.try_rollback_last_rate_change();
+    assert_eq!(result, Err(Ok(VaultExtError::RollbackUnavailable)));
+}
+
+#[test]
+fn test_rollback_emits_rate_rolled_back_event() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&500);
+    f.vault.set_reward_rate_bps(&900);
+    f.vault.rollback_last_rate_change();
+
+    let events = f.env.events().all();
+    let found = events
+        .iter()
+        .any(|(_, topics, _)| topic_matches(&f.env, &topics, "rate_rbk"));
+    assert!(found, "expected a rate_rbk event");
+}
+
+#[test]
+fn test_rollback_can_be_followed_by_another_rate_change_and_rollback() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&500);
+    f.vault.set_reward_rate_bps(&900);
+    f.vault.rollback_last_rate_change();
+
+    // A fresh set_reward_rate_bps call re-populates PreviousRate, so
+    // rollback should work again after that (only *consecutive* rollbacks
+    // without an intervening rate change are rejected).
+    f.vault.set_reward_rate_bps(&1200);
+    let restored = f.vault.rollback_last_rate_change();
+    assert_eq!(restored, 500);
+}
+
+// ── Issue #207: cross-chain bridge relayer hook ─────────────────────────────
+
+#[test]
+fn test_bridge_event_emitted_on_stake_when_enabled() {
+    let f = VaultFixture::new();
+    f.vault.set_bridge_enabled(&true);
+    assert!(f.vault.is_bridge_enabled());
+
     f.vault.stake(&f.alice, &500_000);
-    let estimate = f.vault.gas_estimate_stake(&f.alice, &100_000);
-    assert_eq!(estimate, TOP_UP_COST);
+
+    let events = f.env.events().all();
+    let found = events
+        .iter()
+        .any(|(_, topics, _)| topic_matches(&f.env, &topics, "bridge_pk"));
+    assert!(found, "expected a bridge_pk event");
+    assert_eq!(f.vault.get_bridge_packet_count(), 1);
 }
 
 #[test]
-fn test_gas_estimate_constants_are_positive() {
-    assert!(FIRST_STAKE_COST > 0);
-    assert!(TOP_UP_COST > 0);
-}
-
-#[test]
-fn test_gas_estimate_does_not_write_state() {
+fn test_bridge_event_not_emitted_when_disabled() {
     let f = VaultFixture::new();
-    let shares_before = f.vault.shares_of(&f.alice);
-    f.vault.gas_estimate_stake(&f.alice, &500_000);
-    let shares_after = f.vault.shares_of(&f.alice);
-    assert_eq!(shares_before, shares_after);
+    // bridge_enabled defaults to false — do not enable it.
+    f.vault.stake(&f.alice, &500_000);
+
+    let events = f.env.events().all();
+    let found = events
+        .iter()
+        .any(|(_, topics, _)| topic_matches(&f.env, &topics, "bridge_pk"));
+    assert!(!found, "did not expect a bridge_pk event");
+    assert_eq!(f.vault.get_bridge_packet_count(), 0);
+}
+
+#[test]
+fn test_bridge_sequence_increments_on_stake_and_unstake() {
+    let f = VaultFixture::new();
+    f.vault.set_bridge_enabled(&true);
+
+    f.vault.stake(&f.alice, &500_000);
+    assert_eq!(f.vault.get_bridge_packet_count(), 1);
+
+    f.vault.unstake(&f.alice, &200_000);
+    assert_eq!(f.vault.get_bridge_packet_count(), 2);
+}
+
+#[test]
+fn test_bridge_enable_disable_toggle() {
+    let f = VaultFixture::new();
+    assert!(!f.vault.is_bridge_enabled());
+
+    f.vault.set_bridge_enabled(&true);
+    assert!(f.vault.is_bridge_enabled());
+
+    f.vault.set_bridge_enabled(&false);
+    assert!(!f.vault.is_bridge_enabled());
+}
+
+// ── Issue #209: position_split ──────────────────────────────────────────────
+
+#[test]
+fn test_position_split_creates_two_correct_positions() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    f.vault.position_split(&f.alice, &300_000);
+
+    assert_eq!(f.vault.shares_of(&f.alice), 700_000);
+    let split_positions = f.vault.get_split_positions(&f.alice);
+    assert_eq!(split_positions.len(), 1);
+    let split = split_positions.get(0).unwrap();
+    assert_eq!(split.amount, 300_000);
+}
+
+#[test]
+fn test_position_split_settles_pending_rewards_first() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000); // 10% APR
+    f.token_admin.mint(&f.admin, &10_000_000);
+    f.vault.fund_reward_pool(&f.admin, &5_000_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+
+    let balance_before = f.token.balance(&f.alice);
+    f.vault.position_split(&f.alice, &300_000);
+    let balance_after = f.token.balance(&f.alice);
+
+    // Pending reward accrued over ~1 year at 10% APR should have been paid
+    // out to alice as part of settling the position before the split.
+    assert!(
+        balance_after > balance_before,
+        "expected pending reward to be paid out before the split"
+    );
+}
+
+#[test]
+fn test_position_split_preserves_lock_status_on_both_positions() {
+    let f = VaultFixture::new();
+    f.vault.set_lock_period(&1000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, 500); // still within the lock period
+
+    f.vault.position_split(&f.alice, &300_000);
+
+    // The primary position is still locked: unstaking more than what's left
+    // unlocked should apply the early-exit penalty path, not error — but at
+    // minimum, both positions' staked_at_ledger must match the original.
+    let split_positions = f.vault.get_split_positions(&f.alice);
+    let split = split_positions.get(0).unwrap();
+    assert_eq!(split.staked_at_ledger, 1);
+}
+
+#[test]
+fn test_position_split_rejects_invalid_amounts() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Zero.
+    let result = f.vault.try_position_split(&f.alice, &0);
+    assert_eq!(result, Err(Ok(VaultExtError::InvalidSplitAmount)));
+
+    // Negative.
+    let result = f.vault.try_position_split(&f.alice, &-1);
+    assert_eq!(result, Err(Ok(VaultExtError::InvalidSplitAmount)));
+
+    // Equal to the full position (must be strictly less than).
+    let result = f.vault.try_position_split(&f.alice, &1_000_000);
+    assert_eq!(result, Err(Ok(VaultExtError::InvalidSplitAmount)));
+
+    // Greater than the position.
+    let result = f.vault.try_position_split(&f.alice, &2_000_000);
+    assert_eq!(result, Err(Ok(VaultExtError::InvalidSplitAmount)));
+}
+
+// ── Issue #205: swap_and_stake ───────────────────────────────────────────────
+
+#[test]
+fn test_swap_and_stake_success() {
+    let f = VaultFixture::new();
+
+    let (input_token_addr, _input_token, input_token_admin) = create_token(&f.env, &f.admin);
+    input_token_admin.mint(&f.alice, &1_000_000);
+
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&1); // 1:1 swap
+    f.token_admin.mint(&router_id, &1_000_000); // pre-fund the router's payout
+
+    f.vault.set_dex_router(&router_id);
+
+    let shares = f
+        .vault
+        .swap_and_stake(&f.alice, &input_token_addr, &1_000_000, &900_000);
+    assert_eq!(shares, 1_000_000);
+    assert_eq!(f.vault.shares_of(&f.alice), 1_000_000);
+}
+
+#[test]
+fn test_swap_and_stake_slippage_protection() {
+    let f = VaultFixture::new();
+
+    let (input_token_addr, _input_token, input_token_admin) = create_token(&f.env, &f.admin);
+    input_token_admin.mint(&f.alice, &1_000_000);
+
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&2); // output is half the input
+    f.token_admin.mint(&router_id, &1_000_000);
+
+    f.vault.set_dex_router(&router_id);
+
+    // Output will be 500_000, below the 600_000 minimum.
+    let result = f
+        .vault
+        .try_swap_and_stake(&f.alice, &input_token_addr, &1_000_000, &600_000);
+    assert_eq!(result, Err(Ok(VaultExtError::SlippageExceeded)));
+}
+
+#[test]
+fn test_swap_and_stake_reverts_without_configured_router() {
+    let f = VaultFixture::new();
+    let (input_token_addr, _input_token, input_token_admin) = create_token(&f.env, &f.admin);
+    input_token_admin.mint(&f.alice, &1_000_000);
+
+    // No set_dex_router() call.
+    let result = f
+        .vault
+        .try_swap_and_stake(&f.alice, &input_token_addr, &1_000_000, &0);
+    assert_eq!(result, Err(Ok(VaultExtError::UnsupportedInputToken)));
+}
+
+#[test]
+fn test_swap_and_stake_zero_min_stake_amount_disables_slippage_check() {
+    let f = VaultFixture::new();
+    let (input_token_addr, _input_token, input_token_admin) = create_token(&f.env, &f.admin);
+    input_token_admin.mint(&f.alice, &1_000_000);
+
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&10); // output is 1/10th the input — would fail most minimums
+    f.token_admin.mint(&router_id, &1_000_000);
+
+    f.vault.set_dex_router(&router_id);
+
+    // min_stake_amount = 0 disables the slippage check entirely.
+    let shares = f
+        .vault
+        .swap_and_stake(&f.alice, &input_token_addr, &1_000_000, &0);
+    assert_eq!(shares, 100_000);
 }

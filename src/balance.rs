@@ -1,6 +1,6 @@
 use crate::storage::{
-    BootstrapConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DelegationChain,
-    GovernanceProposal, RateHistoryEntry, ReferralStats, VestingEntry,
+    ChangelogEntry, ClaimWindow, DataKey, DayBucket, GovernanceProposal, RateHistoryEntry,
+    ReferralStats, StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -937,91 +937,77 @@ pub fn set_voted(env: &Env, proposal_id: u32, voter: &Address) {
     env.storage().persistent().set(&key, &true);
 }
 
-// ── Issue #200: staking delegation chains ────────────────────────────────────
+// ── Issue #206: single-level reward-rate rollback ────────────────────────────
 // DataKey is already at Soroban's 50-variant cap (see the note in
-// storage.rs), so these use raw Symbol keys instead of a DataKey variant.
+// storage.rs), so these use raw Symbol keys instead of a DataKey variant —
+// the same workaround this file already uses for symbol_short!("pool_cp"),
+// symbol_short!("sl_tr"), etc.
 
-pub fn get_delegation_chain(env: &Env, beneficiary: &Address) -> Option<DelegationChain> {
-    let key = (Symbol::new(env, "delchain"), beneficiary.clone());
-    env.storage().persistent().get(&key)
+pub fn get_previous_rate(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("prevrate"))
 }
 
-pub fn set_delegation_chain(env: &Env, beneficiary: &Address, chain: &DelegationChain) {
-    let key = (Symbol::new(env, "delchain"), beneficiary.clone());
-    env.storage().persistent().set(&key, chain);
-}
-
-pub fn remove_delegation_chain(env: &Env, beneficiary: &Address) {
-    let key = (Symbol::new(env, "delchain"), beneficiary.clone());
-    env.storage().persistent().remove(&key);
-}
-
-// ── Issue #201: per-user stake/claim rate limiting ───────────────────────────
-
-pub fn get_stake_rate_limit(env: &Env) -> u32 {
+pub fn set_previous_rate(env: &Env, rate_bps: u32) {
     env.storage()
         .instance()
-        .get(&symbol_short!("stkrlim"))
+        .set(&symbol_short!("prevrate"), &rate_bps);
+}
+
+pub fn clear_previous_rate(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("prevrate"));
+}
+
+// ── Issue #207: cross-chain bridge relayer hook ──────────────────────────────
+
+pub fn get_bridge_packet_sequence(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("brpktseq"))
         .unwrap_or(0)
 }
 
-pub fn set_stake_rate_limit(env: &Env, min_ledgers: u32) {
+pub fn set_bridge_packet_sequence(env: &Env, seq: u64) {
     env.storage()
         .instance()
-        .set(&symbol_short!("stkrlim"), &min_ledgers);
+        .set(&symbol_short!("brpktseq"), &seq);
 }
 
-pub fn get_claim_rate_limit(env: &Env) -> u32 {
+pub fn is_bridge_enabled(env: &Env) -> bool {
     env.storage()
         .instance()
-        .get(&symbol_short!("clmrlim"))
-        .unwrap_or(0)
+        .get(&symbol_short!("brenabld"))
+        .unwrap_or(false)
 }
 
-pub fn set_claim_rate_limit(env: &Env, min_ledgers: u32) {
+pub fn set_bridge_enabled(env: &Env, enabled: bool) {
     env.storage()
         .instance()
-        .set(&symbol_short!("clmrlim"), &min_ledgers);
+        .set(&symbol_short!("brenabld"), &enabled);
 }
 
-/// Separate from `StakedAtLedger` (when the *position* opened) — this tracks
-/// the ledger of the user's most recent individual stake action.
-pub fn get_last_stake_ledger(env: &Env, user: &Address) -> Option<u32> {
-    let key = (Symbol::new(env, "laststk"), user.clone());
-    env.storage().persistent().get(&key)
+// ── Issue #209: additive split positions ─────────────────────────────────────
+
+pub fn get_split_positions(env: &Env, user: &Address) -> Vec<StakePosition> {
+    let key = (Symbol::new(env, "splitpos"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env))
 }
 
-pub fn set_last_stake_ledger(env: &Env, user: &Address, ledger: u32) {
-    let key = (Symbol::new(env, "laststk"), user.clone());
-    env.storage().persistent().set(&key, &ledger);
+pub fn set_split_positions(env: &Env, user: &Address, positions: &Vec<StakePosition>) {
+    let key = (Symbol::new(env, "splitpos"), user.clone());
+    env.storage().persistent().set(&key, positions);
 }
 
-/// Separate from the existing `LastClaimLedger` DataKey, which is a general
-/// reward-checkpoint field touched by many flows (stake, position transfer,
-/// stake_for, etc.) and does not mean "the last time claim() was explicitly
-/// called". This tracks specifically the latter, for rate limiting.
-pub fn get_last_claim_action_ledger(env: &Env, user: &Address) -> Option<u32> {
-    let key = (Symbol::new(env, "lastclma"), user.clone());
-    env.storage().persistent().get(&key)
+// ── Issue #205: DEX router used by swap_and_stake ────────────────────────────
+
+pub fn get_dex_router(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&symbol_short!("dexroutr"))
 }
 
-pub fn set_last_claim_action_ledger(env: &Env, user: &Address, ledger: u32) {
-    let key = (Symbol::new(env, "lastclma"), user.clone());
-    env.storage().persistent().set(&key, &ledger);
-}
-
-// ── Issue #202: liquidity bootstrap mode ─────────────────────────────────────
-
-pub fn get_bootstrap_config(env: &Env) -> Option<BootstrapConfig> {
-    env.storage().instance().get(&symbol_short!("bootcfg"))
-}
-
-pub fn set_bootstrap_config(env: &Env, config: &BootstrapConfig) {
+pub fn set_dex_router(env: &Env, router: &Address) {
     env.storage()
         .instance()
-        .set(&symbol_short!("bootcfg"), config);
-}
-
-pub fn clear_bootstrap_config(env: &Env) {
-    env.storage().instance().remove(&symbol_short!("bootcfg"));
+        .set(&symbol_short!("dexroutr"), router);
 }

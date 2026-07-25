@@ -69,6 +69,14 @@ pub enum DataKey {
     EpochLedgers,
     EpochRewardPerEpoch,
     EpochRewardFactor(u32),
+    // NOTE: DataKey is already at Soroban's 50-variant cap for
+    // #[contracttype] enums (ScSpecUdtUnionV0::cases is VecM<_, 50> in
+    // stellar-xdr) — adding a 51st variant makes the #[contracttype] derive
+    // panic at compile time. New storage introduced by issues #205/#206/
+    // #207/#209 uses raw Symbol-keyed storage instead (see balance.rs),
+    // matching the pattern already established here for the same reason
+    // (e.g. symbol_short!("pool_cp"), symbol_short!("sl_tr"), the
+    // Symbol::new(env, "prop")/"voted" tuple keys above).
 }
 
 /// Storage key for an individual epoch snapshot.
@@ -544,29 +552,17 @@ pub struct GovernanceProposal {
     pub enacted: bool,
 }
 
-// ── Issue #200: staking delegation chains ────────────────────────────────────
+// ── Issue #207: cross-chain bridge relayer hook ──────────────────────────────
 
-/// A beneficiary's delegation chain — up to 3 delegates, any of whom may call
-/// `stake_for(beneficiary)` on the beneficiary's behalf. Only `beneficiary`
-/// may ever `unstake`/`claim` the resulting position.
+/// Packet data emitted alongside `stake`/`unstake`, shaped for cross-chain
+/// bridge relayers (issue #207). Supplementary only — never read by, or
+/// required for, core stake/unstake logic.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct DelegationChain {
-    pub beneficiary: Address,
-    pub delegates: Vec<Address>,
-}
-
-// ── Issue #202: liquidity bootstrap mode ─────────────────────────────────────
-
-/// Declining-rate launch configuration activated by `start_bootstrap()`
-/// (issue #202). The effective rate declines linearly from `initial_rate` at
-/// `started_at` to `base_rate` at `started_at + duration`, then stays at
-/// `base_rate` forever after.
-#[contracttype]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct BootstrapConfig {
-    pub initial_rate: u32,
-    pub base_rate: u32,
-    pub started_at: u32,
-    pub duration: u32,
+pub struct BridgePacket {
+    pub sequence: u64,
+    pub source_address: Address,
+    pub amount: i128,
+    pub action: String,
+    pub timestamp_ledger: u32,
 }

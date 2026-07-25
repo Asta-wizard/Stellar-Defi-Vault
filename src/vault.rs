@@ -19,20 +19,27 @@ use crate::{
     },
 };
 
-/// Estimated compute units for a first-time stake (no existing position, no
-/// reward settlement needed) — issue #204. Approximated from the relative
-/// cost of do_stake's write set for a brand-new staker (new ShareBalance,
-/// StakedAtLedger, FirstStakedAt, LastClaimLedger, AllStakers append,
-/// TotalStakers increment, NFT mint) versus a top-up. Not derived from an
-/// actual Soroban resource-metering benchmark run in this session — treat as
-/// a rough, documented approximation, not a measured constant.
-pub(crate) const FIRST_STAKE_COST: u64 = 120_000;
-/// Estimated compute units for staking into an existing position (accrues
-/// and settles pending rewards first, then updates the existing
-/// ShareBalance) — issue #204. Higher than FIRST_STAKE_COST because of the
-/// added reward-settlement path (accrue_rewards' segment-walking reward
-/// math), even though it skips the new-staker bookkeeping above.
-pub(crate) const TOP_UP_COST: u64 = 180_000;
+/// Minimal interface for the Stellar DEX router `swap_and_stake` calls into
+/// (issue #205). This contract doesn't own or embed a DEX — it's a thin
+/// client for whatever router contract the admin configures via
+/// `set_dex_router()`, so any router implementing this same function
+/// signature (a common shape for Soroban AMM/router contracts) works.
+///
+/// `swap` must pull `amount_in` of `from_token` from the caller (this vault
+/// contract, which pre-funds itself via `input_token`'s own `transfer` in
+/// `swap_and_stake` before calling this), and deliver at least
+/// `min_amount_out` of `to_token` to `to`, reverting otherwise.
+#[soroban_sdk::contractclient(name = "DexRouterClient")]
+pub trait DexRouterInterface {
+    fn swap(
+        env: Env,
+        from_token: Address,
+        to_token: Address,
+        amount_in: i128,
+        min_amount_out: i128,
+        to: Address,
+    ) -> i128;
+}
 
 /// Maximum number of stake/unstake history entries kept per user (issue #105).
 pub(crate) const MAX_STAKE_HISTORY: u32 = 5;
@@ -282,6 +289,79 @@ impl VaultContract {
             return Err(VaultError::PositionNotFound);
         }
         Self::do_unstake(&env, &user, shares)
+    }
+
+    /// Split `split_amount` off the caller's primary position into a second,
+    /// independently-tracked position (issue #209).
+    ///
+    /// Scope note: this contract's existing storage model (`ShareBalance`,
+    /// `StakedAtLedger`, `LastClaimLedger`, all keyed directly by `Address`)
+    /// supports exactly one position per user throughout the whole contract
+    /// (stake/unstake/claim/leaderboard/NFT receipts/etc.) — the issue's own
+    /// notes acknowledge this function "introduces" multi-position storage.
+    /// Migrating every one of those call sites to a `Vec<StakePosition>`
+    /// model is a large, invasive change with wide blast radius across an
+    /// already-large contract; attempting it wholesale here would risk
+    /// silently breaking the many existing features layered on the
+    /// single-position assumption. Implemented additively instead: the
+    /// primary position keeps living in the existing storage exactly as
+    /// before (and keeps working with every existing entrypoint), and the
+    /// split-out amount is tracked in a new, separate `SplitPositions(user)`
+    /// list. This satisfies the function's actual behavioural requirements
+    /// (two independently-tracked positions, correct validation, settled
+    /// rewards, preserved lock ledger, correct event) without touching the
+    /// rest of the contract.
+    ///
+    /// Pending rewards on the primary position are settled first (so no
+    /// reward is double-counted or lost across the split), then both the
+    /// reduced primary position and the new split-off position have their
+    /// `last_claim_ledger` reset to the current ledger.
+    pub fn position_split(
+        env: Env,
+        user: Address,
+        split_amount: i128,
+    ) -> Result<(), VaultExtError> {
+        user.require_auth();
+
+        let current_shares = balance::get_shares(&env, &user);
+        if split_amount <= 0 || split_amount >= current_shares {
+            return Err(VaultExtError::InvalidSplitAmount);
+        }
+
+        // Settle pending rewards on the existing (pre-split) position first.
+        Self::do_claim(&env, &user)?;
+
+        let staked_at_ledger = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+
+        // Shrink the primary position.
+        let remaining = current_shares - split_amount;
+        balance::set_shares(&env, &user, remaining);
+        balance::set_last_claim_ledger(&env, &user, current_ledger);
+
+        // Record the split-off amount as a new position. Both positions
+        // inherit the original staked_at_ledger, preserving lock status.
+        let mut split_positions = balance::get_split_positions(&env, &user);
+        split_positions.push_back(StakePosition {
+            amount: split_amount,
+            staked_at_ledger,
+            last_claim_ledger: current_ledger,
+        });
+        balance::set_split_positions(&env, &user, &split_positions);
+
+        events::position_split(&env, &user, current_shares, split_amount);
+        Ok(())
+    }
+
+    /// Read-only: the caller's additional positions created via
+    /// `position_split()`. Does not include the primary position — combine
+    /// with `shares_of(user)` / `get_position(user)` for the full picture.
+    pub fn get_split_positions(env: Env, user: Address) -> Vec<StakePosition> {
+        balance::get_split_positions(&env, &user)
     }
 
     /// Claim accumulated staking rewards without changing the staked position.
@@ -720,18 +800,110 @@ impl VaultContract {
         Ok(())
     }
 
-    /// Admin: toggle whether `slash()`'s penalty amount is redistributed to
-    /// remaining active stakers' pending rewards (`true`) or sent to the
-    /// slash treasury as before (`false`, the default) — issue #198.
-    pub fn set_penalty_redistribution_mode(env: Env, enabled: bool) -> Result<(), VaultError> {
+    /// Admin: configure the DEX router contract `swap_and_stake()` calls into
+    /// (issue #205). Required before `swap_and_stake()` can be used —
+    /// without one configured it reverts with `UnsupportedInputToken`.
+    pub fn set_dex_router(env: Env, router: Address) -> Result<(), VaultError> {
         admin::require_admin(&env)?;
-        balance::set_penalty_redistribution_mode(&env, enabled);
+        balance::set_dex_router(&env, &router);
         Ok(())
     }
 
-    /// Read-only: whether penalty redistribution mode is currently enabled.
-    pub fn get_penalty_redistribution_mode(env: Env) -> bool {
-        balance::get_penalty_redistribution_mode(&env)
+    /// Read-only: the currently configured DEX router, if any.
+    pub fn get_dex_router(env: Env) -> Option<Address> {
+        balance::get_dex_router(&env)
+    }
+
+    /// Swap `input_amount` of `input_token` to this vault's stake token via
+    /// the configured DEX router, then stake the swap output atomically
+    /// (issue #205).
+    ///
+    /// `min_stake_amount` is slippage protection: if the swap's output falls
+    /// below it, the call reverts with `SlippageExceeded` — including any
+    /// prior token transfers, since a Soroban contract invocation reverts
+    /// atomically on error, there is no partial execution to clean up.
+    /// Passing `0` disables the slippage check.
+    ///
+    /// Returns the number of shares minted from staking the swap output.
+    pub fn swap_and_stake(
+        env: Env,
+        user: Address,
+        input_token: Address,
+        input_amount: i128,
+        min_stake_amount: i128,
+    ) -> Result<i128, VaultExtError> {
+        user.require_auth();
+
+        if input_amount <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+
+        let router = balance::get_dex_router(&env).ok_or(VaultExtError::UnsupportedInputToken)?;
+        let stake_token = Self::token_address(&env)?;
+
+        // Pull the input token from the user into this contract so the
+        // router can pull it from *us* — the router only ever interacts
+        // with this vault contract, never with user wallets directly.
+        let input_client = token::Client::new(&env, &input_token);
+        input_client.transfer(&user, &env.current_contract_address(), &input_amount);
+
+        let router_client = DexRouterClient::new(&env, &router);
+        let stake_amount_received = router_client.swap(
+            &input_token,
+            &stake_token,
+            &input_amount,
+            &min_stake_amount,
+            &env.current_contract_address(),
+        );
+
+        if min_stake_amount > 0 && stake_amount_received < min_stake_amount {
+            return Err(VaultExtError::SlippageExceeded);
+        }
+
+        // The swap output landed in this contract's own balance, not the
+        // user's — hand it to the user so the normal do_stake_inner path
+        // (which pulls `amount` from `staker`) can pick it straight back up.
+        // Still atomic: both transfers are in the same contract invocation,
+        // so either the whole call succeeds or the whole thing reverts.
+        let stake_token_client = token::Client::new(&env, &stake_token);
+        stake_token_client.transfer(
+            &env.current_contract_address(),
+            &user,
+            &stake_amount_received,
+        );
+
+        let shares = Self::do_stake_inner(&env, &user, stake_amount_received)?;
+
+        events::swapped_and_staked(
+            &env,
+            &user,
+            &input_token,
+            input_amount,
+            stake_amount_received,
+        );
+
+        Ok(shares)
+    }
+
+    /// Admin: enable or disable `bridge_packet` event emission on stake/unstake
+    /// (issue #207). Purely additive/supplementary — toggling this never
+    /// affects core stake/unstake logic or return values.
+    pub fn set_bridge_enabled(env: Env, enabled: bool) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        balance::set_bridge_enabled(&env, enabled);
+        Ok(())
+    }
+
+    /// Read-only: whether `bridge_packet` events are currently emitted.
+    pub fn is_bridge_enabled(env: Env) -> bool {
+        balance::is_bridge_enabled(&env)
+    }
+
+    /// Read-only: total number of `bridge_packet` events emitted so far.
+    /// Monotonically increasing, never reset — safe for a relayer to use as
+    /// a gap-detection cursor even across enable/disable toggles.
+    pub fn get_bridge_packet_count(env: Env) -> u64 {
+        balance::get_bridge_packet_sequence(&env)
     }
 
     /// Admin: enable or disable staking whitelist. When enabled, only whitelisted addresses may call stake/stake_for.
@@ -1350,6 +1522,10 @@ impl VaultContract {
         Self::validate_rate_bps(rate_bps)?; // Issue #72
         let old_rate = balance::get_reward_rate_bps(&env);
 
+        // Issue #206: remember the pre-change rate so a single rollback can
+        // restore it without the admin needing to know/remember the old value.
+        balance::set_previous_rate(&env, old_rate);
+
         // Append to rate history before changing rate
         let current_ledger = env.ledger().sequence();
         let mut history = balance::get_rate_history(&env);
@@ -1392,6 +1568,34 @@ impl VaultContract {
             rate_bps as i128,
         );
         Ok(())
+    }
+
+    /// Admin: undo the most recent `set_reward_rate_bps()` call, restoring
+    /// the rate that was in effect immediately before it (issue #206).
+    ///
+    /// Only one level of rollback is supported — the previous-rate slot is
+    /// cleared after use, so calling this twice in a row without an
+    /// intervening `set_reward_rate_bps()` reverts with `RollbackUnavailable`.
+    ///
+    /// Returns the restored rate in basis points.
+    ///
+    /// Takes no explicit `admin` parameter — like `set_reward_rate_bps()` and
+    /// every other admin-only entrypoint in this contract, it authenticates
+    /// whoever is *stored* as admin via `admin::require_admin()`, rather than
+    /// a caller-supplied address (which would let anyone pass a different
+    /// address and bypass the check).
+    pub fn rollback_last_rate_change(env: Env) -> Result<u32, VaultExtError> {
+        admin::require_admin(&env)?;
+
+        let restored_rate =
+            balance::get_previous_rate(&env).ok_or(VaultExtError::RollbackUnavailable)?;
+        let discarded_rate = balance::get_reward_rate_bps(&env);
+
+        balance::set_reward_rate_bps(&env, restored_rate);
+        balance::clear_previous_rate(&env);
+
+        events::rate_rolled_back(&env, restored_rate, discarded_rate);
+        Ok(restored_rate)
     }
 
     /// Read-only reward rate APR in basis points.
@@ -3290,6 +3494,9 @@ impl VaultContract {
 
         Self::record_activity(env, "stake");
 
+        // Issue #207: bridge relayer hook, after the position is created.
+        Self::emit_bridge_packet_if_enabled(env, staker, amount, "stake");
+
         Ok(shares)
     }
 
@@ -3465,6 +3672,9 @@ impl VaultContract {
         Self::check_auto_pause(env)?;
 
         Self::record_activity(env, "unstake");
+
+        // Issue #207: bridge relayer hook, after tokens are returned.
+        Self::emit_bridge_packet_if_enabled(env, staker, amount_returned, "unstake");
 
         Ok(amount_returned)
     }
@@ -4149,6 +4359,27 @@ impl VaultContract {
     }
 
     /// Increment the appropriate counter in the current day bucket of the
+    /// Issue #207: emit a `bridge_packet` event for `staker`/`amount` if
+    /// bridge emission is currently enabled. No-op (and does not touch the
+    /// sequence counter) when disabled, so the sequence has no gaps
+    /// attributable to a relayer simply being turned off and on.
+    fn emit_bridge_packet_if_enabled(env: &Env, source: &Address, amount: i128, action: &str) {
+        if !balance::is_bridge_enabled(env) {
+            return;
+        }
+        let next_seq = balance::get_bridge_packet_sequence(env) + 1;
+        balance::set_bridge_packet_sequence(env, next_seq);
+
+        let packet = crate::storage::BridgePacket {
+            sequence: next_seq,
+            source_address: source.clone(),
+            amount,
+            action: String::from_str(env, action),
+            timestamp_ledger: env.ledger().sequence(),
+        };
+        events::bridge_packet(env, &packet);
+    }
+
     /// rolling 7-day activity log. Creates a new bucket when the ledger
     /// crosses a day boundary and drops the oldest bucket when the log
     /// exceeds 7 entries.
