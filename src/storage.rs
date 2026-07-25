@@ -544,36 +544,29 @@ pub struct GovernanceProposal {
     pub enacted: bool,
 }
 
-// ── Issue #203: contract migration export/import ─────────────────────────────
+// ── Issue #200: staking delegation chains ────────────────────────────────────
 
-/// Full pool state snapshot for migrating to a new contract instance
-/// (issue #203). Both the exporting and importing contracts should be
-/// paused for the duration of the migration — this struct is a point-in-time
-/// snapshot, not a live sync, so any activity on the old contract between
-/// export and import would be lost from the new one.
+/// A beneficiary's delegation chain — up to 3 delegates, any of whom may call
+/// `stake_for(beneficiary)` on the beneficiary's behalf. Only `beneficiary`
+/// may ever `unstake`/`claim` the resulting position.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct MigrationExport {
-    pub admin: Address,
-    pub stake_token: Address,
-    pub reward_token: Address,
-    pub reward_rate_bps: u32,
-    pub total_staked: i128,
-    pub total_stakers: u32,
-    pub paused: bool,
-    pub all_positions: Vec<(Address, StakePosition)>,
+pub struct DelegationChain {
+    pub beneficiary: Address,
+    pub delegates: Vec<Address>,
 }
 
-// ── Issue #208: storage usage report ─────────────────────────────────────────
+// ── Issue #202: liquidity bootstrap mode ─────────────────────────────────────
 
-/// Rough estimate of the contract's ledger storage footprint (issue #208).
-/// Approximations only — see `storage_usage_report()`'s doc comment in
-/// vault.rs for the byte-size constants used and their basis.
+/// Declining-rate launch configuration activated by `start_bootstrap()`
+/// (issue #202). The effective rate declines linearly from `initial_rate` at
+/// `started_at` to `base_rate` at `started_at + duration`, then stays at
+/// `base_rate` forever after.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct StorageUsageReport {
-    pub instance_keys: u32,
-    pub persistent_position_count: u32,
-    pub persistent_other_keys: u32,
-    pub estimated_total_bytes: u32,
+pub struct BootstrapConfig {
+    pub initial_rate: u32,
+    pub base_rate: u32,
+    pub started_at: u32,
+    pub duration: u32,
 }

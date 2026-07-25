@@ -1,6 +1,6 @@
 use crate::storage::{
-    ChangelogEntry, ClaimWindow, DataKey, DayBucket, GovernanceProposal, RateHistoryEntry,
-    ReferralStats, VestingEntry,
+    BootstrapConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DelegationChain,
+    GovernanceProposal, RateHistoryEntry, ReferralStats, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -937,47 +937,91 @@ pub fn set_voted(env: &Env, proposal_id: u32, voter: &Address) {
     env.storage().persistent().set(&key, &true);
 }
 
-// ── Issue #199: insurance fund ───────────────────────────────────────────────
+// ── Issue #200: staking delegation chains ────────────────────────────────────
 // DataKey is already at Soroban's 50-variant cap (see the note in
 // storage.rs), so these use raw Symbol keys instead of a DataKey variant.
 
-pub fn get_insurance_rate_bps(env: &Env) -> u32 {
+pub fn get_delegation_chain(env: &Env, beneficiary: &Address) -> Option<DelegationChain> {
+    let key = (Symbol::new(env, "delchain"), beneficiary.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_delegation_chain(env: &Env, beneficiary: &Address, chain: &DelegationChain) {
+    let key = (Symbol::new(env, "delchain"), beneficiary.clone());
+    env.storage().persistent().set(&key, chain);
+}
+
+pub fn remove_delegation_chain(env: &Env, beneficiary: &Address) {
+    let key = (Symbol::new(env, "delchain"), beneficiary.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #201: per-user stake/claim rate limiting ───────────────────────────
+
+pub fn get_stake_rate_limit(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&symbol_short!("insrate"))
+        .get(&symbol_short!("stkrlim"))
         .unwrap_or(0)
 }
 
-pub fn set_insurance_rate_bps(env: &Env, bps: u32) {
+pub fn set_stake_rate_limit(env: &Env, min_ledgers: u32) {
     env.storage()
         .instance()
-        .set(&symbol_short!("insrate"), &bps);
+        .set(&symbol_short!("stkrlim"), &min_ledgers);
 }
 
-pub fn get_insurance_fund_balance(env: &Env) -> i128 {
+pub fn get_claim_rate_limit(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&symbol_short!("insfund"))
+        .get(&symbol_short!("clmrlim"))
         .unwrap_or(0)
 }
 
-pub fn set_insurance_fund_balance(env: &Env, balance: i128) {
+pub fn set_claim_rate_limit(env: &Env, min_ledgers: u32) {
     env.storage()
         .instance()
-        .set(&symbol_short!("insfund"), &balance);
+        .set(&symbol_short!("clmrlim"), &min_ledgers);
 }
 
-// ── Issue #198: penalty redistribution mode ──────────────────────────────────
-
-pub fn get_penalty_redistribution_mode(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&symbol_short!("penredis"))
-        .unwrap_or(false)
+/// Separate from `StakedAtLedger` (when the *position* opened) — this tracks
+/// the ledger of the user's most recent individual stake action.
+pub fn get_last_stake_ledger(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "laststk"), user.clone());
+    env.storage().persistent().get(&key)
 }
 
-pub fn set_penalty_redistribution_mode(env: &Env, enabled: bool) {
+pub fn set_last_stake_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "laststk"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
+/// Separate from the existing `LastClaimLedger` DataKey, which is a general
+/// reward-checkpoint field touched by many flows (stake, position transfer,
+/// stake_for, etc.) and does not mean "the last time claim() was explicitly
+/// called". This tracks specifically the latter, for rate limiting.
+pub fn get_last_claim_action_ledger(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "lastclma"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_last_claim_action_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "lastclma"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
+// ── Issue #202: liquidity bootstrap mode ─────────────────────────────────────
+
+pub fn get_bootstrap_config(env: &Env) -> Option<BootstrapConfig> {
+    env.storage().instance().get(&symbol_short!("bootcfg"))
+}
+
+pub fn set_bootstrap_config(env: &Env, config: &BootstrapConfig) {
     env.storage()
         .instance()
-        .set(&symbol_short!("penredis"), &enabled);
+        .set(&symbol_short!("bootcfg"), config);
+}
+
+pub fn clear_bootstrap_config(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("bootcfg"));
 }

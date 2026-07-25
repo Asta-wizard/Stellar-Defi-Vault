@@ -161,8 +161,8 @@ pub enum VaultError {
 
 /// Soroban caps every `#[contracterror]`/`#[contracttype]` enum at 50 variants
 /// (`ScSpecUdtUnionV0::cases` is a `VecM<_, 50>` in stellar-xdr) — `VaultError`
-/// above is already at exactly that cap, so new error cases for issues #198,
-/// #199, #203, and #208 can't be added to it. This second, separate error
+/// above is already at exactly that cap, so new error cases for issues #200,
+/// #201, #202, and #204 can't be added to it. This second, separate error
 /// enum holds just those new cases, plus mirrors of the handful of
 /// `VaultError` cases the new functions can also hit (via the `From` impl
 /// below, so `?` still works normally at call sites).
@@ -178,14 +178,22 @@ pub enum VaultExtError {
     ZeroAmount = 3,
     /// Mirrors `VaultError::ArithmeticError`.
     ArithmeticError = 4,
-    /// Mirrors `VaultError::AlreadyInitialized` — returned by `import_state()`.
-    AlreadyInitialized = 5,
-    /// Returned by `set_insurance_rate_bps()` when `bps` exceeds 500 (5%)
-    /// (issue #199).
-    InvalidInsuranceRate = 6,
-    /// Returned by `export_state()` when more than 100 positions would be
-    /// exported (issue #203).
-    TooManyPositions = 7,
+    /// Returned by `add_delegate_to_chain()` when the chain already holds 3
+    /// delegates (issue #200).
+    ChainTooLong = 5,
+    /// Returned by `add_delegate_to_chain()` when adding `delegate` would
+    /// create a cycle — either `delegate == beneficiary`, `delegate` is
+    /// already in the chain, or `delegate` is themselves a beneficiary whose
+    /// own chain already includes this `beneficiary` (issue #200).
+    CircularDelegation = 6,
+    /// Returned by `stake()`/`stake_for()` when called again before
+    /// `min_ledgers_between_stakes` have elapsed since the caller's last
+    /// stake, and by `claim()` for the equivalent claim-side limit (issue
+    /// #201).
+    RateLimitExceeded = 7,
+    /// Returned by `start_bootstrap()` when `initial_rate_bps < base_rate_bps`
+    /// (issue #202).
+    InvalidBootstrapConfig = 8,
 }
 
 impl From<VaultError> for VaultExtError {
@@ -195,7 +203,6 @@ impl From<VaultError> for VaultExtError {
             VaultError::NotInitialized => VaultExtError::NotInitialized,
             VaultError::ZeroAmount => VaultExtError::ZeroAmount,
             VaultError::ArithmeticError => VaultExtError::ArithmeticError,
-            VaultError::AlreadyInitialized => VaultExtError::AlreadyInitialized,
             // Any other VaultError reaching here (shouldn't happen given how
             // these functions are written) maps to the closest generic case.
             _ => VaultExtError::Unauthorized,
