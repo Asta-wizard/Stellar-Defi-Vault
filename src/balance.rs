@@ -936,3 +936,48 @@ pub fn set_voted(env: &Env, proposal_id: u32, voter: &Address) {
     let key = (Symbol::new(env, "voted"), proposal_id, voter.clone());
     env.storage().persistent().set(&key, &true);
 }
+
+// ── Issue #199: insurance fund ───────────────────────────────────────────────
+// DataKey is already at Soroban's 50-variant cap (see the note in
+// storage.rs), so these use raw Symbol keys instead of a DataKey variant.
+
+pub fn get_insurance_rate_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("insrate"))
+        .unwrap_or(0)
+}
+
+pub fn set_insurance_rate_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("insrate"), &bps);
+}
+
+pub fn get_insurance_fund_balance(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("insfund"))
+        .unwrap_or(0)
+}
+
+pub fn set_insurance_fund_balance(env: &Env, balance: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("insfund"), &balance);
+}
+
+// ── Issue #198: penalty redistribution mode ──────────────────────────────────
+
+pub fn get_penalty_redistribution_mode(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("penredis"))
+        .unwrap_or(false)
+}
+
+pub fn set_penalty_redistribution_mode(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("penredis"), &enabled);
+}

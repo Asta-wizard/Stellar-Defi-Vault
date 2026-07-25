@@ -543,3 +543,37 @@ pub struct GovernanceProposal {
     pub ends_at: u32,
     pub enacted: bool,
 }
+
+// ── Issue #203: contract migration export/import ─────────────────────────────
+
+/// Full pool state snapshot for migrating to a new contract instance
+/// (issue #203). Both the exporting and importing contracts should be
+/// paused for the duration of the migration — this struct is a point-in-time
+/// snapshot, not a live sync, so any activity on the old contract between
+/// export and import would be lost from the new one.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MigrationExport {
+    pub admin: Address,
+    pub stake_token: Address,
+    pub reward_token: Address,
+    pub reward_rate_bps: u32,
+    pub total_staked: i128,
+    pub total_stakers: u32,
+    pub paused: bool,
+    pub all_positions: Vec<(Address, StakePosition)>,
+}
+
+// ── Issue #208: storage usage report ─────────────────────────────────────────
+
+/// Rough estimate of the contract's ledger storage footprint (issue #208).
+/// Approximations only — see `storage_usage_report()`'s doc comment in
+/// vault.rs for the byte-size constants used and their basis.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct StorageUsageReport {
+    pub instance_keys: u32,
+    pub persistent_position_count: u32,
+    pub persistent_other_keys: u32,
+    pub estimated_total_bytes: u32,
+}

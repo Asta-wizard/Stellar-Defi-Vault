@@ -158,3 +158,47 @@ pub enum VaultError {
     /// Reverts with NotInEpochMode error if pool is not configured for epoch mode.
     NotInEpochMode = 50,
 }
+
+/// Soroban caps every `#[contracterror]`/`#[contracttype]` enum at 50 variants
+/// (`ScSpecUdtUnionV0::cases` is a `VecM<_, 50>` in stellar-xdr) — `VaultError`
+/// above is already at exactly that cap, so new error cases for issues #198,
+/// #199, #203, and #208 can't be added to it. This second, separate error
+/// enum holds just those new cases, plus mirrors of the handful of
+/// `VaultError` cases the new functions can also hit (via the `From` impl
+/// below, so `?` still works normally at call sites).
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VaultExtError {
+    /// Mirrors `VaultError::Unauthorized`.
+    Unauthorized = 1,
+    /// Mirrors `VaultError::NotInitialized`.
+    NotInitialized = 2,
+    /// Mirrors `VaultError::ZeroAmount`.
+    ZeroAmount = 3,
+    /// Mirrors `VaultError::ArithmeticError`.
+    ArithmeticError = 4,
+    /// Mirrors `VaultError::AlreadyInitialized` — returned by `import_state()`.
+    AlreadyInitialized = 5,
+    /// Returned by `set_insurance_rate_bps()` when `bps` exceeds 500 (5%)
+    /// (issue #199).
+    InvalidInsuranceRate = 6,
+    /// Returned by `export_state()` when more than 100 positions would be
+    /// exported (issue #203).
+    TooManyPositions = 7,
+}
+
+impl From<VaultError> for VaultExtError {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::Unauthorized => VaultExtError::Unauthorized,
+            VaultError::NotInitialized => VaultExtError::NotInitialized,
+            VaultError::ZeroAmount => VaultExtError::ZeroAmount,
+            VaultError::ArithmeticError => VaultExtError::ArithmeticError,
+            VaultError::AlreadyInitialized => VaultExtError::AlreadyInitialized,
+            // Any other VaultError reaching here (shouldn't happen given how
+            // these functions are written) maps to the closest generic case.
+            _ => VaultExtError::Unauthorized,
+        }
+    }
+}

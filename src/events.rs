@@ -42,6 +42,29 @@ pub fn withdrawal_limit_updated(env: &Env, admin: &Address, new_limit: i128) {
         .publish(topics, (new_limit, env.ledger().sequence()));
 }
 
+/// Issue #199: emitted by `deploy_insurance_fund()`.
+pub fn insurance_deployed(env: &Env, amount: i128, new_reward_balance: i128) {
+    let topics = (symbol_short!("ins_dply"),);
+    env.events().publish(
+        topics,
+        (amount, new_reward_balance, env.ledger().sequence()),
+    );
+}
+
+/// Issue #203: emitted by `export_state()`.
+pub fn state_exported(env: &Env, admin: &Address, position_count: u32, ledger: u32) {
+    let topics = (symbol_short!("st_export"), admin);
+    env.events().publish(topics, (position_count, ledger));
+}
+
+/// Issue #198: emitted by `slash()` when penalty redistribution mode is
+/// enabled.
+pub fn penalty_redistributed(env: &Env, total_amount: i128, staker_count: u32, ledger: u32) {
+    let topics = (symbol_short!("pen_redis"),);
+    env.events()
+        .publish(topics, (total_amount, staker_count, ledger));
+}
+
 pub fn rate_changed(env: &Env, old_rate_bps: u32, new_rate_bps: u32) {
     let topics = (symbol_short!("rate_chg"),);
     env.events().publish(
