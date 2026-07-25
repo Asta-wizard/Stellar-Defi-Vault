@@ -779,6 +779,19 @@ pub fn set_dynamic_fee_config(env: &Env, config: &DynamicFeeConfig) {
         .set(&symbol_short!("dyn_fee"), config);
 }
 
+// ── Issue #214: per-user lifetime claim count (reputation consistency score) ─
+
+pub fn get_user_claim_count(env: &Env, user: &Address) -> u32 {
+    let key = (Symbol::new(env, "clm_cnt"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn increment_user_claim_count(env: &Env, user: &Address) {
+    let current = get_user_claim_count(env, user);
+    let key = (Symbol::new(env, "clm_cnt"), user.clone());
+    env.storage().persistent().set(&key, &(current + 1));
+}
+
 pub fn set_activity_log(env: &Env, log: &Vec<DayBucket>) {
     env.storage().instance().set(&symbol_short!("act_log"), log);
 }

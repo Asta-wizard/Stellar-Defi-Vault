@@ -9,9 +9,9 @@ use crate::{
         BoostTierProgress, CampaignInfo, ChangelogEntry, ClaimWindow, ContractAddresses,
         ContractMetadata, DataKey, DayBucket, DynamicFeeConfig, EpochState, InterfaceId,
         LeaderboardEntry, PauseInfo, PauseReason, PoolConfig, PoolHealthReport, PoolStats,
-        RateHistoryEntry, ReferralLeaderboardEntry, RoundingPolicy, StakeAction, StakeHistoryEntry,
-        StakePosition, StakeStreak, StakingEfficiencyScore, TaxReport, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        RateHistoryEntry, ReferralLeaderboardEntry, ReputationScore, RoundingPolicy, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingEfficiencyScore, TaxReport,
+        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -33,6 +33,10 @@ pub(crate) const MAX_UNSTAKE_FEE_BPS: u32 = 500;
 pub(crate) const LEDGERS_PER_DAY: u32 = 17_280;
 /// Days of runway below which a refill alert is emitted.
 pub(crate) const REFILL_ALERT_DAYS: u32 = 30;
+/// Maximum value of each `ReputationScore` sub-component (issue #214).
+pub(crate) const REPUTATION_SUB_SCORE_MAX: u32 = 2_500;
+/// Consistency-score deduction per claim; floors at 0 after 25 claims (issue #214).
+pub(crate) const REPUTATION_CLAIM_DECAY_BPS: u32 = 100;
 
 #[contract]
 pub struct VaultContract;
@@ -3570,6 +3574,8 @@ impl VaultContract {
 
         let paid = balance::get_total_rewards_paid(env);
         balance::set_total_rewards_paid(env, paid + reward);
+        // Issue #214: track lifetime claim count for the reputation consistency score.
+        balance::increment_user_claim_count(env, staker);
 
         // Issue #217: append to per-user claim history for tax reporting
         let mut claim_history = balance::get_claim_history(env, staker);
@@ -4771,6 +4777,44 @@ impl VaultContract {
         })
     }
 
+    // ── Issue #214: staker reputation score ───────────────────────────────────
+
+    /// Read-only composite reputation score combining stake duration, claim
+    /// consistency, position size, and streak participation into a single
+    /// 0-10000 bps score. Useful for tiered access, airdrops, and governance
+    /// weight. No auth required, no state changes.
+    ///
+    /// Returns all-zero for an address with no active position.
+    pub fn get_reputation_score(env: Env, user: Address) -> ReputationScore {
+        if balance::get_shares(&env, &user) == 0 {
+            return ReputationScore {
+                duration_score: 0,
+                consistency_score: 0,
+                size_score: 0,
+                streak_score: 0,
+                total_score: 0,
+            };
+        }
+
+        let duration_score = Self::compute_duration_score(&env, &user);
+        let consistency_score = Self::compute_consistency_score(&env, &user);
+        let size_score = Self::compute_size_score(env.clone(), user.clone());
+        let streak_score = Self::compute_streak_score(&env, &user);
+        let total_score = duration_score
+            .saturating_add(consistency_score)
+            .saturating_add(size_score)
+            .saturating_add(streak_score)
+            .min(BOOST_BPS_BASE);
+
+        ReputationScore {
+            duration_score,
+            consistency_score,
+            size_score,
+            streak_score,
+            total_score,
+        }
+    }
+
     // ── Referral system ───────────────────────────────────────────────────────
 
     /// Stake `amount` tokens on behalf of `staker`, crediting `referrer` with
@@ -5368,5 +5412,48 @@ impl VaultContract {
         let fee_span = (config.max_fee_bps - config.base_fee_bps) as u64;
         let extra = fee_span.saturating_mul(progress) / range;
         config.base_fee_bps + extra as u32
+    }
+
+    // ── Issue #214: staker reputation score helpers ───────────────────────────
+
+    /// `min(position_age_ledgers / STELLAR_LEDGERS_PER_YEAR, 1) * 2500`.
+    /// Returns 0 if the user has never staked.
+    fn compute_duration_score(env: &Env, user: &Address) -> u32 {
+        let staked_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        if staked_at == 0 {
+            return 0;
+        }
+        let age = env.ledger().sequence().saturating_sub(staked_at);
+        let years = (age / STELLAR_LEDGERS_PER_YEAR).min(1);
+        years * REPUTATION_SUB_SCORE_MAX
+    }
+
+    /// Starts at the maximum (2500) for a staker who has never claimed and
+    /// decreases by `REPUTATION_CLAIM_DECAY_BPS` per lifetime claim, floored at
+    /// 0 after 25+ claims — rewards patient stakers who let rewards compound
+    /// rather than claiming frequently.
+    fn compute_consistency_score(env: &Env, user: &Address) -> u32 {
+        let claims = balance::get_user_claim_count(env, user);
+        REPUTATION_SUB_SCORE_MAX.saturating_sub(claims.saturating_mul(REPUTATION_CLAIM_DECAY_BPS))
+    }
+
+    /// `percentage_of_pool_bps / 4`, capped at 2500 (100% of the pool caps out
+    /// the size score at its maximum).
+    fn compute_size_score(env: Env, user: Address) -> u32 {
+        let percentage_bps = Self::percentage_of_pool(env, user);
+        let percentage_bps = u32::try_from(percentage_bps).unwrap_or(0);
+        (percentage_bps / 4).min(REPUTATION_SUB_SCORE_MAX)
+    }
+
+    /// `min(current_streak, 4) * 625` (max 2500 at 4+ consecutive waves).
+    fn compute_streak_score(env: &Env, user: &Address) -> u32 {
+        let streak = balance::get_user_streak(env, user)
+            .map(|s| s.current_streak)
+            .unwrap_or(0);
+        streak.min(4) * 625
     }
 }

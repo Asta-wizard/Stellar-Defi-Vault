@@ -241,6 +241,20 @@ pub struct DynamicFeeConfig {
     pub utilization_threshold_bps: u32,
 }
 
+/// Composite staker reputation score returned by `get_reputation_score` (issue #214).
+///
+/// Each sub-score is bounded to 2500 basis points; `total_score` is the sum,
+/// bounded to 10 000 (100%). All zero for an address with no active position.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReputationScore {
+    pub duration_score: u32,
+    pub consistency_score: u32,
+    pub size_score: u32,
+    pub streak_score: u32,
+    pub total_score: u32,
+}
+
 /// Single entry in the on-chain changelog exposed by `get_changelog`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]

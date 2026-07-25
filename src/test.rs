@@ -2804,6 +2804,156 @@ fn test_streak_too_many_active_users_rejected() {
     assert_eq!(result, Err(Ok(VaultError::TooManyActiveUsers)));
 }
 
+// ── Issue #214: staker reputation score ──────────────────────────────────────
+
+#[test]
+fn test_reputation_score_brand_new_staker_is_zero() {
+    let f = VaultFixture::new();
+    let stranger = Address::generate(&f.env);
+
+    let score = f.vault.get_reputation_score(&stranger);
+
+    assert_eq!(score.duration_score, 0);
+    assert_eq!(score.consistency_score, 0);
+    assert_eq!(score.size_score, 0);
+    assert_eq!(score.streak_score, 0);
+    assert_eq!(score.total_score, 0);
+}
+
+#[test]
+fn test_reputation_score_duration_scales_up_to_one_year_cap() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Halfway through the first year: duration_score truncates to 0 (integer
+    // division of age / STELLAR_LEDGERS_PER_YEAR is 0 until a full year passes).
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR / 2);
+    let mid_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(mid_score.duration_score, 0);
+
+    // A full year (and beyond) caps duration_score at its maximum. The second
+    // check stays within the fixture's max_entry_ttl (10_000_000 ledgers) -
+    // going further would trip the test environment's synthetic "archived
+    // entry" panic, which is a testutils-only artifact, not contract behavior.
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR);
+    let year_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(year_score.duration_score, 2500);
+
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR + LEDGERS_PER_DAY);
+    let later_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(later_score.duration_score, 2500); // still capped, not multiplied
+}
+
+#[test]
+fn test_reputation_score_consistency_decreases_per_claim() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    // Max allowed rate so a claim is non-zero after just one day, keeping
+    // ledger advances well under the fixture's max_entry_ttl.
+    f.vault.set_reward_rate_bps(&50_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // No claims yet: consistency starts at the maximum.
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2500);
+
+    set_ledger(&f.env, 1 + LEDGERS_PER_DAY);
+    f.vault.claim(&f.alice);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2400); // -100 for the first claim
+
+    set_ledger(&f.env, 1 + LEDGERS_PER_DAY * 2);
+    f.vault.claim(&f.alice);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 2300); // -100 for the second claim
+}
+
+#[test]
+fn test_reputation_score_consistency_floors_at_zero() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.set_reward_rate_bps(&50_000);
+
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    for i in 0..30 {
+        set_ledger(&f.env, 1 + LEDGERS_PER_DAY * (i + 1));
+        f.vault.claim(&f.alice);
+    }
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.consistency_score, 0); // 30 claims * 100 saturates at 0, not underflow
+}
+
+#[test]
+fn test_reputation_score_size_reflects_percentage_of_pool() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &750_000);
+    f.vault.stake(&f.bob, &250_000);
+
+    // Alice holds 75% of the pool (7500 bps) -> size_score = 7500 / 4 = 1875.
+    let alice_score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(alice_score.size_score, 1875);
+
+    // Bob holds 25% of the pool (2500 bps) -> size_score = 2500 / 4 = 625.
+    let bob_score = f.vault.get_reputation_score(&f.bob);
+    assert_eq!(bob_score.size_score, 625);
+}
+
+#[test]
+fn test_reputation_score_size_caps_at_full_pool() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000); // sole staker: 100% of the pool
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.size_score, 2500);
+}
+
+#[test]
+fn test_reputation_score_streak_scales_and_caps_at_four_waves() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    let users = soroban_sdk::Vec::from_array(&f.env, [f.alice.clone()]);
+
+    f.vault.record_wave_activity(&f.admin, &1, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 625); // 1 wave * 625
+
+    f.vault.record_wave_activity(&f.admin, &2, &users);
+    f.vault.record_wave_activity(&f.admin, &3, &users);
+    f.vault.record_wave_activity(&f.admin, &4, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 2500); // 4 waves * 625, at the cap
+
+    f.vault.record_wave_activity(&f.admin, &5, &users);
+    let score = f.vault.get_reputation_score(&f.alice);
+    assert_eq!(score.streak_score, 2500); // 5th consecutive wave: still capped
+}
+
+#[test]
+fn test_reputation_score_total_is_sum_of_components() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000); // sole staker
+
+    let users = soroban_sdk::Vec::from_array(&f.env, [f.alice.clone()]);
+    f.vault.record_wave_activity(&f.admin, &1, &users); // streak_score = 625
+
+    set_ledger(&f.env, 1 + STELLAR_LEDGERS_PER_YEAR); // duration_score = 2500
+
+    let score = f.vault.get_reputation_score(&f.alice);
+    // duration 2500 + consistency 2500 (no claims) + size 2500 (100% of pool) + streak 625
+    assert_eq!(score.total_score, 8125);
+    assert_eq!(
+        score.total_score,
+        score.duration_score + score.consistency_score + score.size_score + score.streak_score
+    );
+}
+
 // ── Issue #70: zero address validation in initialize ─────────────────────────
 
 #[test]
