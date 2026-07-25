@@ -42,6 +42,33 @@ pub fn withdrawal_limit_updated(env: &Env, admin: &Address, new_limit: i128) {
         .publish(topics, (new_limit, env.ledger().sequence()));
 }
 
+/// Issue #202: emitted by `start_bootstrap()`.
+pub fn bootstrap_started(
+    env: &Env,
+    initial_rate_bps: u32,
+    base_rate_bps: u32,
+    duration_ledgers: u32,
+) {
+    let topics = (symbol_short!("boot_str"),);
+    env.events().publish(
+        topics,
+        (
+            initial_rate_bps,
+            base_rate_bps,
+            duration_ledgers,
+            env.ledger().sequence(),
+        ),
+    );
+}
+
+/// Issue #202: emitted the first time any call notices the bootstrap period
+/// has elapsed and settles the rate to `base_rate_bps` permanently.
+pub fn bootstrap_ended(env: &Env, base_rate_bps: u32) {
+    let topics = (symbol_short!("boot_end"),);
+    env.events()
+        .publish(topics, (base_rate_bps, env.ledger().sequence()));
+}
+
 pub fn rate_changed(env: &Env, old_rate_bps: u32, new_rate_bps: u32) {
     let topics = (symbol_short!("rate_chg"),);
     env.events().publish(

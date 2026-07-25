@@ -14,7 +14,8 @@ use crate::{
     storage::{ChangelogEntry, PauseReason, ProposableParam, RoundingPolicy, UnstakeCheckResult},
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
-        CONTRACT_VERSION, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
+        CONTRACT_VERSION, FIRST_STAKE_COST, MAX_CHANGELOG_ENTRIES, STELLAR_LEDGERS_PER_YEAR,
+        TOP_UP_COST,
     },
 };
 
