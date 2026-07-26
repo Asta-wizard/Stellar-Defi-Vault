@@ -14,12 +14,12 @@ use crate::{
     errors::{VaultError, VaultExtError},
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{
-        AdminAction, ChangelogEntry, FeeRecipient, HalvingConfig, PauseReason, ProposableParam,
-        RoundingPolicy, StakingCertificate, UnstakeCheckResult,
+        AdminAction, ChangelogEntry, FeeRecipient, HalvingConfig, MilestoneCondition, PauseReason,
+        ProposableParam, RoundingPolicy, StakingCertificate, TriggerDirection, UnstakeCheckResult,
     },
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
-        CONTRACT_VERSION, FIRST_STAKE_COST, LEDGERS_PER_DAY, MAX_CHANGELOG_ENTRIES,
+        CONTRACT_VERSION, FIRST_STAKE_COST, LEDGERS_PER_DAY, MAX_CHANGELOG_ENTRIES, MAX_MILESTONES,
         STELLAR_LEDGERS_PER_YEAR, TOP_UP_COST,
     },
 };
@@ -104,6 +104,27 @@ impl MockDexRouter {
         let token_client = token::Client::new(&env, &to_token);
         token_client.transfer(&env.current_contract_address(), &to, &amount_out);
         amount_out
+    }
+}
+
+// ── Mock price oracle (issue #240 tests) ──────────────────────────────────────
+
+#[contract]
+struct MockOracle;
+
+#[contractimpl]
+impl MockOracle {
+    pub fn set_price(env: Env, asset_id: soroban_sdk::String, price: i128) {
+        env.storage()
+            .instance()
+            .set(&(Symbol::new(&env, "price"), asset_id), &price);
+    }
+
+    pub fn get_price(env: Env, asset_id: soroban_sdk::String) -> i128 {
+        env.storage()
+            .instance()
+            .get(&(Symbol::new(&env, "price"), asset_id))
+            .unwrap_or(0)
     }
 }
 
@@ -6385,4 +6406,438 @@ fn test_arming_gate_late_keeps_checkpointed_rewards() {
     set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR + 500_000);
     assert_eq!(f.vault.calc_pending_reward(&f.alice), checkpointed);
     assert_eq!(f.vault.claim(&f.alice), checkpointed);
+}
+
+// ── Issue #239: stake-weighted lottery ────────────────────────────────────────
+
+#[test]
+fn test_lottery_single_staker_wins_solo() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+
+    f.token_admin.mint(&f.admin, &500_000);
+    f.vault.create_lottery(&f.admin, &500_000, &100_u32);
+
+    set_ledger(&f.env, 100);
+    let alice_balance_before = f.token.balance(&f.alice);
+    f.vault.draw_lottery(&f.admin);
+
+    let config = f.vault.get_lottery_config().unwrap();
+    assert!(config.drawn);
+    assert_eq!(config.winner.len(), 1);
+    assert_eq!(config.winner.get(0).unwrap(), f.alice);
+    assert_eq!(f.token.balance(&f.alice), alice_balance_before + 500_000);
+}
+
+#[test]
+fn test_lottery_staker_with_full_pool_always_wins() {
+    let f = VaultFixture::new();
+    // Alice holds 100% of the pool; Bob never stakes.
+    f.vault.stake(&f.alice, &1_000_000);
+
+    f.token_admin.mint(&f.admin, &1_000);
+    f.vault.create_lottery(&f.admin, &1_000, &10_u32);
+    set_ledger(&f.env, 10);
+    f.vault.draw_lottery(&f.admin);
+
+    let config = f.vault.get_lottery_config().unwrap();
+    assert_eq!(config.winner.get(0).unwrap(), f.alice);
+}
+
+#[test]
+fn test_draw_lottery_before_draw_at_ledger_reverts() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    f.token_admin.mint(&f.admin, &1_000);
+    f.vault.create_lottery(&f.admin, &1_000, &1000_u32);
+
+    let result = f.vault.try_draw_lottery(&f.admin);
+    assert_eq!(result, Err(Ok(VaultExtError::LotteryNotReady)));
+}
+
+#[test]
+fn test_create_lottery_reverts_if_undrawn_lottery_exists() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    f.token_admin.mint(&f.admin, &2_000);
+    f.vault.create_lottery(&f.admin, &1_000, &1000_u32);
+
+    let result = f.vault.try_create_lottery(&f.admin, &1_000, &2000_u32);
+    assert_eq!(result, Err(Ok(VaultExtError::LotteryAlreadyActive)));
+}
+
+#[test]
+fn test_lottery_prize_transferred_to_winner() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    f.token_admin.mint(&f.admin, &750_000);
+    f.vault.create_lottery(&f.admin, &750_000, &5_u32);
+    set_ledger(&f.env, 5);
+
+    let vault_balance_before = f.token.balance(&f.vault.address);
+    f.vault.draw_lottery(&f.admin);
+    assert_eq!(
+        f.token.balance(&f.vault.address),
+        vault_balance_before - 750_000
+    );
+}
+
+// ── Issue #238: loyalty milestone badges ──────────────────────────────────────
+
+#[test]
+fn test_duration_milestone_triggered_after_correct_ledgers() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let name = soroban_sdk::String::from_str(&f.env, "30 Day Staker");
+    let id = f.vault.add_milestone(
+        &f.admin,
+        &name,
+        &MilestoneCondition::StakeDurationLedgers,
+        &100_i128,
+    );
+
+    f.vault.check_milestones(&f.alice);
+    assert!(f.vault.get_user_milestones(&f.alice).is_empty());
+
+    set_ledger(&f.env, 1 + 100);
+    f.vault.check_milestones(&f.alice);
+    let achieved = f.vault.get_user_milestones(&f.alice);
+    assert_eq!(achieved.len(), 1);
+    assert_eq!(achieved.get(0).unwrap(), id);
+}
+
+#[test]
+fn test_claim_count_milestone_triggers_correctly() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let name = soroban_sdk::String::from_str(&f.env, "First Claim");
+    let id = f
+        .vault
+        .add_milestone(&f.admin, &name, &MilestoneCondition::ClaimCount, &1_i128);
+
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+    f.vault.claim(&f.alice);
+
+    let achieved = f.vault.get_user_milestones(&f.alice);
+    assert_eq!(achieved.len(), 1);
+    assert_eq!(achieved.get(0).unwrap(), id);
+}
+
+#[test]
+fn test_already_achieved_milestone_not_re_awarded() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let name = soroban_sdk::String::from_str(&f.env, "Big Staker");
+    f.vault.add_milestone(
+        &f.admin,
+        &name,
+        &MilestoneCondition::TotalStakedAmount,
+        &500_000_i128,
+    );
+
+    f.vault.check_milestones(&f.alice);
+    assert_eq!(f.vault.get_user_milestones(&f.alice).len(), 1);
+
+    // Re-checking after the condition is still true must not duplicate it.
+    f.vault.check_milestones(&f.alice);
+    assert_eq!(f.vault.get_user_milestones(&f.alice).len(), 1);
+}
+
+#[test]
+fn test_add_milestone_max_cap_enforced() {
+    let f = VaultFixture::new();
+    for i in 0..MAX_MILESTONES {
+        let name = soroban_sdk::String::from_str(&f.env, "Milestone");
+        f.vault.add_milestone(
+            &f.admin,
+            &name,
+            &MilestoneCondition::ClaimCount,
+            &(i as i128),
+        );
+    }
+
+    let name = soroban_sdk::String::from_str(&f.env, "One Too Many");
+    let result =
+        f.vault
+            .try_add_milestone(&f.admin, &name, &MilestoneCondition::ClaimCount, &0_i128);
+    assert_eq!(result, Err(Ok(VaultExtError::TooManyMilestones)));
+}
+
+// ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
+
+#[test]
+fn test_check_and_release_condition_met_waives_lockup() {
+    let f = VaultFixture::new();
+    f.vault.set_lock_period(&1000);
+    f.vault.set_early_exit_penalty_bps(&1000); // 10%
+
+    let oracle_id = f.env.register_contract(None, MockOracle);
+    let oracle = MockOracleClient::new(&f.env, &oracle_id);
+    let asset_id = soroban_sdk::String::from_str(&f.env, "XLM");
+    oracle.set_price(&asset_id, &90);
+
+    f.vault.set_oracle_contract(&f.admin, &oracle_id);
+    f.vault.stake(&f.alice, &500_000);
+    f.vault
+        .set_price_condition(&f.alice, &100_i128, &asset_id, &TriggerDirection::Below);
+
+    f.vault.check_and_release(&f.alice);
+
+    // Still inside the lock period, but the waiver means no penalty.
+    let returned = f.vault.unstake(&f.alice, &500_000);
+    assert_eq!(returned, 500_000);
+}
+
+#[test]
+fn test_check_and_release_condition_not_met_keeps_lockup() {
+    let f = VaultFixture::new();
+    f.vault.set_lock_period(&1000);
+    f.vault.set_early_exit_penalty_bps(&1000); // 10%
+
+    let oracle_id = f.env.register_contract(None, MockOracle);
+    let oracle = MockOracleClient::new(&f.env, &oracle_id);
+    let asset_id = soroban_sdk::String::from_str(&f.env, "XLM");
+    oracle.set_price(&asset_id, &150); // above trigger, "Below 100" not satisfied
+
+    f.vault.set_oracle_contract(&f.admin, &oracle_id);
+    f.vault.stake(&f.alice, &500_000);
+    f.vault
+        .set_price_condition(&f.alice, &100_i128, &asset_id, &TriggerDirection::Below);
+
+    f.vault.check_and_release(&f.alice);
+
+    let returned = f.vault.unstake(&f.alice, &500_000);
+    assert_eq!(returned, 450_000, "10% penalty still applies");
+}
+
+#[test]
+fn test_check_and_release_direction_above_works() {
+    let f = VaultFixture::new();
+    f.vault.set_lock_period(&1000);
+    f.vault.set_early_exit_penalty_bps(&1000);
+
+    let oracle_id = f.env.register_contract(None, MockOracle);
+    let oracle = MockOracleClient::new(&f.env, &oracle_id);
+    let asset_id = soroban_sdk::String::from_str(&f.env, "XLM");
+    oracle.set_price(&asset_id, &200);
+
+    f.vault.set_oracle_contract(&f.admin, &oracle_id);
+    f.vault.stake(&f.alice, &500_000);
+    f.vault
+        .set_price_condition(&f.alice, &150_i128, &asset_id, &TriggerDirection::Above);
+
+    f.vault.check_and_release(&f.alice);
+    let returned = f.vault.unstake(&f.alice, &500_000);
+    assert_eq!(returned, 500_000);
+}
+
+#[test]
+fn test_check_and_release_no_oracle_set_reverts() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    let asset_id = soroban_sdk::String::from_str(&f.env, "XLM");
+    f.vault
+        .set_price_condition(&f.alice, &100_i128, &asset_id, &TriggerDirection::Below);
+
+    let result = f.vault.try_check_and_release(&f.alice);
+    assert_eq!(result, Err(Ok(VaultExtError::NoOracleConfigured)));
+}
+
+// ── Issue #241: governance proposal veto ──────────────────────────────────────
+
+#[test]
+fn test_veto_holder_above_threshold_can_veto() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &800_000);
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &2000_u32); // 20%
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.vote(&f.alice, &id, &true);
+
+    f.vault.veto_proposal(&f.alice, &id); // Alice holds 80% >= 20%
+
+    let status = f.vault.get_proposal_veto_status(&id);
+    assert_eq!(status, Some(f.alice.clone()));
+}
+
+#[test]
+fn test_veto_holder_below_threshold_cannot_veto() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &800_000);
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &5000_u32); // 50%
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    let result = f.vault.try_veto_proposal(&f.bob, &id); // Bob holds 20% < 50%
+    assert_eq!(result, Err(Ok(VaultExtError::BelowVetoThreshold)));
+}
+
+#[test]
+fn test_vetoed_proposal_enact_reverts() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &800_000);
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &2000_u32);
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.vote(&f.alice, &id, &true);
+    f.vault.veto_proposal(&f.alice, &id);
+
+    set_ledger(&f.env, 1 + 100 + 1);
+    let result = f.vault.try_enact_proposal(&id);
+    assert_eq!(result, Err(Ok(VaultError::BatchKycTooLarge)));
+}
+
+#[test]
+fn test_veto_threshold_zero_disables_feature() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    assert_eq!(f.vault.get_veto_threshold_bps(), 0);
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    let result = f.vault.try_veto_proposal(&f.alice, &id);
+    assert_eq!(result, Err(Ok(VaultExtError::BelowVetoThreshold)));
+}
+
+#[test]
+fn test_veto_cannot_be_applied_twice() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &600_000);
+    f.vault.stake(&f.bob, &400_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &2000_u32);
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.veto_proposal(&f.alice, &id);
+
+    let result = f.vault.try_veto_proposal(&f.bob, &id);
+    assert_eq!(result, Err(Ok(VaultExtError::AlreadyVetoed)));
+}
+
+#[test]
+fn test_veto_at_exact_threshold_succeeds() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &200_000);
+    f.vault.stake(&f.bob, &800_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &2000_u32); // exactly 20%
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.veto_proposal(&f.alice, &id); // Alice holds exactly 20%
+
+    assert_eq!(f.vault.get_proposal_veto_status(&id), Some(f.alice.clone()));
+}
+
+#[test]
+fn test_veto_already_enacted_proposal_reverts() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &800_000);
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &2000_u32);
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+
+    let result = f.vault.try_veto_proposal(&f.alice, &id);
+    assert_eq!(result, Err(Ok(VaultExtError::AlreadyVetoed)));
+}
+
+// ── Additional lottery coverage ────────────────────────────────────────────────
+
+#[test]
+fn test_create_lottery_rejects_non_positive_prize() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    let result = f.vault.try_create_lottery(&f.admin, &0_i128, &10_u32);
+    assert_eq!(result, Err(Ok(VaultExtError::ZeroAmount)));
+}
+
+#[test]
+fn test_draw_lottery_no_stakers_reverts() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.admin, &1_000);
+    f.vault.create_lottery(&f.admin, &1_000, &10_u32);
+    set_ledger(&f.env, 10);
+
+    let result = f.vault.try_draw_lottery(&f.admin);
+    assert_eq!(result, Err(Ok(VaultExtError::ZeroAmount)));
+}
+
+#[test]
+fn test_draw_lottery_twice_reverts() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    f.token_admin.mint(&f.admin, &1_000);
+    f.vault.create_lottery(&f.admin, &1_000, &5_u32);
+    set_ledger(&f.env, 5);
+    f.vault.draw_lottery(&f.admin);
+
+    let result = f.vault.try_draw_lottery(&f.admin);
+    assert_eq!(result, Err(Ok(VaultExtError::LotteryAlreadyActive)));
+}
+
+// ── Additional milestone coverage ───────────────────────────────────────────────
+
+#[test]
+fn test_total_rewards_claimed_milestone_triggers_correctly() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let name = soroban_sdk::String::from_str(&f.env, "Reward Collector");
+    let id = f.vault.add_milestone(
+        &f.admin,
+        &name,
+        &MilestoneCondition::TotalRewardsClaimed,
+        &1_i128,
+    );
+
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+    f.vault.claim(&f.alice);
+
+    let achieved = f.vault.get_user_milestones(&f.alice);
+    assert_eq!(achieved.len(), 1);
+    assert_eq!(achieved.get(0).unwrap(), id);
+}
+
+// ── Additional oracle coverage ──────────────────────────────────────────────────
+
+#[test]
+fn test_check_and_release_no_price_condition_reverts() {
+    let f = VaultFixture::new();
+    let oracle_id = f.env.register_contract(None, MockOracle);
+    f.vault.set_oracle_contract(&f.admin, &oracle_id);
+    f.vault.stake(&f.alice, &500_000);
+
+    let result = f.vault.try_check_and_release(&f.alice);
+    assert_eq!(result, Err(Ok(VaultExtError::NotInitialized)));
 }

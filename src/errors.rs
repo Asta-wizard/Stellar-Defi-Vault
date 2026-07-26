@@ -129,7 +129,8 @@ pub enum VaultError {
     /// Returned by `set_max_positions_per_user()` when the requested cap exceeds 10.
     MaxPositionsTooHigh = 38,
     /// Returned by `vote()` when the proposal's voting period has already
-    /// ended, or the proposal has already been enacted.
+    /// ended, or the proposal has already been enacted. Also returned by
+    /// `enact_proposal()` when the proposal has been vetoed (issue #241).
     BatchKycTooLarge = 39,
     /// Returned by `set_dynamic_fee_config()` when `base_fee_bps > max_fee_bps`
     /// or `utilization_threshold_bps` exceeds 10 000 (100%).
@@ -288,6 +289,30 @@ pub enum VaultExtError {
     /// Returned by `place_bid()` when the auction already holds
     /// `MAX_AUCTION_BIDS` distinct bidders (issue #237).
     TooManyBids = 43,
+    /// Returned by `create_lottery()` when an undrawn lottery already exists,
+    /// and by `draw_lottery()` when no lottery is configured or it was
+    /// already drawn (issue #239).
+    LotteryAlreadyActive = 44,
+    /// Returned by `draw_lottery()` when called before `draw_at_ledger`
+    /// (issue #239).
+    LotteryNotReady = 45,
+    /// Returned by `add_milestone()` when 10 milestones are already
+    /// configured (issue #238).
+    TooManyMilestones = 46,
+    /// Returned by `check_and_release()` when no oracle contract has been
+    /// registered via `set_oracle_contract()` (issue #240).
+    NoOracleConfigured = 47,
+    /// Returned by `veto_proposal()` when the caller's pool share is below
+    /// the configured veto threshold, or the veto threshold is unset (0),
+    /// which disables the feature entirely (issue #241).
+    BelowVetoThreshold = 48,
+    /// Returned by `veto_proposal()` when the proposal already has a vetoer,
+    /// or has already been enacted and so can no longer be vetoed (issue
+    /// #241).
+    AlreadyVetoed = 49,
+    /// Returned by `set_veto_threshold_bps()` when `bps` exceeds 10 000
+    /// (100%) (issue #241).
+    InvalidVetoThreshold = 50,
 }
 
 impl From<VaultError> for VaultExtError {
