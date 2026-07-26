@@ -828,3 +828,62 @@ pub fn dynamic_fee_config_updated(
         ),
     );
 }
+
+// ── Issue #239: stake-weighted lottery ────────────────────────────────────────
+
+pub fn lottery_drawn(
+    env: &Env,
+    winner: &Address,
+    prize_amount: i128,
+    random_seed: u64,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("lot_drwn"), winner);
+    env.events()
+        .publish(topics, (prize_amount, random_seed, ledger));
+}
+
+// ── Issue #238: loyalty milestone badges ──────────────────────────────────────
+
+pub fn milestone_achieved(
+    env: &Env,
+    user: &Address,
+    milestone_id: u32,
+    milestone_name: &soroban_sdk::String,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("mstn_ach"), user);
+    env.events()
+        .publish(topics, (milestone_id, milestone_name.clone(), ledger));
+}
+
+// ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
+
+pub fn condition_triggered(
+    env: &Env,
+    user: &Address,
+    asset_id: &soroban_sdk::String,
+    oracle_price: i128,
+    trigger_price: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("cond_trg"), user);
+    env.events().publish(
+        topics,
+        (asset_id.clone(), oracle_price, trigger_price, ledger),
+    );
+}
+
+// ── Issue #241: governance proposal veto ──────────────────────────────────────
+
+pub fn proposal_vetoed(
+    env: &Env,
+    user: &Address,
+    proposal_id: u32,
+    user_stake_bps: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("prop_veto"), user);
+    env.events()
+        .publish(topics, (proposal_id, user_stake_bps, ledger));
+}

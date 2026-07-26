@@ -1,7 +1,7 @@
 use crate::storage::{
     AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig, FeeRecipient,
-    GovernanceProposal, MultisigConfig, PendingAction, RateHistoryEntry, ReferralStats,
-    StakePosition, VestingEntry,
+    GovernanceProposal, LotteryConfig, Milestone, MultisigConfig, PendingAction, PriceCondition,
+    RateHistoryEntry, ReferralStats, StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -508,8 +508,7 @@ pub fn get_user_total_claimed(env: &Env, user: &Address) -> i128 {
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
-// Not currently wired into any claim path; kept for a future accounting feature.
-#[allow(dead_code)]
+// Issue #238: wired into `do_claim`, feeding the TotalRewardsClaimed milestone condition.
 pub fn add_user_total_claimed(env: &Env, user: &Address, amount: i128) {
     let current = get_user_total_claimed(env, user);
     let key = (Symbol::new(env, "t_claimed"), user.clone());
@@ -1677,4 +1676,101 @@ pub fn get_auction_mode(env: &Env) -> bool {
         .instance()
         .get(&symbol_short!("auct_mod"))
         .unwrap_or(false)
+}
+
+// ── Issue #239: stake-weighted lottery ────────────────────────────────────────
+
+pub fn get_lottery_config(env: &Env) -> Option<LotteryConfig> {
+    env.storage().instance().get(&symbol_short!("lottery"))
+}
+
+pub fn set_lottery_config(env: &Env, config: &LotteryConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("lottery"), config);
+}
+
+// ── Issue #238: loyalty milestone badges ──────────────────────────────────────
+
+pub fn get_milestones(env: &Env) -> Vec<Milestone> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("milestns"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_milestones(env: &Env, milestones: &Vec<Milestone>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("milestns"), milestones);
+}
+
+pub fn get_user_milestones(env: &Env, user: &Address) -> Vec<u32> {
+    let key = (Symbol::new(env, "usr_mstn"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_user_milestones(env: &Env, user: &Address, ids: &Vec<u32>) {
+    let key = (Symbol::new(env, "usr_mstn"), user.clone());
+    env.storage().persistent().set(&key, ids);
+}
+
+// ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
+
+pub fn get_oracle_contract(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&symbol_short!("oracle"))
+}
+
+pub fn set_oracle_contract(env: &Env, oracle: &Address) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("oracle"), oracle);
+}
+
+pub fn get_price_condition(env: &Env, user: &Address) -> Option<PriceCondition> {
+    let key = (Symbol::new(env, "pcond"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_price_condition(env: &Env, user: &Address, condition: &PriceCondition) {
+    let key = (Symbol::new(env, "pcond"), user.clone());
+    env.storage().persistent().set(&key, condition);
+}
+
+pub fn is_lockup_waived(env: &Env, user: &Address) -> bool {
+    let key = (Symbol::new(env, "lck_wvd"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_lockup_waived(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "lck_wvd"), user.clone());
+    env.storage().persistent().set(&key, &true);
+}
+
+// ── Issue #241: governance proposal veto ──────────────────────────────────────
+
+pub fn get_veto_threshold_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("veto_bps"))
+        .unwrap_or(0)
+}
+
+pub fn set_veto_threshold_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("veto_bps"), &bps);
+}
+
+pub fn get_proposal_vetoer(env: &Env, proposal_id: u32) -> Option<Address> {
+    let key = (Symbol::new(env, "vetoer"), proposal_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_proposal_vetoer(env: &Env, proposal_id: u32, vetoer: &Address) {
+    let key = (Symbol::new(env, "vetoer"), proposal_id);
+    env.storage().persistent().set(&key, vetoer);
 }

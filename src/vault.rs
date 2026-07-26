@@ -12,13 +12,14 @@ use crate::{
         AdminAction, AdminProposal, AuctionBid, BoostTierProgress, BootstrapConfig, CampaignInfo,
         CapacityAuction, ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey,
         DayBucket, DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal,
-        HalvingConfig, InterfaceId, LeaderboardEntry, MerkleRoot, MigrationExport, MultisigConfig,
-        PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig, PoolHealthReport,
-        PoolStats, ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode,
-        ReputationScore, RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule,
-        SmoothingStatus, StakeAction, StakeHistoryEntry, StakePosition, StakeStreak,
-        StakingCertificate, StakingEfficiencyScore, StorageUsageReport, TaxReport, Tournament,
-        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        HalvingConfig, InterfaceId, LeaderboardEntry, LotteryConfig, MerkleRoot, MigrationExport,
+        Milestone, MilestoneCondition, MultisigConfig, PauseInfo, PauseReason, PendingAction,
+        PoolComparison, PoolConfig, PoolHealthReport, PoolStats, PriceCondition, ProposableParam,
+        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
+        RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
+        StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
+        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -70,6 +71,8 @@ pub(crate) const REFILL_ALERT_DAYS: u32 = 30;
 pub(crate) const YIELD_BUFFER_BPS: u32 = 2_000;
 /// Maximum number of simultaneously open governance proposals (issue #216).
 pub(crate) const MAX_OPEN_PROPOSALS: u32 = 10;
+/// Maximum number of milestones an admin may configure (issue #238).
+pub(crate) const MAX_MILESTONES: u32 = 10;
 /// Estimated gas cost for a first-time stake transaction (issue #204).
 pub(crate) const FIRST_STAKE_COST: u64 = 100_000;
 /// Estimated gas cost for a top-up stake transaction (issue #204).
@@ -4917,6 +4920,9 @@ impl VaultContract {
         // Issue #207: bridge relayer hook, after the position is created.
         Self::emit_bridge_packet_if_enabled(env, staker, amount, "stake");
 
+        // Issue #238: lazily check for newly achieved milestones.
+        Self::do_check_milestones(env, staker);
+
         Ok(shares)
     }
 
@@ -5010,16 +5016,19 @@ impl VaultContract {
         // Issue #41: restaked positions are exempt from early-exit penalty for one unstake cycle
         // Issue #41: restaked positions are exempt from early-exit penalty for one unstake cycle
         let is_restaked = balance::is_restaked(env, staker);
-        let amount_after_penalty = if is_restaked || !is_locked || penalty_bps == 0 {
-            amount
-        } else {
-            let penalty = amount
-                .checked_mul(penalty_bps as i128)
-                .ok_or(VaultError::ArithmeticError)?
-                .checked_div(BOOST_BPS_BASE as i128)
-                .ok_or(VaultError::ArithmeticError)?;
-            amount - penalty
-        };
+        // Issue #240: a triggered oracle price condition waives the penalty too.
+        let is_lockup_waived = balance::is_lockup_waived(env, staker);
+        let amount_after_penalty =
+            if is_restaked || is_lockup_waived || !is_locked || penalty_bps == 0 {
+                amount
+            } else {
+                let penalty = amount
+                    .checked_mul(penalty_bps as i128)
+                    .ok_or(VaultError::ArithmeticError)?
+                    .checked_div(BOOST_BPS_BASE as i128)
+                    .ok_or(VaultError::ArithmeticError)?;
+                amount - penalty
+            };
 
         // Unstake fee: charged on the post-penalty amount returned to the user
         // and routed to the reward pool treasury (not burned). Applied after the
@@ -6019,6 +6028,8 @@ impl VaultContract {
         balance::set_total_rewards_paid(env, paid + reward);
         // Issue #214: track lifetime claim count for the reputation consistency score.
         balance::increment_user_claim_count(env, staker);
+        // Issue #238: track lifetime claimed amount for the TotalRewardsClaimed milestone.
+        balance::add_user_total_claimed(env, staker, reward);
 
         // Issue #217: append to per-user claim history for tax reporting
         let mut claim_history = balance::get_claim_history(env, staker);
@@ -6038,6 +6049,9 @@ impl VaultContract {
         Self::check_refill_alert(env);
 
         Self::record_activity(env, "claim");
+
+        // Issue #238: lazily check for newly achieved milestones.
+        Self::do_check_milestones(env, staker);
 
         Ok(reward)
     }
@@ -7770,6 +7784,11 @@ impl VaultContract {
         if env.ledger().sequence() <= proposal.ends_at {
             return Err(VaultError::EpochNotFinalized);
         }
+        // Issue #241: a vetoed proposal can never be enacted, even if it
+        // passed the vote threshold.
+        if balance::get_proposal_vetoer(&env, proposal_id).is_some() {
+            return Err(VaultError::BatchKycTooLarge);
+        }
 
         proposal.enacted = true;
         if proposal.votes_for > proposal.votes_against {
@@ -8577,5 +8596,381 @@ impl VaultContract {
 
     pub fn get_total_burned(env: Env) -> i128 {
         balance::get_total_tokens_burned(&env)
+    }
+
+    // ── Issue #239: stake-weighted lottery ────────────────────────────────────
+
+    /// Admin funds a prize pool and schedules a stake-weighted draw at or
+    /// after `draw_at_ledger`.
+    ///
+    /// Reverts with `LotteryAlreadyActive` if an undrawn lottery already
+    /// exists, or `ZeroAmount` if `prize_amount` is not positive.
+    pub fn create_lottery(
+        env: Env,
+        admin: Address,
+        prize_amount: i128,
+        draw_at_ledger: u32,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if let Some(existing) = balance::get_lottery_config(&env) {
+            if !existing.drawn {
+                return Err(VaultExtError::LotteryAlreadyActive);
+            }
+        }
+        if prize_amount <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&admin, &env.current_contract_address(), &prize_amount);
+
+        let config = LotteryConfig {
+            prize_amount,
+            draw_at_ledger,
+            drawn: false,
+            winner: Vec::new(&env),
+        };
+        balance::set_lottery_config(&env, &config);
+        Ok(())
+    }
+
+    /// Draws the lottery, selecting a winner pseudo-randomly from active
+    /// stakers, weighted by their staked amount: a random point in
+    /// `[0, total_staked)` is drawn via `env.prng()` and the staker registry
+    /// is walked, accumulating stake, until the point falls within a
+    /// staker's range. Stakers with zero stake are skipped and cannot win.
+    /// The prize is transferred to the winner immediately.
+    ///
+    /// Uses Soroban's built-in `env.prng()`, which is **not** cryptographically
+    /// secure against validator manipulation — see the `soroban_sdk::prng`
+    /// module docs for the seeding/threat model this relies on.
+    ///
+    /// Reverts with `LotteryAlreadyActive` if no lottery is configured or it
+    /// was already drawn, `LotteryNotReady` if called before
+    /// `draw_at_ledger`, or `ZeroAmount` if no staker currently holds a
+    /// nonzero stake.
+    pub fn draw_lottery(env: Env, admin: Address) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut config =
+            balance::get_lottery_config(&env).ok_or(VaultExtError::LotteryAlreadyActive)?;
+        if config.drawn {
+            return Err(VaultExtError::LotteryAlreadyActive);
+        }
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < config.draw_at_ledger {
+            return Err(VaultExtError::LotteryNotReady);
+        }
+
+        let stakers = balance::get_all_stakers(&env);
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+
+        let mut total_staked: i128 = 0;
+        let mut weights: Vec<(Address, i128)> = Vec::new(&env);
+        for i in 0..stakers.len() {
+            let staker = stakers.get(i).unwrap();
+            let shares = balance::get_shares(&env, &staker);
+            if shares == 0 {
+                continue;
+            }
+            let amount = balance::shares_to_amount(total_shares, total_deposited, shares)
+                .ok_or(VaultExtError::ArithmeticError)?;
+            if amount <= 0 {
+                continue;
+            }
+            total_staked = total_staked
+                .checked_add(amount)
+                .ok_or(VaultExtError::ArithmeticError)?;
+            weights.push_back((staker, amount));
+        }
+
+        if total_staked <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+
+        let random_point: u64 = env.prng().gen_range(0..(total_staked as u64));
+        let mut cursor: u64 = 0;
+        let mut winner: Option<Address> = None;
+        for i in 0..weights.len() {
+            let (addr, amount) = weights.get(i).unwrap();
+            cursor = cursor
+                .checked_add(amount as u64)
+                .ok_or(VaultExtError::ArithmeticError)?;
+            if random_point < cursor {
+                winner = Some(addr);
+                break;
+            }
+        }
+        let winner_addr = winner.ok_or(VaultExtError::ArithmeticError)?;
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &winner_addr,
+            &config.prize_amount,
+        );
+
+        config.drawn = true;
+        let mut winner_vec = Vec::new(&env);
+        winner_vec.push_back(winner_addr.clone());
+        config.winner = winner_vec;
+        balance::set_lottery_config(&env, &config);
+
+        events::lottery_drawn(
+            &env,
+            &winner_addr,
+            config.prize_amount,
+            random_point,
+            current_ledger,
+        );
+        Ok(())
+    }
+
+    /// Read-only query for the current (or most recently drawn) lottery.
+    pub fn get_lottery_config(env: Env) -> Option<LotteryConfig> {
+        balance::get_lottery_config(&env)
+    }
+
+    // ── Issue #238: loyalty milestone badges ───────────────────────────────────
+
+    /// Admin registers a new milestone. Max 10 milestones may be configured.
+    ///
+    /// Reverts with `TooManyMilestones` if the cap is already reached.
+    pub fn add_milestone(
+        env: Env,
+        admin: Address,
+        name: String,
+        condition_type: MilestoneCondition,
+        threshold: i128,
+    ) -> Result<u32, VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut milestones = balance::get_milestones(&env);
+        if milestones.len() >= MAX_MILESTONES {
+            return Err(VaultExtError::TooManyMilestones);
+        }
+        let id = milestones.len();
+        milestones.push_back(Milestone {
+            id,
+            name,
+            condition_type,
+            threshold,
+        });
+        balance::set_milestones(&env, &milestones);
+        Ok(id)
+    }
+
+    /// Evaluates every configured milestone for `user` and records a badge
+    /// for any newly satisfied one, emitting `milestone_achieved`.
+    /// Already-achieved milestones are never re-awarded. Callable by anyone
+    /// for any user; also auto-invoked at the end of `stake()` / `claim()`.
+    pub fn check_milestones(env: Env, user: Address) {
+        Self::do_check_milestones(&env, &user);
+    }
+
+    fn do_check_milestones(env: &Env, user: &Address) {
+        let milestones = balance::get_milestones(env);
+        if milestones.is_empty() {
+            return;
+        }
+        let mut achieved = balance::get_user_milestones(env, user);
+        let shares = balance::get_shares(env, user);
+        let total_shares = balance::get_total_shares(env);
+        let total_deposited = balance::get_total_deposited(env);
+        let current_ledger = env.ledger().sequence();
+
+        for i in 0..milestones.len() {
+            let milestone = milestones.get(i).unwrap();
+            if achieved.contains(milestone.id) {
+                continue;
+            }
+            let value: i128 = match milestone.condition_type {
+                MilestoneCondition::StakeDurationLedgers => {
+                    if shares == 0 {
+                        0
+                    } else {
+                        let staked_at: u32 = env
+                            .storage()
+                            .persistent()
+                            .get(&DataKey::StakedAtLedger(user.clone()))
+                            .unwrap_or(current_ledger);
+                        current_ledger.saturating_sub(staked_at) as i128
+                    }
+                }
+                MilestoneCondition::TotalStakedAmount => {
+                    balance::shares_to_amount(total_shares, total_deposited, shares).unwrap_or(0)
+                }
+                MilestoneCondition::ClaimCount => balance::get_user_claim_count(env, user) as i128,
+                MilestoneCondition::TotalRewardsClaimed => {
+                    balance::get_user_total_claimed(env, user)
+                }
+            };
+            if value >= milestone.threshold {
+                achieved.push_back(milestone.id);
+                events::milestone_achieved(
+                    env,
+                    user,
+                    milestone.id,
+                    &milestone.name,
+                    current_ledger,
+                );
+            }
+        }
+        balance::set_user_milestones(env, user, &achieved);
+    }
+
+    /// Read-only query for the milestone ids a user has already achieved.
+    pub fn get_user_milestones(env: Env, user: Address) -> Vec<u32> {
+        balance::get_user_milestones(&env, &user)
+    }
+
+    // ── Issue #240: oracle-triggered lock-up release ────────────────────────────
+
+    /// Admin registers a trusted price oracle contract, expected to expose
+    /// `get_price(asset_id: String) -> i128`.
+    pub fn set_oracle_contract(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        balance::set_oracle_contract(&env, &oracle);
+        Ok(())
+    }
+
+    /// Caller sets their own price condition; once satisfied, it waives
+    /// their position's early-exit lock-up penalty (see `check_and_release`).
+    ///
+    /// Reverts with `ZeroAmount` if `trigger_price` is not positive.
+    pub fn set_price_condition(
+        env: Env,
+        user: Address,
+        trigger_price: i128,
+        asset_id: String,
+        direction: TriggerDirection,
+    ) -> Result<(), VaultExtError> {
+        user.require_auth();
+        if trigger_price <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        let condition = PriceCondition {
+            trigger_price,
+            asset_id,
+            direction,
+        };
+        balance::set_price_condition(&env, &user, &condition);
+        Ok(())
+    }
+
+    /// Permissionless keeper call: queries the registered oracle for the
+    /// user's configured asset and, if the condition is met, waives the
+    /// position's early-exit lock-up penalty. Does not unstake. The waiver
+    /// is one-time — once set it is never cleared.
+    ///
+    /// Reverts with `NoOracleConfigured` if no oracle has been registered,
+    /// or `NotInitialized` if the user has no price condition set.
+    pub fn check_and_release(env: Env, user: Address) -> Result<(), VaultExtError> {
+        let oracle_addr =
+            balance::get_oracle_contract(&env).ok_or(VaultExtError::NoOracleConfigured)?;
+        let condition =
+            balance::get_price_condition(&env, &user).ok_or(VaultExtError::NotInitialized)?;
+
+        use soroban_sdk::IntoVal;
+        let args: Vec<soroban_sdk::Val> = (condition.asset_id.clone(),).into_val(&env);
+        let oracle_price: i128 =
+            env.invoke_contract(&oracle_addr, &symbol_short!("get_price"), args);
+
+        let met = match condition.direction {
+            TriggerDirection::Below => oracle_price < condition.trigger_price,
+            TriggerDirection::Above => oracle_price > condition.trigger_price,
+        };
+        if met && !balance::is_lockup_waived(&env, &user) {
+            balance::set_lockup_waived(&env, &user);
+            events::condition_triggered(
+                &env,
+                &user,
+                &condition.asset_id,
+                oracle_price,
+                condition.trigger_price,
+                env.ledger().sequence(),
+            );
+        }
+        Ok(())
+    }
+
+    // ── Issue #241: governance proposal veto ────────────────────────────────────
+
+    /// Admin sets the minimum pool share (in basis points) a staker must
+    /// hold to veto a governance proposal. A threshold of 0 disables the
+    /// veto feature entirely.
+    ///
+    /// Reverts with `InvalidVetoThreshold` if `bps` exceeds 10 000 (100%).
+    pub fn set_veto_threshold_bps(env: Env, admin: Address, bps: u32) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if bps > BOOST_BPS_BASE {
+            return Err(VaultExtError::InvalidVetoThreshold);
+        }
+        balance::set_veto_threshold_bps(&env, bps);
+        Ok(())
+    }
+
+    /// Read-only query for the current veto threshold (basis points).
+    pub fn get_veto_threshold_bps(env: Env) -> u32 {
+        balance::get_veto_threshold_bps(&env)
+    }
+
+    /// A staker holding at least the configured veto threshold of the pool
+    /// may unilaterally and permanently block a governance proposal from
+    /// being enacted, even if it passed the vote threshold. A proposal can
+    /// only be vetoed once.
+    ///
+    /// Reverts with `BelowVetoThreshold` if the veto threshold is unset (0)
+    /// or the caller's pool share is below it, `NotInitialized` if the
+    /// proposal doesn't exist, or `AlreadyVetoed` if it was already vetoed.
+    pub fn veto_proposal(env: Env, user: Address, proposal_id: u32) -> Result<(), VaultExtError> {
+        user.require_auth();
+
+        let threshold_bps = balance::get_veto_threshold_bps(&env);
+        if threshold_bps == 0 {
+            return Err(VaultExtError::BelowVetoThreshold);
+        }
+
+        balance::get_proposal(&env, proposal_id).ok_or(VaultExtError::NotInitialized)?;
+        if balance::get_proposal_vetoer(&env, proposal_id).is_some() {
+            return Err(VaultExtError::AlreadyVetoed);
+        }
+
+        let shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        let stake_bps: u32 = if total_shares == 0 || shares == 0 {
+            0
+        } else {
+            shares
+                .checked_mul(BOOST_BPS_BASE as i128)
+                .unwrap_or(0)
+                .checked_div(total_shares)
+                .unwrap_or(0) as u32
+        };
+        if stake_bps < threshold_bps {
+            return Err(VaultExtError::BelowVetoThreshold);
+        }
+
+        balance::set_proposal_vetoer(&env, proposal_id, &user);
+        events::proposal_vetoed(&env, &user, proposal_id, stake_bps, env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Read-only query returning the vetoer of a proposal, if any.
+    pub fn get_proposal_veto_status(env: Env, proposal_id: u32) -> Option<Address> {
+        balance::get_proposal_vetoer(&env, proposal_id)
     }
 }

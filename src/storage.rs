@@ -821,3 +821,66 @@ pub struct AuctionBid {
     pub amount: i128,
     pub placed_at: u32,
 }
+
+// ── Issue #239: stake-weighted lottery ────────────────────────────────────────
+
+/// A prize pool funded by the admin and drawn among active stakers, weighted
+/// by their staked amount (issue #239).
+///
+/// `winner` uses `Vec<Address>` (0 or 1 elements) rather than `Option<Address>`
+/// since `Option<Address>` is not usable inside a `#[contracttype]` struct in
+/// soroban-sdk 21.x testutils mode (same constraint noted on `UserSummary`
+/// and `ReferralTreeNode` above).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LotteryConfig {
+    pub prize_amount: i128,
+    pub draw_at_ledger: u32,
+    pub drawn: bool,
+    pub winner: Vec<Address>,
+}
+
+// ── Issue #238: loyalty milestone badges ──────────────────────────────────────
+
+/// The staker metric a milestone is evaluated against (issue #238).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MilestoneCondition {
+    StakeDurationLedgers,
+    TotalStakedAmount,
+    ClaimCount,
+    TotalRewardsClaimed,
+}
+
+/// An admin-configured staking achievement. Evaluated lazily by
+/// `check_milestones()`, which records a non-transferable badge in
+/// `UserMilestones` the first time a staker crosses `threshold` (issue #238).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Milestone {
+    pub id: u32,
+    pub name: String,
+    pub condition_type: MilestoneCondition,
+    pub threshold: i128,
+}
+
+// ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
+
+/// Direction the oracle price must move relative to `trigger_price` to
+/// satisfy a `PriceCondition` (issue #240).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TriggerDirection {
+    Below,
+    Above,
+}
+
+/// A user-configured price condition that, once satisfied, waives their
+/// position's early-exit lock-up penalty (issue #240).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriceCondition {
+    pub trigger_price: i128,
+    pub asset_id: String,
+    pub direction: TriggerDirection,
+}
