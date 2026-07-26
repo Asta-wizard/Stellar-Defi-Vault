@@ -11,13 +11,14 @@ use crate::{
     storage::{
         AdminAction, AdminProposal, BoostTierProgress, BootstrapConfig, CampaignInfo,
         ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey, DayBucket,
-        DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal, InterfaceId,
-        LeaderboardEntry, MerkleRoot, MigrationExport, MultisigConfig, PauseInfo, PauseReason,
-        PendingAction, PoolComparison, PoolConfig, PoolHealthReport, PoolStats, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReputationScore,
+        DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal,
+        HalvingConfig, InterfaceId, LeaderboardEntry, MerkleRoot, MigrationExport, MultisigConfig,
+        PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig, PoolHealthReport,
+        PoolStats, ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, ReputationScore,
         RewardMultiplierBreakdown, RoundingPolicy, StakeAction, StakeHistoryEntry,
-        StakePosition, StakeStreak, StakingEfficiencyScore, StorageUsageReport, TaxReport,
-        Tournament, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
+        StorageUsageReport, TaxReport, Tournament, UnbondingPosition, UnstakeCheckResult,
+        UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -2090,6 +2091,258 @@ impl VaultContract {
     /// the remaining portion at `base_rate`, then summing — without having
     /// to add bootstrap as a third kind of segment boundary alongside the
     /// existing boost-tier/campaign segment walk in `reward_between_ledgers`.
+    // ── Issue #231: Halving Schedule ──────────────────────────────────────────
+
+    /// Admin: set the halving schedule for reward rate reduction.
+    /// `interval_ledgers` specifies how often rewards halve.
+    /// `floor_rate_bps` is the minimum rate enforced after halving.
+    pub fn set_halving_schedule(
+        env: Env,
+        admin: Address,
+        interval_ledgers: u32,
+        floor_rate_bps: i128,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if interval_ledgers == 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        if floor_rate_bps < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        let config = HalvingConfig {
+            interval_ledgers,
+            started_at: env.ledger().sequence(),
+            halving_count: 0,
+            floor_rate_bps,
+        };
+        balance::set_halving_config(&env, &config);
+        Ok(())
+    }
+
+    /// Read-only: returns the current halving configuration, if set.
+    pub fn get_halving_config(env: Env) -> Option<HalvingConfig> {
+        balance::get_halving_config(&env)
+    }
+
+    /// Read-only: compute the current number of halvings that have occurred.
+    pub fn get_current_halving_count(env: Env) -> u32 {
+        balance::halving_count_at(&env, env.ledger().sequence())
+    }
+
+    /// Read-only: returns the ledger number of the next scheduled halving.
+    pub fn next_halving_at(env: Env) -> Option<u32> {
+        balance::next_halving_at(&env)
+    }
+
+    // ── Issue #222: Staking Certificate ────────────────────────────────────────
+
+    /// Admin: set the minimum staked amount required for certificate eligibility.
+    pub fn set_min_cert_amount(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if amount < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        balance::set_min_cert_amount(&env, amount);
+        Ok(())
+    }
+
+    /// Read-only: returns the minimum staked amount for certificate eligibility.
+    pub fn get_min_cert_amount(env: Env) -> i128 {
+        balance::get_min_cert_amount(&env)
+    }
+
+    /// Admin: issue a staking certificate to a user.
+    pub fn issue_certificate(
+        env: Env,
+        admin: Address,
+        user: Address,
+    ) -> Result<StakingCertificate, VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+
+        let shares = balance::get_shares(&env, &user);
+        let min_amount = balance::get_min_cert_amount(&env);
+        if shares < min_amount {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        let counter = balance::get_certificate_counter(&env);
+        let new_counter = counter.checked_add(1).ok_or(VaultError::ArithmeticError)?;
+        balance::set_certificate_counter(&env, new_counter);
+
+        // Certificate parameters
+        let staked_since = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(env.ledger().sequence());
+
+        let current_ledger = env.ledger().sequence();
+        let valid_for = LEDGERS_PER_DAY * 30; // 30 days validity
+        let valid_until = current_ledger.saturating_add(valid_for);
+
+        let cert = StakingCertificate {
+            holder: user.clone(),
+            min_amount_staked: min_amount,
+            staked_since,
+            issued_at: current_ledger,
+            valid_until,
+            certificate_id: new_counter,
+        };
+
+        balance::set_certificate(&env, &user, &cert);
+
+        events::certificate_issued(
+            &env,
+            &user,
+            new_counter,
+            valid_until,
+            current_ledger,
+        );
+
+        Ok(cert)
+    }
+
+    /// Read-only: returns the staking certificate for a user, if any.
+    pub fn get_certificate(env: Env, user: Address) -> Option<StakingCertificate> {
+        balance::get_certificate(&env, &user)
+    }
+
+    /// Admin: invalidate a user's staking certificate.
+    pub fn invalidate_certificate(
+        env: Env,
+        admin: Address,
+        user: Address,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+
+        let _cert = balance::get_certificate(&env, &user)
+            .ok_or(VaultError::ZeroAmount)?;
+
+        // Remove the certificate from storage
+        balance::remove_certificate(&env, &user);
+
+        Ok(())
+    }
+
+    // ── Issue #233: Minimum Pool Size to Activate ─────────────────────────────
+
+    /// Admin: set the minimum total staked amount required for the pool to be active.
+    pub fn set_activation_threshold(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if amount < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        balance::set_activation_threshold(&env, amount);
+        Ok(())
+    }
+
+    /// Read-only: returns the minimum total staked amount for activation.
+    pub fn get_activation_threshold(env: Env) -> i128 {
+        balance::get_activation_threshold(&env)
+    }
+
+    /// Read-only: returns whether the pool is active (total staked >= threshold).
+    pub fn pool_is_active(env: Env) -> bool {
+        let threshold = balance::get_activation_threshold(&env);
+        let total_staked = balance::get_total_deposited(&env);
+        if threshold <= 0 {
+            return true;
+        }
+        total_staked >= threshold
+    }
+
+    /// Check activation status after a total_deposited change and emit events.
+    fn check_activation(env: &Env) {
+        let threshold = balance::get_activation_threshold(env);
+        if threshold <= 0 {
+            return;
+        }
+        let total_staked = balance::get_total_deposited(env);
+        let was_active = balance::get_pool_was_active(env);
+        let is_active = total_staked >= threshold;
+
+        if is_active && !was_active {
+            balance::set_pool_was_active(env, true);
+            events::pool_activated(env, total_staked, threshold, env.ledger().sequence());
+        } else if !is_active && was_active {
+            balance::set_pool_was_active(env, false);
+            events::pool_deactivated(env, total_staked, threshold, env.ledger().sequence());
+        }
+    }
+
+    // ── Issue #232: Position Expiry ───────────────────────────────────────────
+
+    /// Admin: set the maximum stake duration in ledgers before a position expires.
+    pub fn set_max_stake_duration(
+        env: Env,
+        admin: Address,
+        ledgers: u32,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        balance::set_max_stake_duration(&env, ledgers);
+        Ok(())
+    }
+
+    /// Read-only: returns the maximum stake duration in ledgers (0 = no expiry).
+    pub fn get_max_stake_duration(env: Env) -> u32 {
+        balance::get_max_stake_duration(&env)
+    }
+
+    /// Read-only: returns whether the user's position has expired.
+    pub fn position_expired(env: Env, user: Address) -> bool {
+        let max_duration = balance::get_max_stake_duration(&env);
+        if max_duration == 0 {
+            return false;
+        }
+        let staked_at = match env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+        {
+            Some(ledger) => ledger,
+            None => return false,
+        };
+        let current_ledger = env.ledger().sequence();
+        let elapsed = current_ledger.saturating_sub(staked_at);
+        elapsed >= max_duration
+    }
+
+    /// Emit position_expired event if the user's position just expired.
+    fn maybe_emit_position_expired(env: &Env, user: &Address) {
+        let max_duration = balance::get_max_stake_duration(env);
+        if max_duration == 0 {
+            return;
+        }
+        let staked_at = match env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+        {
+            Some(ledger) => ledger,
+            None => return,
+        };
+        let current_ledger = env.ledger().sequence();
+        let elapsed = current_ledger.saturating_sub(staked_at);
+        if elapsed >= max_duration && !balance::get_position_expired_emitted(env, user) {
+            balance::set_position_expired_emitted(env, user);
+            events::position_expired(env, user, staked_at + max_duration, current_ledger);
+        }
+    }
+
     fn effective_rate_bps_for_window(env: &Env, start_ledger: u32, end_ledger: u32) -> u32 {
         let base_rate = balance::get_reward_rate_bps(env);
         if end_ledger <= start_ledger {
@@ -2798,6 +3051,7 @@ impl VaultContract {
         balance::set_shares(&env, &beneficiary, new_shares);
         balance::set_total_shares(&env, total_shares + shares);
         balance::set_total_deposited(&env, total_deposited + amount);
+        Self::check_activation(&env);
 
         let current_ledger = env.ledger().sequence();
         if current_shares == 0 {
@@ -2903,6 +3157,7 @@ impl VaultContract {
             .checked_sub(actual)
             .ok_or(VaultError::ArithmeticError)?;
         balance::set_total_deposited(&env, new_total_deposited);
+        Self::check_activation(&env);
 
         if new_user_shares == 0 {
             env.storage()
@@ -3801,6 +4056,7 @@ impl VaultContract {
         balance::set_shares(env, staker, new_shares);
         balance::set_total_shares(env, adjusted_total_shares + shares);
         balance::set_total_deposited(env, adjusted_total_deposited + amount);
+        Self::check_activation(env);
 
         let current_ledger = env.ledger().sequence();
         if current_shares == 0 {
@@ -3866,6 +4122,7 @@ impl VaultContract {
     }
 
     fn do_unstake(env: &Env, staker: &Address, shares: i128) -> Result<i128, VaultError> {
+        Self::maybe_emit_position_expired(env, staker);
         staker.require_auth();
         Self::require_not_paused(env)?;
 
@@ -3990,6 +4247,7 @@ impl VaultContract {
         // Both the returned principal and the fee leave the staked pool; the fee
         // is credited to the reward treasury below.
         balance::set_total_deposited(env, total_deposited - amount_returned - unstake_fee);
+        Self::check_activation(env);
 
         if unstake_fee > 0 {
             // Issue #197: if fee-split recipients are configured, pay them
@@ -4225,6 +4483,7 @@ impl VaultContract {
         // Update pool totals: treat compounded reward as additional deposited amount
         balance::set_total_shares(env, total_shares + reward_shares);
         balance::set_total_deposited(env, total_deposited + accrued);
+        Self::check_activation(env);
 
         // Clear accrued reward since it's been compounded
         balance::set_accrued_reward(env, user, 0);
@@ -4251,8 +4510,8 @@ impl VaultContract {
         // end_ledger), correctly handling a bootstrap window that only
         // partially overlaps this range (falls back to the plain
         // reward_rate_bps() when no bootstrap is configured).
-        let rate_bps = Self::effective_rate_bps_for_window(env, start_ledger, end_ledger);
-        if rate_bps == 0 {
+        let base_rate = Self::effective_rate_bps_for_window(env, start_ledger, end_ledger);
+        if base_rate == 0 {
             return Ok(0);
         }
 
@@ -4267,6 +4526,9 @@ impl VaultContract {
 
         // Load campaign once so reward_for_ledgers can split at campaign boundaries (#48)
         let campaign: Option<CampaignInfo> = env.storage().instance().get(&DataKey::BoostCampaign);
+
+        // Issue #231: load halving config for halving boundary walking
+        let halving_config = balance::get_halving_config(env);
 
         let schedule = balance::get_boost_schedule(env).unwrap_or(Vec::new(env));
         let mut reward: i128 = 0;
@@ -4287,8 +4549,20 @@ impl VaultContract {
             }
         }
 
-        // Walk segments split by BOTH boost-tier boundaries and campaign boundaries
+        // Walk segments split by halving boundaries, boost-tier boundaries, and campaign boundaries
         while cursor < end_ledger {
+            // Compute next halving boundary
+            let next_halving_boundary = if let Some(ref config) = halving_config {
+                if config.interval_ledgers > 0 {
+                    let count = balance::halving_count_at(env, cursor);
+                    config.started_at + (count + 1) * config.interval_ledgers
+                } else {
+                    u32::MAX
+                }
+            } else {
+                u32::MAX
+            };
+
             let next_tier_boundary = if tier_index < schedule.len() {
                 let (tier_ledger, _) = schedule.get(tier_index).unwrap();
                 staked_at.saturating_add(tier_ledger)
@@ -4298,15 +4572,28 @@ impl VaultContract {
 
             let (campaign_mult, next_campaign_boundary) = Self::campaign_info_at(cursor, &campaign);
 
-            let seg_end = next_tier_boundary
+            let seg_end = next_halving_boundary
+                .min(next_tier_boundary)
                 .min(next_campaign_boundary)
                 .min(end_ledger);
+
+            // Compute halving-adjusted rate for this segment
+            let seg_rate = if halving_config.is_some() {
+                let halving_adjusted = balance::halving_adjusted_rate(env, base_rate, cursor);
+                if halving_adjusted <= 0 {
+                    cursor = seg_end;
+                    continue;
+                }
+                halving_adjusted as u32
+            } else {
+                base_rate
+            };
 
             if seg_end > cursor {
                 reward = reward
                     .checked_add(Self::reward_for_ledgers(
                         current_shares,
-                        rate_bps,
+                        seg_rate,
                         current_multiplier,
                         campaign_mult,
                         seg_end - cursor,
@@ -4316,7 +4603,7 @@ impl VaultContract {
 
             let segment_dust = Self::reward_dust_for_ledgers(
                 current_shares,
-                rate_bps,
+                seg_rate,
                 current_multiplier,
                 seg_end - cursor,
             )?;
@@ -4336,7 +4623,7 @@ impl VaultContract {
 
         let final_segment_dust = Self::reward_dust_for_ledgers(
             current_shares,
-            rate_bps,
+            base_rate,
             current_multiplier,
             end_ledger - cursor,
         )?;
@@ -4820,6 +5107,7 @@ impl VaultContract {
     /// emits the `claimed` event. Does NOT call `require_auth` — callers are
     /// responsible for gating access.
     fn do_claim(env: &Env, staker: &Address) -> Result<i128, VaultError> {
+        Self::maybe_emit_position_expired(env, staker);
         let is_epoch_mode = env
             .storage()
             .instance()
@@ -5010,6 +5298,7 @@ impl VaultContract {
         balance::set_shares(env, staker, new_shares);
         balance::set_total_shares(env, total_shares + shares);
         balance::set_total_deposited(env, total_deposited + amount);
+        Self::check_activation(env);
 
         let current_ledger = env.ledger().sequence();
         if current_shares == 0 {
@@ -6907,6 +7196,7 @@ impl VaultContract {
     /// After migration the user has no position in this pool and a new
     /// position in the target pool.
     pub fn migrate_to_new_pool(env: Env, user: Address) -> Result<i128, VaultError> {
+        Self::maybe_emit_position_expired(&env, &user);
         user.require_auth();
 
         let target_pool =
@@ -6947,6 +7237,7 @@ impl VaultContract {
             .checked_sub(position_amount)
             .ok_or(VaultError::ArithmeticError)?;
         balance::set_total_deposited(&env, new_total_deposited);
+        Self::check_activation(&env);
 
         env.storage()
             .persistent()
