@@ -731,3 +731,93 @@ pub struct PoolComparison {
     pub reward_rate_bps: i128,
     pub reachable: bool,
 }
+
+// ── Issue #235: Reward Smoothing ──────────────────────────────────────────────
+
+/// A large reward addition being released linearly over `duration_ledgers`
+/// (issue #235).
+///
+/// `released` is the cumulative amount already credited to `total_deposited` by
+/// `release_smoothed_yield()`. The schedule is finished once
+/// `released == total_amount`; the tokens themselves are transferred into the
+/// contract up front when the schedule is created, so a finished schedule owes
+/// nothing.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmoothingSchedule {
+    pub total_amount: i128,
+    pub released: i128,
+    pub start_ledger: u32,
+    pub duration_ledgers: u32,
+}
+
+/// Read-only snapshot of the active smoothing schedule returned by
+/// `reward_smoothing()` (issue #235).
+///
+/// All fields are zero when no schedule has ever been created. `releasable_now`
+/// is what a `release_smoothed_yield()` call at this ledger would credit;
+/// `unreleased` is everything still locked, including `releasable_now`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmoothingStatus {
+    pub total_amount: i128,
+    pub released: i128,
+    pub releasable_now: i128,
+    pub unreleased: i128,
+    pub start_ledger: u32,
+    pub duration_ledgers: u32,
+    pub ledgers_remaining: u32,
+}
+
+// ── Issue #236: Referral Tree Visualization ───────────────────────────────────
+
+/// One node in the flattened referral hierarchy returned by
+/// `referral_tree_data()` (issue #236).
+///
+/// The tree is returned as a flat, breadth-first `Vec` rather than a nested
+/// structure because `#[contracttype]` cannot express a recursive type. Rebuild
+/// the hierarchy client-side by joining `parent` against `address`.
+///
+/// - `level`: 0 for the queried root, 1 for its direct referrals, up to 3.
+/// - `parent`: the address that referred this node. For the root (level 0) this
+///   is the root's own address, since `Option<Address>` is not usable inside a
+///   `#[contracttype]` struct in soroban-sdk 21.x testutils mode (same
+///   constraint that shapes `UserSummary::position`).
+/// - `referred_count` / `total_referred_stake`: this node's own referral stats.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReferralTreeNode {
+    pub address: Address,
+    pub parent: Address,
+    pub level: u32,
+    pub referred_count: u32,
+    pub total_referred_stake: i128,
+}
+
+// ── Issue #237: Capacity Auction ──────────────────────────────────────────────
+
+/// An auction allocating a limited number of pool spots to the highest bidders
+/// (issue #237).
+///
+/// A bid is denominated in stake tokens and is escrowed in the contract when
+/// placed. On `finalize_capacity_auction()` the top `spots` bids are converted
+/// into real staking positions and every losing bid is refunded in full.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapacityAuction {
+    pub spots: u32,
+    pub min_bid: i128,
+    pub started_at: u32,
+    pub ends_at: u32,
+    pub finalized: bool,
+    pub total_escrowed: i128,
+}
+
+/// A single bid in the capacity auction (issue #237).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuctionBid {
+    pub bidder: Address,
+    pub amount: i128,
+    pub placed_at: u32,
+}
