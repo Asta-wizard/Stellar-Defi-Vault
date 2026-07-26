@@ -2283,6 +2283,66 @@ impl VaultContract {
         }
     }
 
+    // ── Issue #232: Position Expiry ───────────────────────────────────────────
+
+    /// Admin: set the maximum stake duration in ledgers before a position expires.
+    pub fn set_max_stake_duration(
+        env: Env,
+        admin: Address,
+        ledgers: u32,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        balance::set_max_stake_duration(&env, ledgers);
+        Ok(())
+    }
+
+    /// Read-only: returns the maximum stake duration in ledgers (0 = no expiry).
+    pub fn get_max_stake_duration(env: Env) -> u32 {
+        balance::get_max_stake_duration(&env)
+    }
+
+    /// Read-only: returns whether the user's position has expired.
+    pub fn position_expired(env: Env, user: Address) -> bool {
+        let max_duration = balance::get_max_stake_duration(&env);
+        if max_duration == 0 {
+            return false;
+        }
+        let staked_at = match env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+        {
+            Some(ledger) => ledger,
+            None => return false,
+        };
+        let current_ledger = env.ledger().sequence();
+        let elapsed = current_ledger.saturating_sub(staked_at);
+        elapsed >= max_duration
+    }
+
+    /// Emit position_expired event if the user's position just expired.
+    fn maybe_emit_position_expired(env: &Env, user: &Address) {
+        let max_duration = balance::get_max_stake_duration(env);
+        if max_duration == 0 {
+            return;
+        }
+        let staked_at = match env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+        {
+            Some(ledger) => ledger,
+            None => return,
+        };
+        let current_ledger = env.ledger().sequence();
+        let elapsed = current_ledger.saturating_sub(staked_at);
+        if elapsed >= max_duration && !balance::get_position_expired_emitted(env, user) {
+            balance::set_position_expired_emitted(env, user);
+            events::position_expired(env, user, staked_at + max_duration, current_ledger);
+        }
+    }
+
     fn effective_rate_bps_for_window(env: &Env, start_ledger: u32, end_ledger: u32) -> u32 {
         let base_rate = balance::get_reward_rate_bps(env);
         if end_ledger <= start_ledger {
@@ -4062,6 +4122,7 @@ impl VaultContract {
     }
 
     fn do_unstake(env: &Env, staker: &Address, shares: i128) -> Result<i128, VaultError> {
+        Self::maybe_emit_position_expired(env, staker);
         staker.require_auth();
         Self::require_not_paused(env)?;
 
@@ -5046,6 +5107,7 @@ impl VaultContract {
     /// emits the `claimed` event. Does NOT call `require_auth` — callers are
     /// responsible for gating access.
     fn do_claim(env: &Env, staker: &Address) -> Result<i128, VaultError> {
+        Self::maybe_emit_position_expired(env, staker);
         let is_epoch_mode = env
             .storage()
             .instance()
@@ -7134,6 +7196,7 @@ impl VaultContract {
     /// After migration the user has no position in this pool and a new
     /// position in the target pool.
     pub fn migrate_to_new_pool(env: Env, user: Address) -> Result<i128, VaultError> {
+        Self::maybe_emit_position_expired(&env, &user);
         user.require_auth();
 
         let target_pool =
