@@ -622,50 +622,37 @@ pub fn webhook_url_updated(
 
 // ── Issue #210: Merkle Reward Distribution ────────────────────────────────────
 
-pub fn merkle_claimed(
-    env: &Env,
-    user: &Address,
-    amount: i128,
-    epoch: u32,
-    ledger: u32,
-) {
+pub fn merkle_claimed(env: &Env, user: &Address, amount: i128, epoch: u32, ledger: u32) {
     let topics = (symbol_short!("mrk_clm"), user);
     env.events().publish(topics, (amount, epoch, ledger));
 }
 
 // ── Issue #211: Staking Tournament Competition ─────────────────────────────────
 
-pub fn tournament_winner(
-    env: &Env,
-    winner: &Address,
-    score: i128,
-    prize_paid: i128,
-    ledger: u32,
-) {
+pub fn tournament_winner(env: &Env, winner: &Address, score: i128, prize_paid: i128, ledger: u32) {
     let topics = (symbol_short!("tour_win"),);
-    env.events().publish(topics, (winner, score, prize_paid, ledger));
+    env.events()
+        .publish(topics, (winner, score, prize_paid, ledger));
 }
 
 // ── Issue #212: Buyback & Burn ────────────────────────────────────────────────
 
-pub fn buyback_executed(
-    env: &Env,
-    fee_amount_used: i128,
-    reward_tokens_burned: i128,
-    ledger: u32,
-) {
+pub fn buyback_executed(env: &Env, fee_amount_used: i128, reward_tokens_burned: i128, ledger: u32) {
     let topics = (symbol_short!("buyback"),);
-    env.events().publish(topics, (fee_amount_used, reward_tokens_burned, ledger));
+    env.events()
+        .publish(topics, (fee_amount_used, reward_tokens_burned, ledger));
 }
 
 pub fn buyback_toggled(env: &Env, admin: &Address, enabled: bool) {
     let topics = (symbol_short!("buy_tog"), admin);
-    env.events().publish(topics, (enabled, env.ledger().sequence()));
+    env.events()
+        .publish(topics, (enabled, env.ledger().sequence()));
 }
 
 pub fn merkle_root_published(env: &Env, admin: &Address, epoch: u32, total_claimable: i128) {
     let topics = (symbol_short!("mrk_pub"), admin);
-    env.events().publish(topics, (epoch, total_claimable, env.ledger().sequence()));
+    env.events()
+        .publish(topics, (epoch, total_claimable, env.ledger().sequence()));
 }
 
 // ── Events referenced by existing feature branches ────────────────────────────
@@ -677,21 +664,29 @@ pub fn state_exported(env: &Env, admin: &Address, num_positions: u32, ledger: u3
 
 pub fn penalty_redistributed(env: &Env, total_amount: i128, recipient_count: u32, ledger: u32) {
     let topics = (symbol_short!("pen_rdst"),);
-    env.events().publish(topics, (total_amount, recipient_count, ledger));
+    env.events()
+        .publish(topics, (total_amount, recipient_count, ledger));
 }
 
 pub fn insurance_deployed(env: &Env, amount: i128, new_balance: i128) {
     let topics = (symbol_short!("ins_dep"),);
-    env.events().publish(topics, (amount, new_balance, env.ledger().sequence()));
+    env.events()
+        .publish(topics, (amount, new_balance, env.ledger().sequence()));
 }
 
 // ── Issue #231: halving occurred ──────────────────────────────────────────────
 
 /// Emitted when a reward calculation crosses a halving boundary during
 /// claim or stake operations.
+///
+/// Not yet wired into `reward_between_ledgers`: that walk splits segments at
+/// halving boundaries without a hook to emit from. Kept so the halving schedule
+/// has an event to publish once one exists.
+#[allow(dead_code)]
 pub fn halving_occurred(env: &Env, halving_count: u32, effective_rate_bps: i128, ledger: u32) {
     let topics = (symbol_short!("halving"),);
-    env.events().publish(topics, (halving_count, effective_rate_bps, ledger));
+    env.events()
+        .publish(topics, (halving_count, effective_rate_bps, ledger));
 }
 
 // ── Issue #222: staking certificate events ────────────────────────────────────
@@ -704,26 +699,115 @@ pub fn certificate_issued(
     ledger: u32,
 ) {
     let topics = (symbol_short!("cert_iss"), user);
-    env.events().publish(topics, (certificate_id, valid_until, ledger));
+    env.events()
+        .publish(topics, (certificate_id, valid_until, ledger));
 }
 
 // ── Issue #233: pool activation events ────────────────────────────────────────
 
 pub fn pool_activated(env: &Env, total_staked: i128, threshold: i128, ledger: u32) {
     let topics = (symbol_short!("pool_act"),);
-    env.events().publish(topics, (total_staked, threshold, ledger));
+    env.events()
+        .publish(topics, (total_staked, threshold, ledger));
 }
 
 pub fn pool_deactivated(env: &Env, total_staked: i128, threshold: i128, ledger: u32) {
     let topics = (symbol_short!("pool_dact"),);
-    env.events().publish(topics, (total_staked, threshold, ledger));
+    env.events()
+        .publish(topics, (total_staked, threshold, ledger));
+}
+
+// ── Issue #234: reward activation events ──────────────────────────────────────
+
+/// Emitted the first time pool TVL reaches the configured minimum pool size,
+/// which is the ledger reward accrual starts from.
+pub fn rewards_activated(env: &Env, total_staked: i128, min_pool_size: i128, ledger: u32) {
+    let topics = (symbol_short!("rwd_act"),);
+    env.events()
+        .publish(topics, (total_staked, min_pool_size, ledger));
+}
+
+/// Emitted when the admin changes the minimum pool size required for rewards.
+pub fn min_pool_size_set(env: &Env, admin: &Address, old_amount: i128, new_amount: i128) {
+    let topics = (symbol_short!("minpool"), admin);
+    env.events()
+        .publish(topics, (old_amount, new_amount, env.ledger().sequence()));
+}
+
+// ── Issue #235: reward smoothing events ───────────────────────────────────────
+
+/// Emitted when a large yield addition is scheduled for linear release instead
+/// of being credited to the pool immediately.
+pub fn smoothing_scheduled(
+    env: &Env,
+    total_amount: i128,
+    start_ledger: u32,
+    duration_ledgers: u32,
+) {
+    let topics = (symbol_short!("smth_sch"),);
+    env.events()
+        .publish(topics, (total_amount, start_ledger, duration_ledgers));
+}
+
+/// Emitted when a slice of a smoothing schedule is credited to the pool.
+pub fn smoothing_released(env: &Env, amount: i128, cumulative_released: i128, total_amount: i128) {
+    let topics = (symbol_short!("smth_rel"),);
+    env.events().publish(
+        topics,
+        (
+            amount,
+            cumulative_released,
+            total_amount,
+            env.ledger().sequence(),
+        ),
+    );
+}
+
+// ── Issue #237: capacity auction events ───────────────────────────────────────
+
+pub fn auction_started(env: &Env, spots: u32, min_bid: i128, ends_at: u32) {
+    let topics = (symbol_short!("auct_st"),);
+    env.events()
+        .publish(topics, (spots, min_bid, ends_at, env.ledger().sequence()));
+}
+
+pub fn bid_placed(env: &Env, bidder: &Address, amount: i128, total_bid: i128) {
+    let topics = (symbol_short!("bid_plcd"), bidder);
+    env.events()
+        .publish(topics, (amount, total_bid, env.ledger().sequence()));
+}
+
+pub fn auction_won(env: &Env, bidder: &Address, amount: i128, rank: u32) {
+    let topics = (symbol_short!("auct_won"), bidder);
+    env.events()
+        .publish(topics, (amount, rank, env.ledger().sequence()));
+}
+
+pub fn bid_refunded(env: &Env, bidder: &Address, amount: i128) {
+    let topics = (symbol_short!("bid_rfnd"), bidder);
+    env.events()
+        .publish(topics, (amount, env.ledger().sequence()));
+}
+
+pub fn auction_finalized(env: &Env, winner_count: u32, total_staked: i128, refunded: i128) {
+    let topics = (symbol_short!("auct_fin"),);
+    env.events().publish(
+        topics,
+        (
+            winner_count,
+            total_staked,
+            refunded,
+            env.ledger().sequence(),
+        ),
+    );
 }
 
 // ── Issue #232: position expired event ────────────────────────────────────────
 
 pub fn position_expired(env: &Env, user: &Address, expired_at_ledger: u32, current_ledger: u32) {
     let topics = (symbol_short!("pos_exp"), user);
-    env.events().publish(topics, (expired_at_ledger, current_ledger));
+    env.events()
+        .publish(topics, (expired_at_ledger, current_ledger));
 }
 
 pub fn dynamic_fee_config_updated(
@@ -736,6 +820,11 @@ pub fn dynamic_fee_config_updated(
     let topics = (symbol_short!("dfeecfg"), admin);
     env.events().publish(
         topics,
-        (base_fee_bps, max_fee_bps, threshold_bps, env.ledger().sequence()),
+        (
+            base_fee_bps,
+            max_fee_bps,
+            threshold_bps,
+            env.ledger().sequence(),
+        ),
     );
 }

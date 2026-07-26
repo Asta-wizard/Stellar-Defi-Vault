@@ -258,6 +258,36 @@ pub enum VaultExtError {
     ChainTooLong = 33,
     /// Returned by `issue_certificate` when the user's stake is below the minimum (issue #222).
     IneligibleForCertificate = 34,
+    /// Returned by `set_reward_smoothing()` when the smoothing period exceeds
+    /// `MAX_SMOOTHING_PERIOD_LEDGERS`, or when `min_amount` is negative
+    /// (issue #235).
+    InvalidSmoothingConfig = 35,
+    /// Returned by `referral_tree_data()` when `max_level` exceeds
+    /// `MAX_REFERRAL_TREE_DEPTH` (issue #236).
+    ReferralDepthTooDeep = 36,
+    /// Returned by `start_capacity_auction()` when an auction is already open,
+    /// and by `place_bid()` / `finalize_capacity_auction()` when no auction
+    /// exists (issue #237).
+    AuctionNotFound = 37,
+    /// Returned by `start_capacity_auction()` when `spots` is 0 or above
+    /// `MAX_AUCTION_SPOTS`, or `duration_ledgers` is 0 (issue #237).
+    InvalidAuctionConfig = 38,
+    /// Returned by `start_capacity_auction()` when the previous auction has not
+    /// been finalized yet (issue #237).
+    AuctionAlreadyActive = 39,
+    /// Returned by `place_bid()` after the auction window has closed, and by
+    /// `place_bid()` / `finalize_capacity_auction()` on an already-finalized
+    /// auction (issue #237).
+    AuctionClosed = 40,
+    /// Returned by `finalize_capacity_auction()` when called before the auction
+    /// window has elapsed (issue #237).
+    AuctionNotEnded = 41,
+    /// Returned by `place_bid()` when the resulting bid is below the auction's
+    /// `min_bid` (issue #237).
+    BidBelowMinimum = 42,
+    /// Returned by `place_bid()` when the auction already holds
+    /// `MAX_AUCTION_BIDS` distinct bidders (issue #237).
+    TooManyBids = 43,
 }
 
 impl From<VaultError> for VaultExtError {

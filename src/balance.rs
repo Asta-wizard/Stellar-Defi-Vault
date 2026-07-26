@@ -1,7 +1,7 @@
 use crate::storage::{
-    AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig,
-    FeeRecipient, GovernanceProposal, MultisigConfig, PendingAction, RateHistoryEntry,
-    ReferralStats, StakePosition, VestingEntry,
+    AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig, FeeRecipient,
+    GovernanceProposal, MultisigConfig, PendingAction, RateHistoryEntry, ReferralStats,
+    StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1177,6 +1177,9 @@ pub fn get_penalty_redistribution_mode(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
+/// Setter for the penalty-redistribution flag. No entrypoint toggles it yet —
+/// the read side is wired up and this is here to complete the pair.
+#[allow(dead_code)]
 pub fn set_penalty_redistribution_mode(env: &Env, enabled: bool) {
     env.storage()
         .instance()
@@ -1272,9 +1275,7 @@ pub fn increment_user_claim_count(env: &Env, user: &Address) {
 // ── Issue #210: Merkle Reward Distribution ────────────────────────────────────
 
 pub fn set_merkle_root(env: &Env, root: &crate::storage::MerkleRoot) {
-    env.storage()
-        .instance()
-        .set(&symbol_short!("merkle"), root);
+    env.storage().instance().set(&symbol_short!("merkle"), root);
 }
 
 pub fn get_merkle_root(env: &Env) -> Option<crate::storage::MerkleRoot> {
@@ -1303,6 +1304,9 @@ pub fn get_tournament(env: &Env) -> Option<crate::storage::Tournament> {
     env.storage().instance().get(&symbol_short!("tourney"))
 }
 
+/// Clears the stored tournament. `finalize_tournament` marks the tournament
+/// finalized in place rather than deleting it, so nothing calls this yet.
+#[allow(dead_code)]
 pub fn remove_tournament(env: &Env) {
     env.storage().instance().remove(&symbol_short!("tourney"));
 }
@@ -1534,4 +1538,143 @@ pub fn set_position_expired_emitted(env: &Env, user: &Address) {
 pub fn get_position_expired_emitted(env: &Env, user: &Address) -> bool {
     let key = (Symbol::new(env, "exp_emit"), user.clone());
     env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+// ── Issue #234: Minimum Pool Size to Activate Rewards ─────────────────────────
+// `min_tvl` holds the TVL threshold (0 = feature off); `rwd_actv` latches the
+// ledger at which the pool first reached it.
+
+pub fn set_min_pool_size(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("min_tvl"), &amount);
+}
+
+pub fn get_min_pool_size(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("min_tvl"))
+        .unwrap_or(0)
+}
+
+pub fn set_rewards_activated_at(env: &Env, ledger: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("rwd_actv"), &ledger);
+}
+
+pub fn get_rewards_activated_at(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("rwd_actv"))
+}
+
+// ── Issue #235: Reward Smoothing ──────────────────────────────────────────────
+
+pub fn set_smoothing_period(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("smth_per"), &ledgers);
+}
+
+pub fn get_smoothing_period(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("smth_per"))
+        .unwrap_or(0)
+}
+
+pub fn set_smoothing_min_amount(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("smth_min"), &amount);
+}
+
+pub fn get_smoothing_min_amount(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("smth_min"))
+        .unwrap_or(0)
+}
+
+pub fn set_smoothing_schedule(env: &Env, schedule: &crate::storage::SmoothingSchedule) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("smth_sch"), schedule);
+}
+
+pub fn get_smoothing_schedule(env: &Env) -> Option<crate::storage::SmoothingSchedule> {
+    env.storage().instance().get(&symbol_short!("smth_sch"))
+}
+
+// ── Issue #236: Referral Tree ─────────────────────────────────────────────────
+// Reverse index of the existing `ref_of` mapping: referrer -> direct referrals.
+
+/// Maximum direct referrals recorded per referrer for tree traversal. Bounds the
+/// worst-case read cost of `referral_tree_data()`; referral *stats* are still
+/// credited for referrals beyond this cap.
+pub const MAX_REFEREES_PER_NODE: u32 = 20;
+
+pub fn get_referees(env: &Env, referrer: &Address) -> Vec<Address> {
+    let key = (Symbol::new(env, "ref_kids"), referrer.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn add_referee(env: &Env, referrer: &Address, referee: &Address) {
+    let mut referees = get_referees(env, referrer);
+    if referees.len() >= MAX_REFEREES_PER_NODE {
+        return;
+    }
+    referees.push_back(referee.clone());
+    let key = (Symbol::new(env, "ref_kids"), referrer.clone());
+    env.storage().persistent().set(&key, &referees);
+}
+
+// ── Issue #237: Capacity Auction ──────────────────────────────────────────────
+
+pub fn set_capacity_auction(env: &Env, auction: &crate::storage::CapacityAuction) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("cap_auct"), auction);
+}
+
+pub fn get_capacity_auction(env: &Env) -> Option<crate::storage::CapacityAuction> {
+    env.storage().instance().get(&symbol_short!("cap_auct"))
+}
+
+pub fn get_auction_bids(env: &Env) -> Vec<crate::storage::AuctionBid> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("auct_bid"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_auction_bids(env: &Env, bids: &Vec<crate::storage::AuctionBid>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("auct_bid"), bids);
+}
+
+pub fn has_pool_spot(env: &Env, user: &Address) -> bool {
+    let key = (Symbol::new(env, "pool_spot"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn grant_pool_spot(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "pool_spot"), user.clone());
+    env.storage().persistent().set(&key, &true);
+}
+
+pub fn set_auction_mode(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("auct_mod"), &enabled);
+}
+
+pub fn get_auction_mode(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("auct_mod"))
+        .unwrap_or(false)
 }
