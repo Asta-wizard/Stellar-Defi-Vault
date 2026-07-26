@@ -256,6 +256,8 @@ pub enum VaultExtError {
     CircularDelegation = 32,
     /// Returned when a delegation chain would exceed the maximum length (issue #200).
     ChainTooLong = 33,
+    /// Returned by `issue_certificate` when the user's stake is below the minimum (issue #222).
+    IneligibleForCertificate = 34,
 }
 
 impl From<VaultError> for VaultExtError {

@@ -685,6 +685,47 @@ pub fn insurance_deployed(env: &Env, amount: i128, new_balance: i128) {
     env.events().publish(topics, (amount, new_balance, env.ledger().sequence()));
 }
 
+// ── Issue #231: halving occurred ──────────────────────────────────────────────
+
+/// Emitted when a reward calculation crosses a halving boundary during
+/// claim or stake operations.
+pub fn halving_occurred(env: &Env, halving_count: u32, effective_rate_bps: i128, ledger: u32) {
+    let topics = (symbol_short!("halving"),);
+    env.events().publish(topics, (halving_count, effective_rate_bps, ledger));
+}
+
+// ── Issue #222: staking certificate events ────────────────────────────────────
+
+pub fn certificate_issued(
+    env: &Env,
+    user: &Address,
+    certificate_id: u32,
+    valid_until: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("cert_iss"), user);
+    env.events().publish(topics, (certificate_id, valid_until, ledger));
+}
+
+// ── Issue #233: pool activation events ────────────────────────────────────────
+
+pub fn pool_activated(env: &Env, total_staked: i128, threshold: i128, ledger: u32) {
+    let topics = (symbol_short!("pool_act"),);
+    env.events().publish(topics, (total_staked, threshold, ledger));
+}
+
+pub fn pool_deactivated(env: &Env, total_staked: i128, threshold: i128, ledger: u32) {
+    let topics = (symbol_short!("pool_dact"),);
+    env.events().publish(topics, (total_staked, threshold, ledger));
+}
+
+// ── Issue #232: position expired event ────────────────────────────────────────
+
+pub fn position_expired(env: &Env, user: &Address, expired_at_ledger: u32, current_ledger: u32) {
+    let topics = (symbol_short!("pos_exp"), user);
+    env.events().publish(topics, (expired_at_ledger, current_ledger));
+}
+
 pub fn dynamic_fee_config_updated(
     env: &Env,
     admin: &Address,

@@ -11,13 +11,14 @@ use crate::{
     storage::{
         AdminAction, AdminProposal, BoostTierProgress, BootstrapConfig, CampaignInfo,
         ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey, DayBucket,
-        DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal, InterfaceId,
-        LeaderboardEntry, MerkleRoot, MigrationExport, MultisigConfig, PauseInfo, PauseReason,
-        PendingAction, PoolComparison, PoolConfig, PoolHealthReport, PoolStats, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReputationScore,
+        DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal,
+        HalvingConfig, InterfaceId, LeaderboardEntry, MerkleRoot, MigrationExport, MultisigConfig,
+        PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig, PoolHealthReport,
+        PoolStats, ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, ReputationScore,
         RewardMultiplierBreakdown, RoundingPolicy, StakeAction, StakeHistoryEntry,
-        StakePosition, StakeStreak, StakingEfficiencyScore, StorageUsageReport, TaxReport,
-        Tournament, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        StakePosition, StakeStreak, StakingEfficiencyScore,
+        StorageUsageReport, TaxReport, Tournament, UnbondingPosition, UnstakeCheckResult,
+        UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -2090,6 +2091,50 @@ impl VaultContract {
     /// the remaining portion at `base_rate`, then summing — without having
     /// to add bootstrap as a third kind of segment boundary alongside the
     /// existing boost-tier/campaign segment walk in `reward_between_ledgers`.
+    // ── Issue #231: Halving Schedule ──────────────────────────────────────────
+
+    /// Admin: set the halving schedule for reward rate reduction.
+    /// `interval_ledgers` specifies how often rewards halve.
+    /// `floor_rate_bps` is the minimum rate enforced after halving.
+    pub fn set_halving_schedule(
+        env: Env,
+        admin: Address,
+        interval_ledgers: u32,
+        floor_rate_bps: i128,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if interval_ledgers == 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        if floor_rate_bps < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        let config = HalvingConfig {
+            interval_ledgers,
+            started_at: env.ledger().sequence(),
+            halving_count: 0,
+            floor_rate_bps,
+        };
+        balance::set_halving_config(&env, &config);
+        Ok(())
+    }
+
+    /// Read-only: returns the current halving configuration, if set.
+    pub fn get_halving_config(env: Env) -> Option<HalvingConfig> {
+        balance::get_halving_config(&env)
+    }
+
+    /// Read-only: compute the current number of halvings that have occurred.
+    pub fn get_current_halving_count(env: Env) -> u32 {
+        balance::halving_count_at(&env, env.ledger().sequence())
+    }
+
+    /// Read-only: returns the ledger number of the next scheduled halving.
+    pub fn next_halving_at(env: Env) -> Option<u32> {
+        balance::next_halving_at(&env)
+    }
+
     fn effective_rate_bps_for_window(env: &Env, start_ledger: u32, end_ledger: u32) -> u32 {
         let base_rate = balance::get_reward_rate_bps(env);
         if end_ledger <= start_ledger {
@@ -4251,8 +4296,8 @@ impl VaultContract {
         // end_ledger), correctly handling a bootstrap window that only
         // partially overlaps this range (falls back to the plain
         // reward_rate_bps() when no bootstrap is configured).
-        let rate_bps = Self::effective_rate_bps_for_window(env, start_ledger, end_ledger);
-        if rate_bps == 0 {
+        let base_rate = Self::effective_rate_bps_for_window(env, start_ledger, end_ledger);
+        if base_rate == 0 {
             return Ok(0);
         }
 
@@ -4267,6 +4312,9 @@ impl VaultContract {
 
         // Load campaign once so reward_for_ledgers can split at campaign boundaries (#48)
         let campaign: Option<CampaignInfo> = env.storage().instance().get(&DataKey::BoostCampaign);
+
+        // Issue #231: load halving config for halving boundary walking
+        let halving_config = balance::get_halving_config(env);
 
         let schedule = balance::get_boost_schedule(env).unwrap_or(Vec::new(env));
         let mut reward: i128 = 0;
@@ -4287,8 +4335,20 @@ impl VaultContract {
             }
         }
 
-        // Walk segments split by BOTH boost-tier boundaries and campaign boundaries
+        // Walk segments split by halving boundaries, boost-tier boundaries, and campaign boundaries
         while cursor < end_ledger {
+            // Compute next halving boundary
+            let next_halving_boundary = if let Some(ref config) = halving_config {
+                if config.interval_ledgers > 0 {
+                    let count = balance::halving_count_at(env, cursor);
+                    config.started_at + (count + 1) * config.interval_ledgers
+                } else {
+                    u32::MAX
+                }
+            } else {
+                u32::MAX
+            };
+
             let next_tier_boundary = if tier_index < schedule.len() {
                 let (tier_ledger, _) = schedule.get(tier_index).unwrap();
                 staked_at.saturating_add(tier_ledger)
@@ -4298,15 +4358,28 @@ impl VaultContract {
 
             let (campaign_mult, next_campaign_boundary) = Self::campaign_info_at(cursor, &campaign);
 
-            let seg_end = next_tier_boundary
+            let seg_end = next_halving_boundary
+                .min(next_tier_boundary)
                 .min(next_campaign_boundary)
                 .min(end_ledger);
+
+            // Compute halving-adjusted rate for this segment
+            let seg_rate = if halving_config.is_some() {
+                let halving_adjusted = balance::halving_adjusted_rate(env, base_rate, cursor);
+                if halving_adjusted <= 0 {
+                    cursor = seg_end;
+                    continue;
+                }
+                halving_adjusted as u32
+            } else {
+                base_rate
+            };
 
             if seg_end > cursor {
                 reward = reward
                     .checked_add(Self::reward_for_ledgers(
                         current_shares,
-                        rate_bps,
+                        seg_rate,
                         current_multiplier,
                         campaign_mult,
                         seg_end - cursor,
@@ -4316,7 +4389,7 @@ impl VaultContract {
 
             let segment_dust = Self::reward_dust_for_ledgers(
                 current_shares,
-                rate_bps,
+                seg_rate,
                 current_multiplier,
                 seg_end - cursor,
             )?;
@@ -4336,7 +4409,7 @@ impl VaultContract {
 
         let final_segment_dust = Self::reward_dust_for_ledgers(
             current_shares,
-            rate_bps,
+            base_rate,
             current_multiplier,
             end_ledger - cursor,
         )?;

@@ -686,6 +686,30 @@ pub struct MerkleRoot {
     pub published_at: u32,
 }
 
+// ── Issue #231: Halving Schedule ──────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct HalvingConfig {
+    pub interval_ledgers: u32,
+    pub started_at: u32,
+    pub halving_count: u32,
+    pub floor_rate_bps: i128,
+}
+
+// ── Issue #222: Staking Certificate ───────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StakingCertificate {
+    pub holder: Address,
+    pub min_amount_staked: i128,
+    pub staked_since: u32,
+    pub issued_at: u32,
+    pub valid_until: u32,
+    pub certificate_id: u32,
+}
+
 // ── Issue #211: Staking Tournament Competition ─────────────────────────────────
 
 #[contracttype]

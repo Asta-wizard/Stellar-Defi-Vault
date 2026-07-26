@@ -1386,3 +1386,147 @@ pub fn add_tokens_burned(env: &Env, amount: i128) {
         .instance()
         .set(&symbol_short!("tot_burn"), &total);
 }
+
+// ── Issue #231: Halving Schedule ──────────────────────────────────────────────
+
+pub fn set_halving_config(env: &Env, config: &crate::storage::HalvingConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("halvcfg"), config);
+}
+
+pub fn get_halving_config(env: &Env) -> Option<crate::storage::HalvingConfig> {
+    env.storage().instance().get(&symbol_short!("halvcfg"))
+}
+
+/// Compute the number of halvings that have occurred up to `ledger`.
+pub fn halving_count_at(env: &Env, ledger: u32) -> u32 {
+    match get_halving_config(env) {
+        Some(config) if config.interval_ledgers > 0 && ledger > config.started_at => {
+            (ledger - config.started_at) / config.interval_ledgers
+        }
+        _ => 0,
+    }
+}
+
+/// Return the ledger at which the next halving will occur, if any.
+pub fn next_halving_at(env: &Env) -> Option<u32> {
+    get_halving_config(env).and_then(|config| {
+        if config.interval_ledgers == 0 {
+            return None;
+        }
+        let current = env.ledger().sequence();
+        let count = if current > config.started_at {
+            (current - config.started_at) / config.interval_ledgers
+        } else {
+            0
+        };
+        let next_boundary = config.started_at + (count + 1) * config.interval_ledgers;
+        Some(next_boundary)
+    })
+}
+
+/// Compute the effective rate with halving applied: `base_rate / (2 ^ halving_count)`,
+/// floored at `floor_rate_bps`. If no halving config exists, returns base_rate.
+pub fn halving_adjusted_rate(env: &Env, base_rate_bps: u32, ledger: u32) -> i128 {
+    match get_halving_config(env) {
+        Some(config) => {
+            let count = halving_count_at(env, ledger);
+            let divisor = 1i128 << count; // 2^count
+            let effective = (base_rate_bps as i128) / divisor;
+            effective.max(config.floor_rate_bps)
+        }
+        None => base_rate_bps as i128,
+    }
+}
+
+// ── Issue #222: Staking Certificate ───────────────────────────────────────────
+
+pub fn set_min_cert_amount(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("min_cert"), &amount);
+}
+
+pub fn get_min_cert_amount(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("min_cert"))
+        .unwrap_or(0)
+}
+
+pub fn get_certificate_counter(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("cert_cnt"))
+        .unwrap_or(0)
+}
+
+pub fn set_certificate_counter(env: &Env, count: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("cert_cnt"), &count);
+}
+
+pub fn get_certificate(env: &Env, user: &Address) -> Option<crate::storage::StakingCertificate> {
+    let key = (Symbol::new(env, "cert"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_certificate(env: &Env, user: &Address, cert: &crate::storage::StakingCertificate) {
+    let key = (Symbol::new(env, "cert"), user.clone());
+    env.storage().persistent().set(&key, cert);
+}
+
+// ── Issue #233: Minimum Pool Size to Activate ─────────────────────────────────
+
+pub fn set_activation_threshold(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("act_thr"), &amount);
+}
+
+pub fn get_activation_threshold(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("act_thr"))
+        .unwrap_or(0)
+}
+
+pub fn get_pool_was_active(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("pool_actv"))
+        .unwrap_or(false)
+}
+
+pub fn set_pool_was_active(env: &Env, active: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("pool_actv"), &active);
+}
+
+// ── Issue #232: Stake Expiry ──────────────────────────────────────────────────
+
+pub fn set_max_stake_duration(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("max_st_d"), &ledgers);
+}
+
+pub fn get_max_stake_duration(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("max_st_d"))
+        .unwrap_or(0)
+}
+
+pub fn set_position_expired_emitted(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "exp_emit"), user.clone());
+    env.storage().persistent().set(&key, &true);
+}
+
+pub fn get_position_expired_emitted(env: &Env, user: &Address) -> bool {
+    let key = (Symbol::new(env, "exp_emit"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
