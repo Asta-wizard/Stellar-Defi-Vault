@@ -2232,6 +2232,57 @@ impl VaultContract {
         Ok(())
     }
 
+    // ── Issue #233: Minimum Pool Size to Activate ─────────────────────────────
+
+    /// Admin: set the minimum total staked amount required for the pool to be active.
+    pub fn set_activation_threshold(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if amount < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        balance::set_activation_threshold(&env, amount);
+        Ok(())
+    }
+
+    /// Read-only: returns the minimum total staked amount for activation.
+    pub fn get_activation_threshold(env: Env) -> i128 {
+        balance::get_activation_threshold(&env)
+    }
+
+    /// Read-only: returns whether the pool is active (total staked >= threshold).
+    pub fn pool_is_active(env: Env) -> bool {
+        let threshold = balance::get_activation_threshold(&env);
+        let total_staked = balance::get_total_deposited(&env);
+        if threshold <= 0 {
+            return true;
+        }
+        total_staked >= threshold
+    }
+
+    /// Check activation status after a total_deposited change and emit events.
+    fn check_activation(env: &Env) {
+        let threshold = balance::get_activation_threshold(env);
+        if threshold <= 0 {
+            return;
+        }
+        let total_staked = balance::get_total_deposited(env);
+        let was_active = balance::get_pool_was_active(env);
+        let is_active = total_staked >= threshold;
+
+        if is_active && !was_active {
+            balance::set_pool_was_active(env, true);
+            events::pool_activated(env, total_staked, threshold, env.ledger().sequence());
+        } else if !is_active && was_active {
+            balance::set_pool_was_active(env, false);
+            events::pool_deactivated(env, total_staked, threshold, env.ledger().sequence());
+        }
+    }
+
     fn effective_rate_bps_for_window(env: &Env, start_ledger: u32, end_ledger: u32) -> u32 {
         let base_rate = balance::get_reward_rate_bps(env);
         if end_ledger <= start_ledger {
@@ -2940,6 +2991,7 @@ impl VaultContract {
         balance::set_shares(&env, &beneficiary, new_shares);
         balance::set_total_shares(&env, total_shares + shares);
         balance::set_total_deposited(&env, total_deposited + amount);
+        Self::check_activation(&env);
 
         let current_ledger = env.ledger().sequence();
         if current_shares == 0 {
@@ -3045,6 +3097,7 @@ impl VaultContract {
             .checked_sub(actual)
             .ok_or(VaultError::ArithmeticError)?;
         balance::set_total_deposited(&env, new_total_deposited);
+        Self::check_activation(&env);
 
         if new_user_shares == 0 {
             env.storage()
@@ -3943,6 +3996,7 @@ impl VaultContract {
         balance::set_shares(env, staker, new_shares);
         balance::set_total_shares(env, adjusted_total_shares + shares);
         balance::set_total_deposited(env, adjusted_total_deposited + amount);
+        Self::check_activation(env);
 
         let current_ledger = env.ledger().sequence();
         if current_shares == 0 {
@@ -4132,6 +4186,7 @@ impl VaultContract {
         // Both the returned principal and the fee leave the staked pool; the fee
         // is credited to the reward treasury below.
         balance::set_total_deposited(env, total_deposited - amount_returned - unstake_fee);
+        Self::check_activation(env);
 
         if unstake_fee > 0 {
             // Issue #197: if fee-split recipients are configured, pay them
@@ -4367,6 +4422,7 @@ impl VaultContract {
         // Update pool totals: treat compounded reward as additional deposited amount
         balance::set_total_shares(env, total_shares + reward_shares);
         balance::set_total_deposited(env, total_deposited + accrued);
+        Self::check_activation(env);
 
         // Clear accrued reward since it's been compounded
         balance::set_accrued_reward(env, user, 0);
@@ -5180,6 +5236,7 @@ impl VaultContract {
         balance::set_shares(env, staker, new_shares);
         balance::set_total_shares(env, total_shares + shares);
         balance::set_total_deposited(env, total_deposited + amount);
+        Self::check_activation(env);
 
         let current_ledger = env.ledger().sequence();
         if current_shares == 0 {
@@ -7117,6 +7174,7 @@ impl VaultContract {
             .checked_sub(position_amount)
             .ok_or(VaultError::ArithmeticError)?;
         balance::set_total_deposited(&env, new_total_deposited);
+        Self::check_activation(&env);
 
         env.storage()
             .persistent()

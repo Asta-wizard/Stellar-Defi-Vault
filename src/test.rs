@@ -5255,3 +5255,66 @@ fn test_invalidate_certificate_fails_if_no_cert() {
     let result = f.vault.try_invalidate_certificate(&f.admin, &f.alice);
     assert_eq!(result, Err(Ok(VaultError::ZeroAmount)));
 }
+
+// ── Issue #233: Minimum Pool Size to Activate ─────────────────────────────────
+
+#[test]
+fn test_set_activation_threshold() {
+    let f = VaultFixture::new();
+    f.vault.set_activation_threshold(&f.admin, &1_000_000);
+    assert_eq!(f.vault.get_activation_threshold(), 1_000_000);
+}
+
+#[test]
+fn test_pool_is_active_with_no_threshold() {
+    let f = VaultFixture::new();
+    // No threshold set means threshold = 0, so pool is always active
+    assert!(f.vault.pool_is_active());
+}
+
+#[test]
+fn test_pool_is_inactive_below_threshold() {
+    let f = VaultFixture::new();
+    f.vault.set_activation_threshold(&f.admin, &1_000_000);
+    // No staking yet, total deposited = 0
+    assert!(!f.vault.pool_is_active());
+}
+
+#[test]
+fn test_pool_activates_when_staking_reaches_threshold() {
+    let f = VaultFixture::new();
+    f.vault.set_activation_threshold(&f.admin, &500_000);
+
+    assert!(!f.vault.pool_is_active());
+
+    f.vault.stake(&f.alice, &500_000);
+    assert!(f.vault.pool_is_active());
+}
+
+#[test]
+fn test_pool_deactivates_when_total_drops_below_threshold() {
+    let f = VaultFixture::new();
+    f.vault.set_activation_threshold(&f.admin, &500_000);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    assert!(f.vault.pool_is_active());
+
+    f.vault.unstake(&f.alice, &600_000);
+    // After unstaking, Alice has 400k, total = 400k < 500k
+    assert!(!f.vault.pool_is_active());
+}
+
+#[test]
+fn test_pool_reactivates_on_second_stake() {
+    let f = VaultFixture::new();
+    f.vault.set_activation_threshold(&f.admin, &500_000);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    assert!(f.vault.pool_is_active());
+
+    f.vault.unstake(&f.alice, &600_000);
+    assert!(!f.vault.pool_is_active());
+
+    f.vault.stake(&f.alice, &200_000);
+    assert!(f.vault.pool_is_active());
+}
