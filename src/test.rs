@@ -12,8 +12,8 @@ use crate::{
     errors::{VaultError, VaultExtError},
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{
-        AdminAction, ChangelogEntry, FeeRecipient, PauseReason, ProposableParam, RoundingPolicy,
-        UnstakeCheckResult,
+        AdminAction, ChangelogEntry, FeeRecipient, HalvingConfig, PauseReason, ProposableParam,
+        RoundingPolicy, StakingCertificate, UnstakeCheckResult,
     },
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
@@ -5159,4 +5159,99 @@ fn test_halving_with_boost_schedule() {
     set_ledger(&f.env, 700);
     let pending_halved = f.vault.calc_pending_reward(&f.alice);
     assert!(pending_halved > 0, "reward after halving must still be positive");
+}
+
+// ── Issue #222: Staking Certificate ───────────────────────────────────────────
+
+#[test]
+fn test_set_min_cert_amount() {
+    let f = VaultFixture::new();
+    f.vault.set_min_cert_amount(&f.admin, &1_000_000);
+    assert_eq!(f.vault.get_min_cert_amount(), 1_000_000);
+}
+
+#[test]
+fn test_set_min_cert_amount_zero_is_valid() {
+    let f = VaultFixture::new();
+    f.vault.set_min_cert_amount(&f.admin, &0);
+    assert_eq!(f.vault.get_min_cert_amount(), 0);
+}
+
+#[test]
+fn test_set_min_cert_amount_negative_rejected() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_set_min_cert_amount(&f.admin, &(-1));
+    assert_eq!(result, Err(Ok(VaultError::ZeroAmount)));
+}
+
+#[test]
+fn test_issue_certificate_creates_cert() {
+    let f = VaultFixture::new();
+    f.vault.set_min_cert_amount(&f.admin, &500_000);
+
+    // Alice stakes enough to be eligible
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let cert = f.vault.issue_certificate(&f.admin, &f.alice);
+    assert_eq!(cert.holder, f.alice);
+    assert_eq!(cert.min_amount_staked, 500_000);
+    assert_eq!(cert.certificate_id, 1);
+
+    // Verify via get_certificate
+    let fetched = f.vault.get_certificate(&f.alice).unwrap();
+    assert_eq!(fetched.certificate_id, 1);
+    assert_eq!(fetched.holder, f.alice);
+}
+
+#[test]
+fn test_issue_certificate_fails_below_min_amount() {
+    let f = VaultFixture::new();
+    f.vault.set_min_cert_amount(&f.admin, &500_000);
+
+    // Alice stakes less than minimum
+    f.vault.stake(&f.alice, &100_000);
+
+    let result = f.vault.try_issue_certificate(&f.admin, &f.alice);
+    assert_eq!(result, Err(Ok(VaultError::ZeroAmount)));
+}
+
+#[test]
+fn test_issue_certificate_increments_id() {
+    let f = VaultFixture::new();
+    f.vault.set_min_cert_amount(&f.admin, &100);
+
+    f.vault.stake(&f.alice, &1_000);
+    f.vault.stake(&f.bob, &1_000);
+
+    let cert1 = f.vault.issue_certificate(&f.admin, &f.alice);
+    let cert2 = f.vault.issue_certificate(&f.admin, &f.bob);
+    assert_eq!(cert1.certificate_id, 1);
+    assert_eq!(cert2.certificate_id, 2);
+}
+
+#[test]
+fn test_get_certificate_returns_none_if_not_issued() {
+    let f = VaultFixture::new();
+    let cert = f.vault.get_certificate(&f.alice);
+    assert!(cert.is_none());
+}
+
+#[test]
+fn test_invalidate_certificate_removes_it() {
+    let f = VaultFixture::new();
+    f.vault.set_min_cert_amount(&f.admin, &500_000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let _ = f.vault.issue_certificate(&f.admin, &f.alice);
+    assert!(f.vault.get_certificate(&f.alice).is_some());
+
+    f.vault.invalidate_certificate(&f.admin, &f.alice);
+    assert!(f.vault.get_certificate(&f.alice).is_none());
+}
+
+#[test]
+fn test_invalidate_certificate_fails_if_no_cert() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_invalidate_certificate(&f.admin, &f.alice);
+    assert_eq!(result, Err(Ok(VaultError::ZeroAmount)));
 }

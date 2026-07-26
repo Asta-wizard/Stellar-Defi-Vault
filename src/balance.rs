@@ -1478,6 +1478,11 @@ pub fn set_certificate(env: &Env, user: &Address, cert: &crate::storage::Staking
     env.storage().persistent().set(&key, cert);
 }
 
+pub fn remove_certificate(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "cert"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
 // ── Issue #233: Minimum Pool Size to Activate ─────────────────────────────────
 
 pub fn set_activation_threshold(env: &Env, amount: i128) {

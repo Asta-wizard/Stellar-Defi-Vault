@@ -16,7 +16,7 @@ use crate::{
         PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig, PoolHealthReport,
         PoolStats, ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, ReputationScore,
         RewardMultiplierBreakdown, RoundingPolicy, StakeAction, StakeHistoryEntry,
-        StakePosition, StakeStreak, StakingEfficiencyScore,
+        StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
         StorageUsageReport, TaxReport, Tournament, UnbondingPosition, UnstakeCheckResult,
         UserStats, UserSummary, VestingEntry,
     },
@@ -2133,6 +2133,103 @@ impl VaultContract {
     /// Read-only: returns the ledger number of the next scheduled halving.
     pub fn next_halving_at(env: Env) -> Option<u32> {
         balance::next_halving_at(&env)
+    }
+
+    // ── Issue #222: Staking Certificate ────────────────────────────────────────
+
+    /// Admin: set the minimum staked amount required for certificate eligibility.
+    pub fn set_min_cert_amount(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+        if amount < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        balance::set_min_cert_amount(&env, amount);
+        Ok(())
+    }
+
+    /// Read-only: returns the minimum staked amount for certificate eligibility.
+    pub fn get_min_cert_amount(env: Env) -> i128 {
+        balance::get_min_cert_amount(&env)
+    }
+
+    /// Admin: issue a staking certificate to a user.
+    pub fn issue_certificate(
+        env: Env,
+        admin: Address,
+        user: Address,
+    ) -> Result<StakingCertificate, VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+
+        let shares = balance::get_shares(&env, &user);
+        let min_amount = balance::get_min_cert_amount(&env);
+        if shares < min_amount {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        let counter = balance::get_certificate_counter(&env);
+        let new_counter = counter.checked_add(1).ok_or(VaultError::ArithmeticError)?;
+        balance::set_certificate_counter(&env, new_counter);
+
+        // Certificate parameters
+        let staked_since = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(env.ledger().sequence());
+
+        let current_ledger = env.ledger().sequence();
+        let valid_for = LEDGERS_PER_DAY * 30; // 30 days validity
+        let valid_until = current_ledger.saturating_add(valid_for);
+
+        let cert = StakingCertificate {
+            holder: user.clone(),
+            min_amount_staked: min_amount,
+            staked_since,
+            issued_at: current_ledger,
+            valid_until,
+            certificate_id: new_counter,
+        };
+
+        balance::set_certificate(&env, &user, &cert);
+
+        events::certificate_issued(
+            &env,
+            &user,
+            new_counter,
+            valid_until,
+            current_ledger,
+        );
+
+        Ok(cert)
+    }
+
+    /// Read-only: returns the staking certificate for a user, if any.
+    pub fn get_certificate(env: Env, user: Address) -> Option<StakingCertificate> {
+        balance::get_certificate(&env, &user)
+    }
+
+    /// Admin: invalidate a user's staking certificate.
+    pub fn invalidate_certificate(
+        env: Env,
+        admin: Address,
+        user: Address,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+
+        let _cert = balance::get_certificate(&env, &user)
+            .ok_or(VaultError::ZeroAmount)?;
+
+        // Remove the certificate from storage
+        balance::remove_certificate(&env, &user);
+
+        Ok(())
     }
 
     fn effective_rate_bps_for_window(env: &Env, start_ledger: u32, end_ledger: u32) -> u32 {
