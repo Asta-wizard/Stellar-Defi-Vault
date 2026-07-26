@@ -8693,13 +8693,16 @@ impl VaultContract {
             return Err(VaultExtError::ZeroAmount);
         }
 
-        let random_point: u64 = env.prng().gen_range(0..(total_staked as u64));
+        let total_staked_u64 =
+            u64::try_from(total_staked).map_err(|_| VaultExtError::ArithmeticError)?;
+        let random_point: u64 = env.prng().gen_range(0..total_staked_u64);
         let mut cursor: u64 = 0;
         let mut winner: Option<Address> = None;
         for i in 0..weights.len() {
             let (addr, amount) = weights.get(i).unwrap();
+            let amount_u64 = u64::try_from(amount).map_err(|_| VaultExtError::ArithmeticError)?;
             cursor = cursor
-                .checked_add(amount as u64)
+                .checked_add(amount_u64)
                 .ok_or(VaultExtError::ArithmeticError)?;
             if random_point < cursor {
                 winner = Some(addr);
@@ -8935,7 +8938,8 @@ impl VaultContract {
     ///
     /// Reverts with `BelowVetoThreshold` if the veto threshold is unset (0)
     /// or the caller's pool share is below it, `NotInitialized` if the
-    /// proposal doesn't exist, or `AlreadyVetoed` if it was already vetoed.
+    /// proposal doesn't exist, or `AlreadyVetoed` if it was already vetoed
+    /// or already enacted.
     pub fn veto_proposal(env: Env, user: Address, proposal_id: u32) -> Result<(), VaultExtError> {
         user.require_auth();
 
@@ -8944,7 +8948,11 @@ impl VaultContract {
             return Err(VaultExtError::BelowVetoThreshold);
         }
 
-        balance::get_proposal(&env, proposal_id).ok_or(VaultExtError::NotInitialized)?;
+        let proposal =
+            balance::get_proposal(&env, proposal_id).ok_or(VaultExtError::NotInitialized)?;
+        if proposal.enacted {
+            return Err(VaultExtError::AlreadyVetoed);
+        }
         if balance::get_proposal_vetoer(&env, proposal_id).is_some() {
             return Err(VaultExtError::AlreadyVetoed);
         }

@@ -306,8 +306,9 @@ pub enum VaultExtError {
     /// the configured veto threshold, or the veto threshold is unset (0),
     /// which disables the feature entirely (issue #241).
     BelowVetoThreshold = 48,
-    /// Returned by `veto_proposal()` when the proposal already has a vetoer
-    /// (issue #241).
+    /// Returned by `veto_proposal()` when the proposal already has a vetoer,
+    /// or has already been enacted and so can no longer be vetoed (issue
+    /// #241).
     AlreadyVetoed = 49,
     /// Returned by `set_veto_threshold_bps()` when `bps` exceeds 10 000
     /// (100%) (issue #241).

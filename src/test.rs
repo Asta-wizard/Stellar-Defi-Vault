@@ -6736,3 +6736,108 @@ fn test_veto_cannot_be_applied_twice() {
     let result = f.vault.try_veto_proposal(&f.bob, &id);
     assert_eq!(result, Err(Ok(VaultExtError::AlreadyVetoed)));
 }
+
+#[test]
+fn test_veto_at_exact_threshold_succeeds() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &200_000);
+    f.vault.stake(&f.bob, &800_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &2000_u32); // exactly 20%
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.veto_proposal(&f.alice, &id); // Alice holds exactly 20%
+
+    assert_eq!(f.vault.get_proposal_veto_status(&id), Some(f.alice.clone()));
+}
+
+#[test]
+fn test_veto_already_enacted_proposal_reverts() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &800_000);
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.set_veto_threshold_bps(&f.admin, &2000_u32);
+
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    set_ledger(&f.env, 1 + 100 + 1);
+    f.vault.enact_proposal(&id);
+
+    let result = f.vault.try_veto_proposal(&f.alice, &id);
+    assert_eq!(result, Err(Ok(VaultExtError::AlreadyVetoed)));
+}
+
+// ── Additional lottery coverage ────────────────────────────────────────────────
+
+#[test]
+fn test_create_lottery_rejects_non_positive_prize() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    let result = f.vault.try_create_lottery(&f.admin, &0_i128, &10_u32);
+    assert_eq!(result, Err(Ok(VaultExtError::ZeroAmount)));
+}
+
+#[test]
+fn test_draw_lottery_no_stakers_reverts() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.admin, &1_000);
+    f.vault.create_lottery(&f.admin, &1_000, &10_u32);
+    set_ledger(&f.env, 10);
+
+    let result = f.vault.try_draw_lottery(&f.admin);
+    assert_eq!(result, Err(Ok(VaultExtError::ZeroAmount)));
+}
+
+#[test]
+fn test_draw_lottery_twice_reverts() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    f.token_admin.mint(&f.admin, &1_000);
+    f.vault.create_lottery(&f.admin, &1_000, &5_u32);
+    set_ledger(&f.env, 5);
+    f.vault.draw_lottery(&f.admin);
+
+    let result = f.vault.try_draw_lottery(&f.admin);
+    assert_eq!(result, Err(Ok(VaultExtError::LotteryAlreadyActive)));
+}
+
+// ── Additional milestone coverage ───────────────────────────────────────────────
+
+#[test]
+fn test_total_rewards_claimed_milestone_triggers_correctly() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let name = soroban_sdk::String::from_str(&f.env, "Reward Collector");
+    let id = f.vault.add_milestone(
+        &f.admin,
+        &name,
+        &MilestoneCondition::TotalRewardsClaimed,
+        &1_i128,
+    );
+
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+    f.vault.claim(&f.alice);
+
+    let achieved = f.vault.get_user_milestones(&f.alice);
+    assert_eq!(achieved.len(), 1);
+    assert_eq!(achieved.get(0).unwrap(), id);
+}
+
+// ── Additional oracle coverage ──────────────────────────────────────────────────
+
+#[test]
+fn test_check_and_release_no_price_condition_reverts() {
+    let f = VaultFixture::new();
+    let oracle_id = f.env.register_contract(None, MockOracle);
+    f.vault.set_oracle_contract(&f.admin, &oracle_id);
+    f.vault.stake(&f.alice, &500_000);
+
+    let result = f.vault.try_check_and_release(&f.alice);
+    assert_eq!(result, Err(Ok(VaultExtError::NotInitialized)));
+}
