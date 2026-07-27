@@ -5384,6 +5384,12 @@ impl VaultContract {
         // Issue #238: lazily check for newly achieved milestones.
         Self::do_check_milestones(env, staker);
 
+        // Issue #245: cohort bookkeeping, before the match grows the position.
+        Self::cohort_record_stake(env, staker, amount, current_shares == 0);
+
+        // Issue #242: credit the admin-funded stake match, if a program is live.
+        Self::apply_stake_match(env, staker, amount)?;
+
         Ok(shares)
     }
 
@@ -5479,8 +5485,10 @@ impl VaultContract {
         let is_restaked = balance::is_restaked(env, staker);
         // Issue #240: a triggered oracle price condition waives the penalty too.
         let is_lockup_waived = balance::is_lockup_waived(env, staker);
+        // Issue #243: a purchased insurance policy waives it outright.
+        let is_insured = balance::is_position_insured(env, staker);
         let amount_after_penalty =
-            if is_restaked || is_lockup_waived || !is_locked || penalty_bps == 0 {
+            if is_restaked || is_lockup_waived || is_insured || !is_locked || penalty_bps == 0 {
                 amount
             } else {
                 let penalty = amount
@@ -5541,6 +5549,8 @@ impl VaultContract {
             // Issue #41: record the ledger of this full unstake and clear restaked flag
             balance::set_last_unstake_ledger(env, staker, current_ledger);
             balance::remove_restaked(env, staker);
+            // Issue #243: the policy covers exactly one position lifecycle.
+            balance::clear_position_insured(env, staker);
             let total_stakers = balance::get_total_stakers(env);
             if total_stakers > 0 {
                 balance::set_total_stakers(env, total_stakers - 1);
@@ -5577,6 +5587,10 @@ impl VaultContract {
 
         // Issue #207: bridge relayer hook, after tokens are returned.
         Self::emit_bridge_packet_if_enabled(env, staker, amount_returned, "unstake");
+
+        // Issue #245: cohort bookkeeping — the gross position reduction, and
+        // one fewer active member when the position is fully closed.
+        Self::cohort_record_unstake(env, staker, amount, new_user_shares == 0);
 
         Ok(amount_returned)
     }
@@ -6514,6 +6528,9 @@ impl VaultContract {
         // Issue #238: lazily check for newly achieved milestones.
         Self::do_check_milestones(env, staker);
 
+        // Issue #245: cohort bookkeeping.
+        Self::cohort_record_claim(env, staker, reward);
+
         Ok(reward)
     }
 
@@ -6614,6 +6631,12 @@ impl VaultContract {
         Self::record_stake_snapshot(env, staker, new_shares);
 
         events::deposit(env, staker, amount, shares, env.ledger().sequence());
+
+        // Issue #245: cohort bookkeeping, before the match grows the position.
+        Self::cohort_record_stake(env, staker, amount, current_shares == 0);
+
+        // Issue #242: credit the admin-funded stake match, if a program is live.
+        Self::apply_stake_match(env, staker, amount)?;
 
         Ok(shares)
     }
@@ -9547,5 +9570,471 @@ impl VaultContract {
     /// Read-only query returning the vetoer of a proposal, if any.
     pub fn get_proposal_veto_status(env: Env, proposal_id: u32) -> Option<Address> {
         balance::get_proposal_vetoer(&env, proposal_id)
+    }
+
+    // ── Issue #242: stake matching program ──────────────────────────────────────
+
+    /// Admin funds a program that matches every subsequent user stake with an
+    /// extra `match_rate_bps` contribution, capped at `per_user_cap` per
+    /// staker and `budget` overall. The full `budget` is transferred from the
+    /// admin into the contract up front.
+    ///
+    /// Reverts with `AlreadyInitialized` if a program is already active,
+    /// `ZeroAmount` if `budget`, `per_user_cap` or `match_rate_bps` is not
+    /// positive, or `InvalidVetoThreshold` if `match_rate_bps` exceeds
+    /// 10 000 (100% match).
+    pub fn start_matching_program(
+        env: Env,
+        admin: Address,
+        match_rate_bps: u32,
+        per_user_cap: i128,
+        budget: i128,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if let Some(existing) = balance::get_matching_program(&env) {
+            if existing.active {
+                return Err(VaultExtError::AlreadyInitialized);
+            }
+        }
+        if match_rate_bps == 0 || per_user_cap <= 0 || budget <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        if match_rate_bps > BOOST_BPS_BASE {
+            return Err(VaultExtError::InvalidVetoThreshold);
+        }
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&admin, &env.current_contract_address(), &budget);
+
+        balance::set_matching_program(
+            &env,
+            &MatchingProgram {
+                match_rate_bps,
+                per_user_cap,
+                total_budget: budget,
+                budget_used: 0,
+                active: true,
+            },
+        );
+        Ok(())
+    }
+
+    /// Admin deactivates the matching program and reclaims whatever budget was
+    /// never matched out. Matches already credited to stakers stay staked.
+    ///
+    /// Reverts with `NotInitialized` if no program is currently active.
+    pub fn end_matching_program(env: Env, admin: Address) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut program =
+            balance::get_matching_program(&env).ok_or(VaultExtError::NotInitialized)?;
+        if !program.active {
+            return Err(VaultExtError::NotInitialized);
+        }
+
+        let unused = program.total_budget.saturating_sub(program.budget_used);
+        if unused > 0 {
+            let token_addr = Self::token_address(&env)?;
+            let token_client = token::Client::new(&env, &token_addr);
+            token_client.transfer(&env.current_contract_address(), &admin, &unused);
+            // The refunded portion can never be matched out later.
+            program.total_budget = program.budget_used;
+        }
+        program.active = false;
+        balance::set_matching_program(&env, &program);
+        Ok(())
+    }
+
+    /// Read-only query for the current (or most recently ended) program.
+    pub fn get_matching_program(env: Env) -> Option<MatchingProgram> {
+        balance::get_matching_program(&env)
+    }
+
+    /// Read-only query for how much matched contribution `user` has received.
+    pub fn get_user_matched_total(env: Env, user: Address) -> i128 {
+        balance::get_user_matching_stats(&env, &user).total_matched
+    }
+
+    /// Credits the admin-funded match for a stake of `amount`, if a matching
+    /// program is active and has headroom left. The matched tokens are already
+    /// held by the contract (funded at `start_matching_program`), so this only
+    /// mints the corresponding shares and grows `total_deposited`.
+    ///
+    /// A no-op — never an error — when no program is active or the caps leave
+    /// nothing to match, so a stake never fails because of matching.
+    fn apply_stake_match(env: &Env, staker: &Address, amount: i128) -> Result<(), VaultError> {
+        let mut program = match balance::get_matching_program(env) {
+            Some(program) if program.active => program,
+            _ => return Ok(()),
+        };
+
+        let mut stats = balance::get_user_matching_stats(env, staker);
+        let raw_match = amount
+            .checked_mul(program.match_rate_bps as i128)
+            .ok_or(VaultError::ArithmeticError)?
+            .checked_div(BOOST_BPS_BASE as i128)
+            .ok_or(VaultError::ArithmeticError)?;
+        let user_headroom = program.per_user_cap.saturating_sub(stats.total_matched);
+        let budget_headroom = program.total_budget.saturating_sub(program.budget_used);
+        let match_amount = raw_match.min(user_headroom).min(budget_headroom);
+        if match_amount <= 0 {
+            return Ok(());
+        }
+
+        let total_shares = balance::get_total_shares(env);
+        let total_deposited = balance::get_total_deposited(env);
+        let shares = balance::amount_to_shares(total_shares, total_deposited, match_amount)
+            .ok_or(VaultError::ArithmeticError)?;
+        if shares <= 0 {
+            return Ok(());
+        }
+
+        balance::set_shares(env, staker, balance::get_shares(env, staker) + shares);
+        balance::set_total_shares(env, total_shares + shares);
+        balance::set_total_deposited(env, total_deposited + match_amount);
+
+        stats.total_matched += match_amount;
+        program.budget_used += match_amount;
+        balance::set_user_matching_stats(env, staker, &stats);
+        balance::set_matching_program(env, &program);
+
+        events::stake_matched(env, staker, amount, match_amount, env.ledger().sequence());
+        Ok(())
+    }
+
+    // ── Issue #243: unstake insurance policy ────────────────────────────────────
+
+    /// Admin sets the one-time premium, in basis points of the staked amount,
+    /// charged by `stake_with_insurance()` for a penalty-free exit guarantee.
+    /// Setting 0 makes the guarantee free but keeps it available.
+    ///
+    /// Reverts with `InvalidInsuranceRate` if `premium_bps` exceeds 10 000.
+    pub fn set_unstake_insurance_rate(
+        env: Env,
+        admin: Address,
+        premium_bps: u32,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if premium_bps > BOOST_BPS_BASE {
+            return Err(VaultExtError::InvalidInsuranceRate);
+        }
+        balance::set_unstake_insurance_bps(&env, premium_bps);
+        Ok(())
+    }
+
+    /// Read-only query for the current unstake insurance premium rate.
+    pub fn get_unstake_insurance_rate(env: Env) -> u32 {
+        balance::get_unstake_insurance_bps(&env)
+    }
+
+    /// Stakes `amount` and simultaneously buys a penalty-free exit guarantee
+    /// for the resulting position: `unstake` waives the lock-up early-exit
+    /// penalty entirely while the flag is set.
+    ///
+    /// The premium (`amount * premium_bps / 10000`) is transferred from the
+    /// user to the treasury — the slash treasury when configured, otherwise
+    /// the admin — and is charged on top of `amount`, not deducted from it.
+    /// The policy covers exactly one position lifecycle: it is cleared when
+    /// the position is fully unstaked.
+    ///
+    /// Returns the shares minted by the stake.
+    pub fn stake_with_insurance(
+        env: Env,
+        user: Address,
+        amount: i128,
+    ) -> Result<i128, VaultExtError> {
+        user.require_auth();
+        if amount <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+
+        let premium_bps = balance::get_unstake_insurance_bps(&env);
+        let premium = amount
+            .checked_mul(premium_bps as i128)
+            .ok_or(VaultExtError::ArithmeticError)?
+            .checked_div(BOOST_BPS_BASE as i128)
+            .ok_or(VaultExtError::ArithmeticError)?;
+
+        if premium > 0 {
+            let treasury = match balance::get_slash_treasury(&env) {
+                Some(treasury) => treasury,
+                None => admin::get_admin(&env)?,
+            };
+            let token_addr = Self::token_address(&env)?;
+            let token_client = token::Client::new(&env, &token_addr);
+            token_client.transfer(&user, &treasury, &premium);
+        }
+
+        let shares = Self::do_stake_inner(&env, &user, amount)?;
+        balance::set_position_insured(&env, &user, true);
+
+        events::insurance_purchased(&env, &user, premium, amount, env.ledger().sequence());
+        Ok(shares)
+    }
+
+    /// Read-only query: whether `user`'s current position carries a
+    /// penalty-free exit guarantee.
+    pub fn get_unstake_insurance_status(env: Env, user: Address) -> bool {
+        balance::is_position_insured(&env, &user)
+    }
+
+    // ── Issue #244: multi-currency claim ────────────────────────────────────────
+
+    /// Admin adds `token` to the whitelist of tokens `claim_in_token()` may pay
+    /// rewards out in. Adding a token already on the list is a no-op.
+    ///
+    /// Reverts with `TooManyRecipients` once `MAX_OUTPUT_TOKENS` are listed.
+    pub fn add_output_token(env: Env, admin: Address, token: Address) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut tokens = balance::get_output_tokens(&env);
+        if tokens.contains(&token) {
+            return Ok(());
+        }
+        if tokens.len() >= MAX_OUTPUT_TOKENS {
+            return Err(VaultExtError::TooManyRecipients);
+        }
+        tokens.push_back(token);
+        balance::set_output_tokens(&env, &tokens);
+        Ok(())
+    }
+
+    /// Admin removes `token` from the output-token whitelist. Removing a token
+    /// that isn't listed is a no-op.
+    pub fn remove_output_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let tokens = balance::get_output_tokens(&env);
+        let mut remaining: Vec<Address> = Vec::new(&env);
+        for i in 0..tokens.len() {
+            let listed = tokens.get(i).unwrap();
+            if listed != token {
+                remaining.push_back(listed);
+            }
+        }
+        balance::set_output_tokens(&env, &remaining);
+        Ok(())
+    }
+
+    /// Read-only query for the admin-managed output-token whitelist.
+    pub fn get_supported_output_tokens(env: Env) -> Vec<Address> {
+        balance::get_output_tokens(&env)
+    }
+
+    /// Claims pending rewards and delivers them in `output_token` instead of
+    /// the reward token, converting via the configured DEX router.
+    ///
+    /// Passing the reward token itself as `output_token` is valid and behaves
+    /// exactly like `claim()`. Any other token must be on the whitelist
+    /// (`add_output_token`) or the call reverts with `UnsupportedInputToken`.
+    ///
+    /// `min_output` is slippage protection: the call reverts with
+    /// `SlippageExceeded` if the swap delivers less. Passing `0` disables the
+    /// check. Returns the amount of `output_token` delivered to the user.
+    ///
+    /// Only meaningful on pools without a vesting period: when
+    /// `set_vesting_period` is active the reward is queued rather than paid
+    /// out, so there is nothing to convert and only the same-token form works.
+    pub fn claim_in_token(
+        env: Env,
+        user: Address,
+        output_token: Address,
+        min_output: i128,
+    ) -> Result<i128, VaultExtError> {
+        user.require_auth();
+
+        let stake_token = Self::token_address(&env)?;
+        let reward_token = balance::get_reward_token(&env).unwrap_or(stake_token);
+
+        if output_token != reward_token && !balance::get_output_tokens(&env).contains(&output_token)
+        {
+            return Err(VaultExtError::UnsupportedInputToken);
+        }
+
+        let reward_amount = Self::do_claim(&env, &user)?;
+
+        // Same-token claim is just a regular claim — the payout already landed
+        // in the user's wallet.
+        if output_token == reward_token {
+            if min_output > 0 && reward_amount < min_output {
+                return Err(VaultExtError::SlippageExceeded);
+            }
+            events::reward_claimed_in_token(
+                &env,
+                &user,
+                reward_amount,
+                &output_token,
+                reward_amount,
+                env.ledger().sequence(),
+            );
+            return Ok(reward_amount);
+        }
+
+        if reward_amount == 0 {
+            if min_output > 0 {
+                return Err(VaultExtError::SlippageExceeded);
+            }
+            let ledger = env.ledger().sequence();
+            events::reward_claimed_in_token(&env, &user, 0, &output_token, 0, ledger);
+            return Ok(0);
+        }
+
+        let router = balance::get_dex_router(&env).ok_or(VaultExtError::UnsupportedInputToken)?;
+
+        // `do_claim` paid the reward straight to the user, so pull it back in
+        // for the swap — the router only ever deals with this contract. Both
+        // legs run inside one invocation, so the whole claim reverts atomically
+        // if the swap fails.
+        let reward_client = token::Client::new(&env, &reward_token);
+        reward_client.transfer(&user, &env.current_contract_address(), &reward_amount);
+
+        let router_client = DexRouterClient::new(&env, &router);
+        let output_amount = router_client.swap(
+            &reward_token,
+            &output_token,
+            &reward_amount,
+            &min_output,
+            &user,
+        );
+
+        if output_amount < min_output {
+            return Err(VaultExtError::SlippageExceeded);
+        }
+
+        events::reward_claimed_in_token(
+            &env,
+            &user,
+            reward_amount,
+            &output_token,
+            output_amount,
+            env.ledger().sequence(),
+        );
+        Ok(output_amount)
+    }
+
+    // ── Issue #245: staking cohort analytics ────────────────────────────────────
+
+    /// Read-only query for one weekly cohort's aggregate stats.
+    pub fn get_cohort_stats(env: Env, cohort_id: u32) -> Option<CohortStats> {
+        balance::get_cohort_stats(&env, cohort_id)
+    }
+
+    /// Read-only query returning every tracked cohort, oldest first, capped at
+    /// `MAX_COHORTS` (one year of weekly cohorts).
+    pub fn get_all_cohorts(env: Env) -> Vec<CohortStats> {
+        let ids = balance::get_cohort_ids(&env);
+        let mut out: Vec<CohortStats> = Vec::new(&env);
+        for i in 0..ids.len() {
+            if out.len() >= MAX_COHORTS {
+                break;
+            }
+            if let Some(stats) = balance::get_cohort_stats(&env, ids.get(i).unwrap()) {
+                out.push_back(stats);
+            }
+        }
+        out
+    }
+
+    /// Read-only query for the cohort `user` belongs to, if they have ever staked.
+    pub fn get_user_cohort(env: Env, user: Address) -> Option<u32> {
+        balance::get_cohort_of(&env, &user)
+    }
+
+    /// The weekly cohort bucket a ledger falls into.
+    fn cohort_id_for(ledger: u32) -> u32 {
+        ledger / LEDGERS_PER_COHORT
+    }
+
+    /// Returns `user`'s cohort, assigning (and registering) it on first stake.
+    fn cohort_for_user(env: &Env, user: &Address) -> u32 {
+        if let Some(existing) = balance::get_cohort_of(env, user) {
+            return existing;
+        }
+        let cohort_id = Self::cohort_id_for(env.ledger().sequence());
+        balance::set_cohort_of(env, user, cohort_id);
+
+        let mut ids = balance::get_cohort_ids(env);
+        if !ids.contains(cohort_id) {
+            // Oldest cohorts are dropped from the index once a full year of
+            // weekly buckets is tracked; their stats stay readable by id.
+            while ids.len() >= MAX_COHORTS {
+                let _ = ids.pop_front();
+            }
+            ids.push_back(cohort_id);
+            balance::set_cohort_ids(env, &ids);
+        }
+        cohort_id
+    }
+
+    fn cohort_stats_or_new(env: &Env, cohort_id: u32) -> CohortStats {
+        balance::get_cohort_stats(env, cohort_id).unwrap_or(CohortStats {
+            cohort_id,
+            member_count: 0,
+            total_staked: 0,
+            avg_position: 0,
+            total_rewards_claimed: 0,
+            active_members: 0,
+        })
+    }
+
+    fn cohort_save(env: &Env, mut stats: CohortStats) {
+        stats.avg_position = if stats.active_members == 0 {
+            0
+        } else {
+            stats.total_staked / stats.active_members as i128
+        };
+        balance::set_cohort_stats(env, stats.cohort_id, &stats);
+    }
+
+    /// Records a stake against the staker's cohort. `is_new_position` is true
+    /// when this stake opened a position (first ever, or after a full exit);
+    /// `member_count` only ever grows on an address's very first stake, so the
+    /// retention rate `active_members / member_count` stays meaningful.
+    fn cohort_record_stake(env: &Env, user: &Address, amount: i128, is_new_position: bool) {
+        let is_first_ever = balance::get_cohort_of(env, user).is_none();
+        let cohort_id = Self::cohort_for_user(env, user);
+        let mut stats = Self::cohort_stats_or_new(env, cohort_id);
+        if is_first_ever {
+            stats.member_count = stats.member_count.saturating_add(1);
+        }
+        stats.total_staked = stats.total_staked.saturating_add(amount);
+        if is_new_position {
+            stats.active_members = stats.active_members.saturating_add(1);
+        }
+        Self::cohort_save(env, stats);
+    }
+
+    fn cohort_record_unstake(env: &Env, user: &Address, amount: i128, position_closed: bool) {
+        let cohort_id = match balance::get_cohort_of(env, user) {
+            Some(cohort_id) => cohort_id,
+            None => return,
+        };
+        let mut stats = Self::cohort_stats_or_new(env, cohort_id);
+        stats.total_staked = stats.total_staked.saturating_sub(amount).max(0);
+        if position_closed && stats.active_members > 0 {
+            stats.active_members -= 1;
+        }
+        Self::cohort_save(env, stats);
+    }
+
+    fn cohort_record_claim(env: &Env, user: &Address, reward: i128) {
+        let cohort_id = match balance::get_cohort_of(env, user) {
+            Some(cohort_id) => cohort_id,
+            None => return,
+        };
+        let mut stats = Self::cohort_stats_or_new(env, cohort_id);
+        stats.total_rewards_claimed = stats.total_rewards_claimed.saturating_add(reward);
+        Self::cohort_save(env, stats);
     }
 }
