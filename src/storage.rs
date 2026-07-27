@@ -884,3 +884,50 @@ pub struct PriceCondition {
     pub asset_id: String,
     pub direction: TriggerDirection,
 }
+
+// ── Issue #242: stake matching program ────────────────────────────────────────
+
+/// An admin-funded program that matches every user stake with an extra
+/// contribution, bounded by a per-user cap and a total program budget.
+///
+/// `total_budget` is transferred into the contract up front by
+/// `start_matching_program()`; `budget_used` is the portion already credited to
+/// stakers. Unused budget is returned to the admin by `end_matching_program()`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchingProgram {
+    pub match_rate_bps: u32,
+    pub per_user_cap: i128,
+    pub total_budget: i128,
+    pub budget_used: i128,
+    pub active: bool,
+}
+
+/// Per-user running total of matched contributions received (issue #242).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserMatchingStats {
+    pub total_matched: i128,
+}
+
+// ── Issue #245: staking cohort analytics ──────────────────────────────────────
+
+/// Aggregate metrics for one weekly staker cohort (issue #245).
+///
+/// A cohort groups every address whose first stake landed in the same week:
+/// `cohort_id = staked_at_ledger / (LEDGERS_PER_DAY * 7)`.
+///
+/// - `member_count`: addresses that have ever joined this cohort.
+/// - `active_members`: members that still hold an open position — the ratio of
+///   this to `member_count` is the cohort's retention rate.
+/// - `avg_position`: `total_staked / active_members`, or 0 when none remain.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CohortStats {
+    pub cohort_id: u32,
+    pub member_count: u32,
+    pub total_staked: i128,
+    pub avg_position: i128,
+    pub total_rewards_claimed: i128,
+    pub active_members: u32,
+}

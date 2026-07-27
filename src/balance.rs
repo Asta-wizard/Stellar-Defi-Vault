@@ -1,7 +1,8 @@
 use crate::storage::{
-    AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig, FeeRecipient,
-    GovernanceProposal, LotteryConfig, Milestone, MultisigConfig, PendingAction, PriceCondition,
-    RateHistoryEntry, ReferralStats, StakePosition, VestingEntry,
+    AdminProposal, ChangelogEntry, ClaimWindow, CohortStats, DataKey, DayBucket, DynamicFeeConfig,
+    FeeRecipient, GovernanceProposal, LotteryConfig, MatchingProgram, Milestone, MultisigConfig,
+    PendingAction, PriceCondition, RateHistoryEntry, ReferralStats, StakePosition,
+    UserMatchingStats, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1773,4 +1774,109 @@ pub fn get_proposal_vetoer(env: &Env, proposal_id: u32) -> Option<Address> {
 pub fn set_proposal_vetoer(env: &Env, proposal_id: u32, vetoer: &Address) {
     let key = (Symbol::new(env, "vetoer"), proposal_id);
     env.storage().persistent().set(&key, vetoer);
+}
+
+// ── Issue #242: stake matching program ────────────────────────────────────────
+
+pub fn get_matching_program(env: &Env) -> Option<MatchingProgram> {
+    env.storage().instance().get(&symbol_short!("matchprg"))
+}
+
+pub fn set_matching_program(env: &Env, program: &MatchingProgram) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("matchprg"), program);
+}
+
+pub fn get_user_matching_stats(env: &Env, user: &Address) -> UserMatchingStats {
+    let key = (Symbol::new(env, "usr_match"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(UserMatchingStats { total_matched: 0 })
+}
+
+pub fn set_user_matching_stats(env: &Env, user: &Address, stats: &UserMatchingStats) {
+    let key = (Symbol::new(env, "usr_match"), user.clone());
+    env.storage().persistent().set(&key, stats);
+}
+
+// ── Issue #243: unstake insurance policy ──────────────────────────────────────
+
+pub fn get_unstake_insurance_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("uins_bps"))
+        .unwrap_or(0)
+}
+
+pub fn set_unstake_insurance_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("uins_bps"), &bps);
+}
+
+pub fn is_position_insured(env: &Env, user: &Address) -> bool {
+    let key = (Symbol::new(env, "ins_pos"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_position_insured(env: &Env, user: &Address, insured: bool) {
+    let key = (Symbol::new(env, "ins_pos"), user.clone());
+    env.storage().persistent().set(&key, &insured);
+}
+
+pub fn clear_position_insured(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "ins_pos"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #244: multi-currency claim output token whitelist ───────────────────
+
+pub fn get_output_tokens(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("out_toks"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_output_tokens(env: &Env, tokens: &Vec<Address>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("out_toks"), tokens);
+}
+
+// ── Issue #245: staking cohort analytics ──────────────────────────────────────
+
+pub fn get_cohort_of(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "cohort"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_cohort_of(env: &Env, user: &Address, cohort_id: u32) {
+    let key = (Symbol::new(env, "cohort"), user.clone());
+    env.storage().persistent().set(&key, &cohort_id);
+}
+
+pub fn get_cohort_stats(env: &Env, cohort_id: u32) -> Option<CohortStats> {
+    let key = (Symbol::new(env, "chrt_st"), cohort_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_cohort_stats(env: &Env, cohort_id: u32, stats: &CohortStats) {
+    let key = (Symbol::new(env, "chrt_st"), cohort_id);
+    env.storage().persistent().set(&key, stats);
+}
+
+pub fn get_cohort_ids(env: &Env) -> Vec<u32> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("chrt_ids"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_cohort_ids(env: &Env, ids: &Vec<u32>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("chrt_ids"), ids);
 }
