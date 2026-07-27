@@ -927,3 +927,81 @@ pub struct PriorityBidRecord {
     pub previous_position: u32,
     pub ledger: u32,
 }
+
+// ── Issue #258: pool whitelabel branding ────────────────────────────────────────
+
+/// Whitelabel identity for the pool, set by the admin via `set_branding()` and
+/// read by frontends via `get_branding()` without any off-chain lookup.
+///
+/// Every field is length-capped (see `MAX_BRANDING_*` in vault.rs); exceeding a
+/// cap reverts with the `VaultBrandError` variant naming that field.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrandingConfig {
+    pub display_name: String,
+    pub logo_hash: String,
+    pub website_url: String,
+    pub twitter_handle: String,
+}
+
+// ── Issue #259: staking insurance (principal protection) ────────────────────────
+
+/// Admin-configured insurance product terms (issue #259).
+///
+/// `premium_bps` is the share of every reward claim redirected into the
+/// insurance fund while a policy is active. `max_coverage_per_user` caps the
+/// principal any single policy may cover.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InsuranceProduct {
+    pub premium_bps: u32,
+    pub max_coverage_per_user: i128,
+}
+
+/// A user's active principal-protection policy (issue #259).
+///
+/// `coverage_amount` is snapshotted from the position at purchase time and is
+/// what `declare_shortfall()` pays out from the insurance fund (issue #141).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InsurancePolicy {
+    pub premium_bps: u32,
+    pub coverage_amount: i128,
+    pub active_since: u32,
+    pub last_premium_at: u32,
+}
+
+// ── Issue #260: flash stake ─────────────────────────────────────────────────────
+
+/// Permanent on-chain proof that `user` held `amount` at ledger `ledger`,
+/// produced by `flash_stake()` (issue #260).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlashStakeReceipt {
+    pub user: Address,
+    pub amount: i128,
+    pub ledger: u32,
+    pub receipt_id: u64,
+}
+
+// ── Issue #261: stake-backed loans ──────────────────────────────────────────────
+
+/// Admin-set borrowing terms (issue #261). `max_ltv_bps` bounds the loan
+/// against the borrower's staked principal; `interest_rate_bps` is a simple
+/// (non-compounding) annual rate accrued per ledger.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoanConfig {
+    pub max_ltv_bps: u32,
+    pub interest_rate_bps: u32,
+}
+
+/// A user's outstanding loan against their staking position (issue #261).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loan {
+    pub principal: i128,
+    pub interest_accrued: i128,
+    pub opened_at: u32,
+    pub last_interest_at: u32,
+}

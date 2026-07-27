@@ -937,3 +937,88 @@ pub fn priority_bid_placed(
     env.events()
         .publish(topics, (bid_amount, previous_position, ledger));
 }
+
+// ── Issue #258: pool whitelabel branding ──────────────────────────────────────
+
+pub fn branding_updated(
+    env: &Env,
+    admin: &Address,
+    display_name: &soroban_sdk::String,
+    website_url: &soroban_sdk::String,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("brand_upd"), admin);
+    env.events()
+        .publish(topics, (display_name.clone(), website_url.clone(), ledger));
+}
+
+// ── Issue #259: staking insurance ─────────────────────────────────────────────
+
+pub fn insurance_activated(
+    env: &Env,
+    user: &Address,
+    premium_bps: u32,
+    coverage_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("ins_act"), user);
+    env.events()
+        .publish(topics, (premium_bps, coverage_amount, ledger));
+}
+
+pub fn insurance_cancelled(env: &Env, user: &Address, coverage_amount: i128, ledger: u32) {
+    let topics = (symbol_short!("ins_canc"), user);
+    env.events().publish(topics, (coverage_amount, ledger));
+}
+
+pub fn insurance_premium_paid(env: &Env, user: &Address, premium: i128, ledger: u32) {
+    let topics = (symbol_short!("ins_prem"), user);
+    env.events().publish(topics, (premium, ledger));
+}
+
+pub fn shortfall_paid(env: &Env, user: &Address, payout: i128, ledger: u32) {
+    let topics = (symbol_short!("shortfal"), user);
+    env.events().publish(topics, (payout, ledger));
+}
+
+// ── Issue #260: flash stake ───────────────────────────────────────────────────
+
+pub fn flash_staked(env: &Env, user: &Address, amount: i128, receipt_id: u64, ledger: u32) {
+    let topics = (symbol_short!("flash_st"), user);
+    env.events().publish(topics, (amount, receipt_id, ledger));
+}
+
+// ── Issue #261: stake-backed loans ────────────────────────────────────────────
+
+pub fn loan_opened(env: &Env, user: &Address, amount: i128, total_principal: i128, ledger: u32) {
+    let topics = (symbol_short!("loan_opn"), user);
+    env.events()
+        .publish(topics, (amount, total_principal, ledger));
+}
+
+pub fn loan_repaid(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    remaining_principal: i128,
+    remaining_interest: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("loan_rpy"), user);
+    env.events().publish(
+        topics,
+        (amount, remaining_principal, remaining_interest, ledger),
+    );
+}
+
+pub fn loan_liquidated(
+    env: &Env,
+    user: &Address,
+    debt_covered: i128,
+    shares_slashed: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("loan_liq"), user);
+    env.events()
+        .publish(topics, (debt_covered, shares_slashed, ledger));
+}

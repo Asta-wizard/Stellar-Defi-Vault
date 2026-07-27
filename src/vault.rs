@@ -5,14 +5,15 @@ use soroban_sdk::{
 
 use crate::{
     admin, balance,
-    errors::{VaultError, VaultExtError},
+    errors::{VaultError, VaultExtError, VaultFeatureError},
     events,
     nft::StakeReceiptNFTClient,
     storage::{
         AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
-        BootstrapConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
+        BootstrapConfig, BrandingConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
         ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig,
-        EpochState, FeeRecipient, GovernanceProposal, HalvingConfig, InterfaceId, LeaderboardEntry,
+        EpochState, FeeRecipient, FlashStakeReceipt, GovernanceProposal, HalvingConfig,
+        InsurancePolicy, InsuranceProduct, InterfaceId, LeaderboardEntry, Loan, LoanConfig,
         LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
         PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
@@ -96,6 +97,17 @@ pub(crate) const MAX_AUCTION_BIDS: u32 = 50;
 /// Most `PriorityBidRecord` entries `get_priority_bids()` retains; oldest is
 /// evicted once full (issue #251).
 pub(crate) const MAX_PRIORITY_BID_RECORDS: u32 = 50;
+/// Field length caps for `set_branding()`, in bytes (issue #258). `logo_hash`
+/// is sized for a SHA-256 hex digest.
+pub(crate) const MAX_BRANDING_NAME_LEN: u32 = 50;
+pub(crate) const MAX_BRANDING_LOGO_LEN: u32 = 64;
+pub(crate) const MAX_BRANDING_URL_LEN: u32 = 200;
+pub(crate) const MAX_BRANDING_TWITTER_LEN: u32 = 16;
+/// Most users a single `declare_shortfall()` call may pay out to (issue #259).
+pub(crate) const MAX_SHORTFALL_USERS: u32 = 50;
+/// LTV, in basis points, at or above which `liquidate_loan()` is permitted
+/// (issue #261).
+pub(crate) const LIQUIDATION_LTV_BPS: u32 = 9_000;
 
 #[contract]
 pub struct VaultContract;
@@ -6447,10 +6459,22 @@ impl VaultContract {
         // never leaves the contract's own token balance, it's just
         // reclassified from reward_pool_balance to the insurance fund.
         let (user_reward, insurance_portion) = Self::split_insurance_portion(env, reward);
+        // Issue #259: an active principal-protection policy charges its
+        // premium on every claim, into that same insurance fund.
+        let (user_reward, policy_premium) = Self::deduct_insurance_premium(env, staker, user_reward);
+        let insurance_portion = insurance_portion
+            .checked_add(policy_premium)
+            .ok_or(VaultError::ArithmeticError)?;
         if insurance_portion > 0 {
             let insurance_balance = balance::get_insurance_fund_balance(env);
             balance::set_insurance_fund_balance(env, insurance_balance + insurance_portion);
         }
+
+        // Issue #261: an outstanding stake-backed loan is serviced out of the
+        // reward before any of it reaches the user. The repaid portion never
+        // leaves the contract — it is credited straight back to the reward
+        // pool below.
+        let (user_reward, loan_repayment) = Self::apply_reward_to_loan(env, staker, user_reward)?;
 
         let token_addr = Self::token_address(env)?;
 
@@ -6482,7 +6506,7 @@ impl VaultContract {
             token_client.transfer(&env.current_contract_address(), staker, &user_reward);
         }
 
-        balance::set_reward_pool_balance(env, reward_pool - reward);
+        balance::set_reward_pool_balance(env, reward_pool - reward + loan_repayment);
         // Issue #164: lifetime cumulative reward payout counter, never decreases.
         let total_ever_claimed: i128 = env
             .storage()
@@ -10036,5 +10060,671 @@ impl VaultContract {
         let mut stats = Self::cohort_stats_or_new(env, cohort_id);
         stats.total_rewards_claimed = stats.total_rewards_claimed.saturating_add(reward);
         Self::cohort_save(env, stats);
+    }
+
+    // ── Issue #258: pool whitelabel branding ────────────────────────────────────
+
+    /// Admin sets the pool's whitelabel identity. Overwrites any previous
+    /// branding wholesale — there is no per-field update.
+    ///
+    /// Each field is byte-length capped (`display_name` 50, `logo_hash` 64,
+    /// `website_url` 200, `twitter_handle` 16). Exceeding a cap reverts with
+    /// the `VaultFeatureError` variant that names the offending field, since a
+    /// `#[contracterror]` variant cannot carry the field name as a payload.
+    /// Empty fields are allowed — a pool may set only the subset it has.
+    pub fn set_branding(
+        env: Env,
+        admin: Address,
+        config: BrandingConfig,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if config.display_name.len() > MAX_BRANDING_NAME_LEN {
+            return Err(VaultFeatureError::InvalidBrandingDisplayName);
+        }
+        if config.logo_hash.len() > MAX_BRANDING_LOGO_LEN {
+            return Err(VaultFeatureError::InvalidBrandingLogoHash);
+        }
+        if config.website_url.len() > MAX_BRANDING_URL_LEN {
+            return Err(VaultFeatureError::InvalidBrandingWebsiteUrl);
+        }
+        if config.twitter_handle.len() > MAX_BRANDING_TWITTER_LEN {
+            return Err(VaultFeatureError::InvalidBrandingTwitterHandle);
+        }
+
+        balance::set_branding(&env, &config);
+        events::branding_updated(
+            &env,
+            &admin,
+            &config.display_name,
+            &config.website_url,
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
+    /// Read-only query for the pool's whitelabel identity. Returns `None` when
+    /// `set_branding()` has never been called.
+    pub fn get_branding(env: Env) -> Option<BrandingConfig> {
+        balance::get_branding(&env)
+    }
+
+    // ── Issue #259: staking insurance (principal protection) ───────────────────
+
+    /// Admin configures the opt-in principal-protection product.
+    ///
+    /// `premium_bps` is the share of every subsequent reward claim redirected
+    /// into the insurance fund (issue #141) while a policy is active;
+    /// `max_coverage_per_user` caps the principal a single policy may cover.
+    /// Reconfiguring only affects policies bought afterwards — an existing
+    /// policy keeps the `premium_bps` it was sold at.
+    ///
+    /// Reverts with `InvalidInsuranceProduct` if `premium_bps` exceeds 10 000
+    /// or `max_coverage_per_user` is negative.
+    pub fn set_insurance_product(
+        env: Env,
+        admin: Address,
+        premium_bps: u32,
+        max_coverage_per_user: i128,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if premium_bps > BOOST_BPS_BASE || max_coverage_per_user < 0 {
+            return Err(VaultFeatureError::InvalidInsuranceProduct);
+        }
+        balance::set_insurance_product(
+            &env,
+            &InsuranceProduct {
+                premium_bps,
+                max_coverage_per_user,
+            },
+        );
+        Ok(())
+    }
+
+    /// Read-only query for the configured insurance product terms.
+    pub fn get_insurance_product(env: Env) -> Option<InsuranceProduct> {
+        balance::get_insurance_product(&env)
+    }
+
+    /// Activates a principal-protection policy for `user`.
+    ///
+    /// Coverage is snapshotted from the caller's position at purchase time,
+    /// capped at the product's `max_coverage_per_user` — it does not track the
+    /// position afterwards. Re-purchasing to re-snapshot requires
+    /// `cancel_insurance()` first.
+    pub fn purchase_insurance(env: Env, user: Address) -> Result<i128, VaultFeatureError> {
+        user.require_auth();
+
+        let product =
+            balance::get_insurance_product(&env).ok_or(VaultFeatureError::InsuranceProductNotSet)?;
+        if balance::get_insurance_policy(&env, &user).is_some() {
+            return Err(VaultFeatureError::InsuranceAlreadyActive);
+        }
+
+        let position =
+            Self::build_position(&env, &user)?.ok_or(VaultFeatureError::PositionNotFound)?;
+        let coverage_amount = if position.amount < product.max_coverage_per_user {
+            position.amount
+        } else {
+            product.max_coverage_per_user
+        };
+
+        let ledger = env.ledger().sequence();
+        balance::set_insurance_policy(
+            &env,
+            &user,
+            &InsurancePolicy {
+                premium_bps: product.premium_bps,
+                coverage_amount,
+                active_since: ledger,
+                last_premium_at: ledger,
+            },
+        );
+
+        events::insurance_activated(&env, &user, product.premium_bps, coverage_amount, ledger);
+        Ok(coverage_amount)
+    }
+
+    /// User opts out of principal protection. Premiums already paid are not
+    /// refunded — they stay in the insurance fund.
+    pub fn cancel_insurance(env: Env, user: Address) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        let policy = balance::get_insurance_policy(&env, &user)
+            .ok_or(VaultFeatureError::InsurancePolicyNotFound)?;
+        balance::remove_insurance_policy(&env, &user);
+        events::insurance_cancelled(
+            &env,
+            &user,
+            policy.coverage_amount,
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
+    /// Read-only query for a user's active policy. `None` once cancelled or
+    /// paid out.
+    pub fn get_insurance_policy(env: Env, user: Address) -> Option<InsurancePolicy> {
+        balance::get_insurance_policy(&env, &user)
+    }
+
+    /// Admin declares a shortfall event and pays each affected user their
+    /// covered principal out of the insurance fund (issue #141).
+    ///
+    /// Addresses in `affected_users` without an active policy are skipped
+    /// rather than reverting, so one call can be made against a broad user
+    /// list. Each paid policy is consumed (removed), which also makes a
+    /// duplicate address in the list a no-op on its second occurrence.
+    ///
+    /// Reverts with `InsuranceFundInsufficient` — rolling the whole call back —
+    /// if the fund runs dry partway, and with `TooManyAffectedUsers` above
+    /// `MAX_SHORTFALL_USERS`. Returns the total amount paid out.
+    pub fn declare_shortfall(
+        env: Env,
+        admin: Address,
+        affected_users: Vec<Address>,
+    ) -> Result<i128, VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if affected_users.len() > MAX_SHORTFALL_USERS {
+            return Err(VaultFeatureError::TooManyAffectedUsers);
+        }
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract = env.current_contract_address();
+        let ledger = env.ledger().sequence();
+
+        let mut remaining_fund = balance::get_insurance_fund_balance(&env);
+        let mut total_paid: i128 = 0;
+
+        for user in affected_users.iter() {
+            let policy = match balance::get_insurance_policy(&env, &user) {
+                Some(policy) => policy,
+                None => continue,
+            };
+            if policy.coverage_amount > remaining_fund {
+                return Err(VaultFeatureError::InsuranceFundInsufficient);
+            }
+            if policy.coverage_amount > 0 {
+                token_client.transfer(&contract, &user, &policy.coverage_amount);
+            }
+            remaining_fund -= policy.coverage_amount;
+            total_paid += policy.coverage_amount;
+            balance::remove_insurance_policy(&env, &user);
+            events::shortfall_paid(&env, &user, policy.coverage_amount, ledger);
+        }
+
+        balance::set_insurance_fund_balance(&env, remaining_fund);
+        Ok(total_paid)
+    }
+
+    /// Charges the insurance premium against a reward about to be paid out.
+    ///
+    /// Returns `(effective_reward, premium)` where
+    /// `effective_reward = reward * (10000 - premium_bps) / 10000`. The premium
+    /// is not transferred here — `do_claim` folds it into the insurance-fund
+    /// credit it already performs, so the tokens simply stay in the contract.
+    fn deduct_insurance_premium(env: &Env, user: &Address, reward: i128) -> (i128, i128) {
+        let mut policy = match balance::get_insurance_policy(env, user) {
+            Some(policy) => policy,
+            None => return (reward, 0),
+        };
+
+        let ledger = env.ledger().sequence();
+        policy.last_premium_at = ledger;
+        balance::set_insurance_policy(env, user, &policy);
+
+        if reward <= 0 || policy.premium_bps == 0 {
+            return (reward, 0);
+        }
+
+        let effective = reward.saturating_mul((BOOST_BPS_BASE - policy.premium_bps) as i128)
+            / BOOST_BPS_BASE as i128;
+        let premium = reward - effective;
+        if premium > 0 {
+            events::insurance_premium_paid(env, user, premium, ledger);
+        }
+        (effective, premium)
+    }
+
+    // ── Issue #260: flash stake ────────────────────────────────────────────────
+
+    /// Admin sets the fee, in basis points, deducted from a `flash_stake()`
+    /// amount before it is returned to the caller. 0 makes flash staking free.
+    pub fn set_flash_stake_fee_bps(
+        env: Env,
+        admin: Address,
+        bps: u32,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if bps > BOOST_BPS_BASE {
+            return Err(VaultFeatureError::InvalidFlashStakeFee);
+        }
+        balance::set_flash_stake_fee_bps(&env, bps);
+        Ok(())
+    }
+
+    /// Read-only query for the current flash-stake fee in basis points.
+    pub fn get_flash_stake_fee_bps(env: Env) -> u32 {
+        balance::get_flash_stake_fee_bps(&env)
+    }
+
+    /// Stakes and unstakes `amount` within a single call, leaving behind a
+    /// permanent on-chain receipt that `user` held `amount` at this ledger.
+    /// Useful for snapshot-based airdrops and eligibility checks.
+    ///
+    /// Both legs are token transfers into and straight back out of the
+    /// contract: no shares are minted, so zero ledgers elapse against the
+    /// position and no reward accrues, and no lock-up or early-exit penalty
+    /// can apply — the exit is immediate by construction. Routing through the
+    /// regular `stake`/`unstake` path instead would subject a flash stake to
+    /// cooldown, lock-up and penalty rules the issue explicitly excludes.
+    ///
+    /// `set_flash_stake_fee_bps()` is deducted from `amount` before the
+    /// remainder is returned; the fee goes to the slash treasury when one is
+    /// configured, otherwise to the admin. The receipt always records the full
+    /// pre-fee `amount`, since that is what was actually held.
+    pub fn flash_stake(
+        env: Env,
+        user: Address,
+        amount: i128,
+    ) -> Result<FlashStakeReceipt, VaultFeatureError> {
+        user.require_auth();
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+        Self::require_not_paused(&env)?;
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract = env.current_contract_address();
+        let ledger = env.ledger().sequence();
+
+        // Stake leg.
+        token_client.transfer(&user, &contract, &amount);
+
+        let receipt_id = balance::next_flash_receipt_id(&env);
+        let receipt = FlashStakeReceipt {
+            user: user.clone(),
+            amount,
+            ledger,
+            receipt_id,
+        };
+        balance::set_flash_receipt(&env, receipt_id, &receipt);
+
+        // Unstake leg, net of the fee.
+        let fee = amount
+            .checked_mul(balance::get_flash_stake_fee_bps(&env) as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?
+            / BOOST_BPS_BASE as i128;
+        if fee > 0 {
+            let treasury = match balance::get_slash_treasury(&env) {
+                Some(treasury) => treasury,
+                None => admin::get_admin(&env)?,
+            };
+            token_client.transfer(&contract, &treasury, &fee);
+        }
+        let returned = amount - fee;
+        if returned > 0 {
+            token_client.transfer(&contract, &user, &returned);
+        }
+
+        events::flash_staked(&env, &user, amount, receipt_id, ledger);
+        Ok(receipt)
+    }
+
+    /// Read-only query for a stored flash-stake receipt. Receipts are never
+    /// removed, so this stays readable indefinitely.
+    pub fn get_flash_stake_receipt(env: Env, receipt_id: u64) -> Option<FlashStakeReceipt> {
+        balance::get_flash_receipt(&env, receipt_id)
+    }
+
+    // ── Issue #261: stake-backed loans ─────────────────────────────────────────
+
+    /// Admin sets borrowing terms: `max_ltv_bps` bounds a loan against the
+    /// borrower's staked principal (e.g. 5 000 = 50% LTV) and
+    /// `interest_rate_bps` is a simple, non-compounding annual rate (e.g. 500 =
+    /// 5% APR) accrued per ledger. Both are capped at 10 000.
+    pub fn set_loan_config(
+        env: Env,
+        admin: Address,
+        max_ltv_bps: u32,
+        interest_rate_bps: u32,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if max_ltv_bps > BOOST_BPS_BASE || interest_rate_bps > BOOST_BPS_BASE {
+            return Err(VaultFeatureError::InvalidLoanConfig);
+        }
+        balance::set_loan_config(
+            &env,
+            &LoanConfig {
+                max_ltv_bps,
+                interest_rate_bps,
+            },
+        );
+        Ok(())
+    }
+
+    /// Read-only query for the configured borrowing terms.
+    pub fn get_loan_config(env: Env) -> Option<LoanConfig> {
+        balance::get_loan_config(&env)
+    }
+
+    /// Read-only query for a user's outstanding loan. Interest shown is as of
+    /// the last `borrow`/`repay`/`claim` — call `loan_debt()` for the live
+    /// figure including interest since then.
+    pub fn get_loan(env: Env, user: Address) -> Option<Loan> {
+        balance::get_loan(&env, &user)
+    }
+
+    /// Read-only: total debt (principal + interest) for `user` as of the
+    /// current ledger. 0 when there is no loan.
+    pub fn loan_debt(env: Env, user: Address) -> Result<i128, VaultFeatureError> {
+        let mut loan = match balance::get_loan(&env, &user) {
+            Some(loan) => loan,
+            None => return Ok(0),
+        };
+        Self::accrue_loan_interest(&env, &mut loan)?;
+        loan.principal
+            .checked_add(loan.interest_accrued)
+            .ok_or(VaultFeatureError::ArithmeticError)
+    }
+
+    /// Read-only: how much more `user` may borrow right now, i.e.
+    /// `position.amount * max_ltv_bps / 10000` less current debt. 0 when no
+    /// loan config is set or the user has no position.
+    pub fn max_borrowable(env: Env, user: Address) -> Result<i128, VaultFeatureError> {
+        let config = match balance::get_loan_config(&env) {
+            Some(config) => config,
+            None => return Ok(0),
+        };
+        let position = match Self::build_position(&env, &user)? {
+            Some(position) => position,
+            None => return Ok(0),
+        };
+        let ceiling = position
+            .amount
+            .checked_mul(config.max_ltv_bps as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?
+            / BOOST_BPS_BASE as i128;
+        let debt = Self::loan_debt(env, user)?;
+        Ok((ceiling - debt).max(0))
+    }
+
+    /// Borrows `amount` of reward tokens against the caller's staking position.
+    ///
+    /// Total debt after the draw may not exceed
+    /// `position.amount * max_ltv_bps / 10000`, otherwise the call reverts with
+    /// `ExceedsMaxLtv`. Borrowed tokens are drawn from the reward pool and
+    /// returned to it on repayment, so the pool is made whole either by
+    /// `repay()`, by reward accrual (see `do_claim`), or by
+    /// `liquidate_loan()`. Repeated calls top up a single loan rather than
+    /// opening a second one.
+    ///
+    /// Returns the loan's total principal after the draw.
+    pub fn borrow(env: Env, user: Address, amount: i128) -> Result<i128, VaultFeatureError> {
+        user.require_auth();
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let config = balance::get_loan_config(&env).ok_or(VaultFeatureError::LoanConfigNotSet)?;
+        let position =
+            Self::build_position(&env, &user)?.ok_or(VaultFeatureError::PositionNotFound)?;
+
+        let ledger = env.ledger().sequence();
+        let mut loan = balance::get_loan(&env, &user).unwrap_or(Loan {
+            principal: 0,
+            interest_accrued: 0,
+            opened_at: ledger,
+            last_interest_at: ledger,
+        });
+        Self::accrue_loan_interest(&env, &mut loan)?;
+
+        let ceiling = position
+            .amount
+            .checked_mul(config.max_ltv_bps as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?
+            / BOOST_BPS_BASE as i128;
+        let new_debt = loan
+            .principal
+            .checked_add(loan.interest_accrued)
+            .and_then(|debt| debt.checked_add(amount))
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        if new_debt > ceiling {
+            return Err(VaultFeatureError::ExceedsMaxLtv);
+        }
+
+        let reward_pool = balance::get_reward_pool_balance(&env);
+        if reward_pool < amount {
+            return Err(VaultFeatureError::InsufficientRewardPool);
+        }
+
+        let reward_token = Self::loan_token(&env)?;
+        token::Client::new(&env, &reward_token).transfer(
+            &env.current_contract_address(),
+            &user,
+            &amount,
+        );
+        balance::set_reward_pool_balance(&env, reward_pool - amount);
+
+        loan.principal += amount;
+        balance::set_loan(&env, &user, &loan);
+
+        events::loan_opened(&env, &user, amount, loan.principal, ledger);
+        Ok(loan.principal)
+    }
+
+    /// Repays up to `amount` against the caller's loan, interest first then
+    /// principal. Overpayment is not accepted — only the outstanding debt is
+    /// pulled from the caller. The loan record is removed once fully repaid.
+    ///
+    /// Returns the debt still outstanding after the repayment.
+    pub fn repay(env: Env, user: Address, amount: i128) -> Result<i128, VaultFeatureError> {
+        user.require_auth();
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let mut loan = balance::get_loan(&env, &user).ok_or(VaultFeatureError::LoanNotFound)?;
+        Self::accrue_loan_interest(&env, &mut loan)?;
+
+        let debt = loan
+            .principal
+            .checked_add(loan.interest_accrued)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        let applied = if amount < debt { amount } else { debt };
+
+        if applied > 0 {
+            let reward_token = Self::loan_token(&env)?;
+            token::Client::new(&env, &reward_token).transfer(
+                &user,
+                &env.current_contract_address(),
+                &applied,
+            );
+            balance::set_reward_pool_balance(
+                &env,
+                balance::get_reward_pool_balance(&env) + applied,
+            );
+        }
+
+        Self::settle_loan(&env, &user, &mut loan, applied);
+        Ok(debt - applied)
+    }
+
+    /// Admin liquidates an underwater loan by slashing the borrower's stake to
+    /// cover the debt.
+    ///
+    /// Permitted only once LTV reaches `LIQUIDATION_LTV_BPS` (90%), which a
+    /// loan drifts into as interest accrues; below that the call reverts with
+    /// `LoanNotLiquidatable`. The slashed principal never leaves the contract
+    /// — it is credited back to the reward pool that funded the loan — and the
+    /// loan record is cleared. If the position cannot cover the full debt, the
+    /// whole position is taken and the shortfall is written off.
+    ///
+    /// Returns the debt amount covered.
+    pub fn liquidate_loan(
+        env: Env,
+        admin: Address,
+        user: Address,
+    ) -> Result<i128, VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut loan = balance::get_loan(&env, &user).ok_or(VaultFeatureError::LoanNotFound)?;
+        Self::accrue_loan_interest(&env, &mut loan)?;
+
+        let position =
+            Self::build_position(&env, &user)?.ok_or(VaultFeatureError::PositionNotFound)?;
+        if position.amount <= 0 {
+            return Err(VaultFeatureError::PositionNotFound);
+        }
+
+        let debt = loan
+            .principal
+            .checked_add(loan.interest_accrued)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        let ltv_bps = debt
+            .checked_mul(BOOST_BPS_BASE as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?
+            / position.amount;
+        if ltv_bps < LIQUIDATION_LTV_BPS as i128 {
+            return Err(VaultFeatureError::LoanNotLiquidatable);
+        }
+
+        let covered = if debt < position.amount {
+            debt
+        } else {
+            position.amount
+        };
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let user_shares = balance::get_shares(&env, &user);
+        let mut shares_slashed = balance::amount_to_shares(total_shares, total_deposited, covered)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        if shares_slashed > user_shares {
+            shares_slashed = user_shares;
+        }
+
+        balance::set_shares(&env, &user, user_shares - shares_slashed);
+        balance::set_total_shares(&env, total_shares - shares_slashed);
+        balance::set_total_deposited(&env, (total_deposited - covered).max(0));
+        balance::set_reward_pool_balance(&env, balance::get_reward_pool_balance(&env) + covered);
+        balance::remove_loan(&env, &user);
+
+        events::loan_liquidated(
+            &env,
+            &user,
+            covered,
+            shares_slashed,
+            env.ledger().sequence(),
+        );
+        Ok(covered)
+    }
+
+    /// The token loans are denominated in — the registered reward token, or
+    /// the stake token on single-token pools.
+    fn loan_token(env: &Env) -> Result<Address, VaultError> {
+        match balance::get_reward_token(env) {
+            Some(token) => Ok(token),
+            None => Self::token_address(env),
+        }
+    }
+
+    /// Accrues simple interest on `loan` up to the current ledger and advances
+    /// `last_interest_at`. No-op when no loan config is set (a config set after
+    /// borrowing therefore never back-charges interest for the gap).
+    fn accrue_loan_interest(env: &Env, loan: &mut Loan) -> Result<(), VaultError> {
+        let config = match balance::get_loan_config(env) {
+            Some(config) => config,
+            None => return Ok(()),
+        };
+        let now = env.ledger().sequence();
+        if now <= loan.last_interest_at || loan.principal <= 0 {
+            loan.last_interest_at = now;
+            return Ok(());
+        }
+
+        let elapsed = (now - loan.last_interest_at) as i128;
+        let interest = loan
+            .principal
+            .checked_mul(config.interest_rate_bps as i128)
+            .ok_or(VaultError::ArithmeticError)?
+            .checked_mul(elapsed)
+            .ok_or(VaultError::ArithmeticError)?
+            / (BOOST_BPS_BASE as i128 * STELLAR_LEDGERS_PER_YEAR as i128);
+
+        loan.interest_accrued = loan
+            .interest_accrued
+            .checked_add(interest)
+            .ok_or(VaultError::ArithmeticError)?;
+        loan.last_interest_at = now;
+        Ok(())
+    }
+
+    /// Applies `applied` to `loan` — interest first, then principal — and
+    /// persists it, removing the record entirely once the debt is cleared.
+    fn settle_loan(env: &Env, user: &Address, loan: &mut Loan, applied: i128) {
+        let to_interest = if applied < loan.interest_accrued {
+            applied
+        } else {
+            loan.interest_accrued
+        };
+        loan.interest_accrued -= to_interest;
+        loan.principal = (loan.principal - (applied - to_interest)).max(0);
+
+        if loan.principal == 0 && loan.interest_accrued == 0 {
+            balance::remove_loan(env, user);
+        } else {
+            balance::set_loan(env, user, loan);
+        }
+
+        events::loan_repaid(
+            env,
+            user,
+            applied,
+            loan.principal,
+            loan.interest_accrued,
+            env.ledger().sequence(),
+        );
+    }
+
+    /// Services an outstanding loan out of a reward about to be paid, before
+    /// the user receives anything (issue #261).
+    ///
+    /// Returns `(remaining_reward, repaid)`. The repaid portion stays inside
+    /// the contract; `do_claim` credits it back to the reward pool that funded
+    /// the loan.
+    fn apply_reward_to_loan(
+        env: &Env,
+        user: &Address,
+        reward: i128,
+    ) -> Result<(i128, i128), VaultError> {
+        if reward <= 0 {
+            return Ok((reward, 0));
+        }
+        let mut loan = match balance::get_loan(env, user) {
+            Some(loan) => loan,
+            None => return Ok((reward, 0)),
+        };
+        Self::accrue_loan_interest(env, &mut loan)?;
+
+        let debt = loan
+            .principal
+            .checked_add(loan.interest_accrued)
+            .ok_or(VaultError::ArithmeticError)?;
+        if debt <= 0 {
+            balance::remove_loan(env, user);
+            return Ok((reward, 0));
+        }
+
+        let applied = if reward < debt { reward } else { debt };
+        Self::settle_loan(env, user, &mut loan, applied);
+        Ok((reward - applied, applied))
     }
 }
