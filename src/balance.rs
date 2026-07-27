@@ -1774,3 +1774,49 @@ pub fn set_proposal_vetoer(env: &Env, proposal_id: u32, vetoer: &Address) {
     let key = (Symbol::new(env, "vetoer"), proposal_id);
     env.storage().persistent().set(&key, vetoer);
 }
+
+// ── Issue #256: governance vote weight delegation ─────────────────────────────
+
+pub fn get_vote_delegate(env: &Env, user: &Address) -> Option<Address> {
+    let key = (Symbol::new(env, "votedeleg"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_vote_delegate(env: &Env, user: &Address, delegate: &Address) {
+    let key = (Symbol::new(env, "votedeleg"), user.clone());
+    env.storage().persistent().set(&key, delegate);
+}
+
+pub fn remove_vote_delegate(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "votedeleg"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+/// Snapshot of the weight `user` contributed to their delegate at the moment
+/// they delegated — used to subtract exactly this amount from the delegate's
+/// `delegated_vote_weight` accumulator on revoke, rather than a possibly
+/// since-changed live recomputation.
+pub fn get_delegated_weight_snapshot(env: &Env, user: &Address) -> i128 {
+    let key = (Symbol::new(env, "delegsnap"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_delegated_weight_snapshot(env: &Env, user: &Address, weight: i128) {
+    let key = (Symbol::new(env, "delegsnap"), user.clone());
+    env.storage().persistent().set(&key, &weight);
+}
+
+pub fn remove_delegated_weight_snapshot(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "delegsnap"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+pub fn get_delegated_vote_weight(env: &Env, delegate: &Address) -> i128 {
+    let key = (Symbol::new(env, "delegwt"), delegate.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_delegated_vote_weight(env: &Env, delegate: &Address, weight: i128) {
+    let key = (Symbol::new(env, "delegwt"), delegate.clone());
+    env.storage().persistent().set(&key, &weight);
+}

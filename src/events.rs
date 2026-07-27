@@ -887,3 +887,17 @@ pub fn proposal_vetoed(
     env.events()
         .publish(topics, (proposal_id, user_stake_bps, ledger));
 }
+
+// ── Issue #256: governance vote weight delegation ──────────────────────────────
+
+pub fn vote_delegated(
+    env: &Env,
+    delegator: &Address,
+    delegate: &Address,
+    weight: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("votedeleg"), delegator);
+    env.events()
+        .publish(topics, (delegate.clone(), weight, ledger));
+}

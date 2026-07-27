@@ -6913,3 +6913,131 @@ fn test_optimal_claim_frequency_compounding_gain_is_positive() {
     assert!(advice.recommended_interval_ledgers < STELLAR_LEDGERS_PER_YEAR);
     assert!(advice.annual_compounding_gain > 0);
 }
+
+// ── Issue #256: governance vote weight delegation ───────────────────────────────
+
+#[test]
+fn test_delegate_vote_weight_requires_active_position() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(result, Err(Ok(VaultError::PositionNotFound)));
+}
+
+#[test]
+fn test_delegate_votes_with_combined_weight() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+
+    let id = f
+        .vault
+        .create_proposal(&f.bob, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), Some(f.bob.clone()));
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 300_000);
+
+    f.vault.vote(&f.bob, &id, &true);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 300_000 + 700_000);
+}
+
+#[test]
+fn test_delegator_cannot_also_vote() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+    let id = f
+        .vault
+        .create_proposal(&f.bob, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+
+    let result = f.vault.try_vote(&f.alice, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+}
+
+#[test]
+fn test_revoke_vote_delegation_restores_own_weight() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+    f.vault.revoke_vote_delegation(&f.alice);
+
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), None);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 0);
+
+    let id = f
+        .vault
+        .create_proposal(&f.bob, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.vote(&f.alice, &id, &true);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 300_000);
+}
+
+#[test]
+fn test_revoke_vote_delegation_with_no_delegate_is_noop() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &300_000);
+    // Should not revert even though alice never delegated.
+    f.vault.revoke_vote_delegation(&f.alice);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), None);
+}
+
+#[test]
+fn test_self_delegation_is_noop() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.alice);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), None);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.alice), 0);
+
+    // Self-delegation being a no-op means alice can still vote directly.
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.vote(&f.alice, &id, &true);
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 300_000);
+}
+
+#[test]
+fn test_redelegation_to_an_already_delegated_address_rejected() {
+    let f = VaultFixture::new();
+    let charlie = Address::generate(&f.env);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+
+    // Bob has already delegated his own vote weight to charlie.
+    f.vault.delegate_vote_weight(&f.bob, &charlie);
+
+    // Alice cannot now delegate to bob — that would be a second hop.
+    let result = f.vault.try_delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(result, Err(Ok(VaultError::NotADelegate)));
+}
+
+#[test]
+fn test_redelegating_to_a_new_delegate_moves_weight() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+    let charlie = Address::generate(&f.env);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 300_000);
+
+    f.vault.delegate_vote_weight(&f.alice, &charlie);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 0);
+    assert_eq!(f.vault.get_delegated_vote_weight(&charlie), 300_000);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), Some(charlie));
+}

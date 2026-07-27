@@ -7802,13 +7802,17 @@ impl VaultContract {
     }
 
     /// Vote on an open proposal, weighted by the caller's staked token amount
-    /// at the time of the call. Voting power is not adjusted retroactively if
-    /// the caller stakes more (or less) after voting.
+    /// at the time of the call, plus any weight delegated to the caller via
+    /// `delegate_vote_weight()` (issue #256). Voting power is not adjusted
+    /// retroactively if the caller stakes more (or less) after voting.
     ///
     /// Reverts with `PositionNotFound` if the proposal does not exist or the
     /// caller has no active position, `TooManyStakers` if the caller already
-    /// voted on this proposal, or `BatchKycTooLarge` if voting has ended or
-    /// the proposal was already enacted.
+    /// voted on this proposal, `BatchKycTooLarge` if voting has ended or the
+    /// proposal was already enacted, or `Unauthorized` (reused — the caller
+    /// has routed their vote weight to a delegate via `delegate_vote_weight`
+    /// and so cannot also vote directly) if the caller currently has a
+    /// delegate set.
     pub fn vote(
         env: Env,
         user: Address,
@@ -7818,6 +7822,10 @@ impl VaultContract {
         user.require_auth();
         let mut proposal =
             balance::get_proposal(&env, proposal_id).ok_or(VaultError::PositionNotFound)?;
+
+        if balance::get_vote_delegate(&env, &user).is_some() {
+            return Err(VaultError::Unauthorized);
+        }
 
         let shares = balance::get_shares(&env, &user);
         if shares == 0 {
@@ -7832,7 +7840,11 @@ impl VaultContract {
 
         let total_shares = balance::get_total_shares(&env);
         let total_deposited = balance::get_total_deposited(&env);
-        let weight = balance::shares_to_amount(total_shares, total_deposited, shares)
+        let own_weight = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+        let delegated_weight = balance::get_delegated_vote_weight(&env, &user);
+        let weight = own_weight
+            .checked_add(delegated_weight)
             .ok_or(VaultError::ArithmeticError)?;
 
         if support {
@@ -7937,6 +7949,100 @@ impl VaultContract {
     /// Read-only query for a governance proposal by id.
     pub fn get_proposal(env: Env, id: u32) -> Option<GovernanceProposal> {
         balance::get_proposal(&env, id)
+    }
+
+    // ── Issue #256: governance vote weight delegation ──────────────────────────
+
+    /// Delegate `user`'s governance vote weight to `delegate`. Once
+    /// delegated, `delegate`'s own `vote()` calls count `user`'s live weight
+    /// (staked amount at the time each vote is cast) in addition to their
+    /// own, and `user` can no longer call `vote()` directly (reverts
+    /// `Unauthorized`) until they revoke.
+    ///
+    /// Self-delegation (`delegate == user`) is a no-op, equivalent to no
+    /// delegation. Re-delegating to a new address first removes the prior
+    /// delegation's contribution to that delegate's combined weight.
+    ///
+    /// One hop only: reverts `NotADelegate` (reused — closest existing error
+    /// for "this address isn't a valid delegation target") if `delegate` has
+    /// themselves delegated their vote weight elsewhere. Reverts
+    /// `PositionNotFound` if `user` has no active stake.
+    pub fn delegate_vote_weight(
+        env: Env,
+        user: Address,
+        delegate: Address,
+    ) -> Result<(), VaultError> {
+        user.require_auth();
+
+        if delegate == user {
+            return Ok(());
+        }
+        if balance::get_vote_delegate(&env, &delegate).is_some() {
+            return Err(VaultError::NotADelegate);
+        }
+
+        let shares = balance::get_shares(&env, &user);
+        if shares == 0 {
+            return Err(VaultError::PositionNotFound);
+        }
+
+        if let Some(prev_delegate) = balance::get_vote_delegate(&env, &user) {
+            if prev_delegate == delegate {
+                return Ok(());
+            }
+            Self::withdraw_delegated_weight(&env, &user, &prev_delegate);
+        }
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let weight = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        balance::set_vote_delegate(&env, &user, &delegate);
+        balance::set_delegated_weight_snapshot(&env, &user, weight);
+        let combined = balance::get_delegated_vote_weight(&env, &delegate)
+            .checked_add(weight)
+            .ok_or(VaultError::ArithmeticError)?;
+        balance::set_delegated_vote_weight(&env, &delegate, combined);
+
+        events::vote_delegated(&env, &user, &delegate, weight, env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Revoke `user`'s current vote delegation, if any, restoring their
+    /// ability to vote directly. A no-op if `user` has no delegate set.
+    pub fn revoke_vote_delegation(env: Env, user: Address) -> Result<(), VaultError> {
+        user.require_auth();
+
+        let delegate = match balance::get_vote_delegate(&env, &user) {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        Self::withdraw_delegated_weight(&env, &user, &delegate);
+        balance::remove_vote_delegate(&env, &user);
+        Ok(())
+    }
+
+    /// Subtract `user`'s stored delegated-weight snapshot from `delegate`'s
+    /// combined weight accumulator, and clear the snapshot. Shared by
+    /// `revoke_vote_delegation` and by `delegate_vote_weight` when
+    /// re-delegating to a new address.
+    fn withdraw_delegated_weight(env: &Env, user: &Address, delegate: &Address) {
+        let snapshot = balance::get_delegated_weight_snapshot(env, user);
+        let remaining = (balance::get_delegated_vote_weight(env, delegate) - snapshot).max(0);
+        balance::set_delegated_vote_weight(env, delegate, remaining);
+        balance::remove_delegated_weight_snapshot(env, user);
+    }
+
+    /// Read-only: the address `user` has delegated their vote weight to, if any.
+    pub fn get_vote_delegate(env: Env, user: Address) -> Option<Address> {
+        balance::get_vote_delegate(&env, &user)
+    }
+
+    /// Read-only: the sum of vote weight currently delegated to `delegate`,
+    /// as of each delegator's snapshot at the time they delegated.
+    pub fn get_delegated_vote_weight(env: Env, delegate: Address) -> i128 {
+        balance::get_delegated_vote_weight(&env, &delegate)
     }
 
     // ── Reward refill alert helper ─────────────────────────────────────────────
