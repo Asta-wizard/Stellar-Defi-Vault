@@ -903,3 +903,15 @@ pub struct OptimalClaimAdvice {
     pub annual_compounding_gain: i128,
     pub break_even_reward_per_claim: i128,
 }
+
+// ── Issue #257: auto-convert reward on claim ────────────────────────────────────
+
+/// A user's auto-convert-on-claim configuration (issue #257): reward tokens
+/// are swapped to `target_token` via the configured DEX router (issue #205)
+/// on every `claim`, subject to `min_output_bps` slippage protection.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoConvertConfig {
+    pub target_token: Address,
+    pub min_output_bps: u32,
+}

@@ -9,18 +9,18 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        AdminAction, AdminProposal, AuctionBid, BoostTierProgress, BootstrapConfig, CampaignInfo,
-        CapacityAuction, ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey,
-        DayBucket, DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal,
-        HalvingConfig, InterfaceId, LeaderboardEntry, LotteryConfig, MerkleRoot, MigrationExport,
-        Milestone, MilestoneCondition, MultisigConfig, OptimalClaimAdvice, PauseInfo, PauseReason,
-        PendingAction, PoolComparison, PoolConfig, PoolHealthReport, PoolStats, PriceCondition,
-        ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode,
-        ReputationScore, RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule,
-        SmoothingStatus, StakeAction, StakeHistoryEntry, StakePosition, StakeStreak,
-        StakingCertificate, StakingEfficiencyScore, StorageUsageReport, TaxReport, Tournament,
-        TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
-        VestingEntry,
+        AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
+        BootstrapConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
+        ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig,
+        EpochState, FeeRecipient, GovernanceProposal, HalvingConfig, InterfaceId, LeaderboardEntry,
+        LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
+        OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
+        PoolHealthReport, PoolStats, PriceCondition, ProposableParam, RateHistoryEntry,
+        ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore, RewardMultiplierBreakdown,
+        RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction, StakeHistoryEntry,
+        StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore, StorageUsageReport,
+        TaxReport, Tournament, TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats,
+        UserSummary, VestingEntry,
     },
 };
 
@@ -1278,6 +1278,137 @@ impl VaultContract {
         );
 
         Ok(shares)
+    }
+
+    // ── Issue #257: auto-convert reward on claim ────────────────────────────
+
+    /// Opt in to auto-converting future claimed rewards to `target_token` via
+    /// the configured DEX router (issue #205), instead of receiving the raw
+    /// reward token. `min_output_bps` is slippage protection relative to the
+    /// reward amount itself (10 000 = no loss tolerated; 9 500 = accept at
+    /// most 5% slippage) — mirrors `swap_and_stake`'s `min_stake_amount`
+    /// convention, just expressed in bps since this is a standing
+    /// configuration rather than a per-call amount.
+    ///
+    /// Takes effect on the next `claim` (including `stake_and_claim`,
+    /// `claim_on_behalf`, and any other path that pays out immediately).
+    /// Vested claims (`vesting_period > 0`) are unaffected — a vesting entry
+    /// defers payout to a future claim, which converts then if still
+    /// configured. If the swap's output falls short of `min_output_bps`,
+    /// the whole `claim` reverts with `InvalidRate` (reused) rather than
+    /// falling back to a reward-token payout in the same transaction — see
+    /// `try_auto_convert_reward`'s doc comment for why a same-transaction
+    /// fallback isn't fund-safe here. Reverts `InvalidRate` immediately if
+    /// `min_output_bps` itself exceeds 10 000.
+    pub fn set_auto_convert(
+        env: Env,
+        user: Address,
+        target_token: Address,
+        min_output_bps: u32,
+    ) -> Result<(), VaultError> {
+        user.require_auth();
+        if min_output_bps > 10_000 {
+            return Err(VaultError::InvalidRate);
+        }
+        balance::set_auto_convert_config(
+            &env,
+            &user,
+            &AutoConvertConfig {
+                target_token,
+                min_output_bps,
+            },
+        );
+        Ok(())
+    }
+
+    /// Disable auto-convert for `user`; future claims pay out in the raw
+    /// reward token again. A no-op if auto-convert wasn't configured.
+    pub fn clear_auto_convert(env: Env, user: Address) -> Result<(), VaultError> {
+        user.require_auth();
+        balance::remove_auto_convert_config(&env, &user);
+        Ok(())
+    }
+
+    /// Read-only: `user`'s current auto-convert configuration, if any.
+    pub fn get_auto_convert_config(env: Env, user: Address) -> Option<AutoConvertConfig> {
+        balance::get_auto_convert_config(&env, &user)
+    }
+
+    /// If `staker` has auto-convert enabled, swap the just-claimed
+    /// `reward_amount` (in `reward_token`) into their configured target
+    /// token via the DEX router and deliver it to `staker`. Returns
+    /// `Ok(true)` if the swap succeeded — the caller must then skip its own
+    /// direct reward-token transfer, since funds already moved. Returns
+    /// `Ok(false)` (nothing transferred, caller must pay out `reward_amount`
+    /// in `reward_token` as usual) if no auto-convert is configured, no DEX
+    /// router is configured, or the target token equals `reward_token`.
+    ///
+    /// Returns `Err(InvalidRate)` (reused) if the swap's output falls below
+    /// `min_output_bps` of `reward_amount` — which aborts the whole `claim`,
+    /// not just the conversion. This is a deliberate departure from a
+    /// same-transaction "skip conversion, pay reward_token instead"
+    /// fallback: the swap's destination is this contract (not `staker`
+    /// directly) specifically so a shortfall can be detected before any
+    /// tokens reach the user, mirroring `swap_and_stake`'s own defensive
+    /// re-check (issue #205) — but unlike that function, this runs inside
+    /// `do_claim`, where a *partial* failure can't safely fall back to a
+    /// second reward-token transfer: the swap has already pulled
+    /// `reward_amount` out of this contract's balance, so paying it out
+    /// again would silently double-spend from the shared reward pool.
+    /// Soroban also has no way to let a nested cross-contract call revert
+    /// without aborting the whole invocation, so relying on the router
+    /// itself to enforce the minimum (and catching that failure) isn't an
+    /// option either. Reverting the whole claim is therefore the only
+    /// fund-safe outcome; the caller may retry after disabling auto-convert
+    /// or once market conditions improve.
+    fn try_auto_convert_reward(
+        env: &Env,
+        staker: &Address,
+        reward_token: &Address,
+        reward_amount: i128,
+    ) -> Result<bool, VaultError> {
+        let config = match balance::get_auto_convert_config(env, staker) {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+        if config.target_token == *reward_token {
+            return Ok(false);
+        }
+        let router = match balance::get_dex_router(env) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+
+        let min_output = reward_amount
+            .checked_mul(config.min_output_bps as i128)
+            .and_then(|v| v.checked_div(10_000))
+            .unwrap_or(i128::MAX);
+
+        let router_client = DexRouterClient::new(env, &router);
+        let converted_amount = router_client.swap(
+            reward_token,
+            &config.target_token,
+            &reward_amount,
+            &0,
+            &env.current_contract_address(),
+        );
+
+        if converted_amount < min_output {
+            return Err(VaultError::InvalidRate);
+        }
+
+        let target_client = token::Client::new(env, &config.target_token);
+        target_client.transfer(&env.current_contract_address(), staker, &converted_amount);
+
+        events::reward_converted(
+            env,
+            staker,
+            reward_amount,
+            converted_amount,
+            &config.target_token,
+            env.ledger().sequence(),
+        );
+        Ok(true)
     }
 
     /// Admin: enable or disable `bridge_packet` event emission on stake/unstake
@@ -6094,7 +6225,7 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::VestingEntries(staker.clone()), &entries);
-        } else {
+        } else if !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)? {
             let token_client = token::Client::new(env, &token_addr);
             token_client.transfer(&env.current_contract_address(), staker, &user_reward);
         }

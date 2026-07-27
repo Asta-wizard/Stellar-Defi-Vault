@@ -901,3 +901,25 @@ pub fn vote_delegated(
     env.events()
         .publish(topics, (delegate.clone(), weight, ledger));
 }
+
+// ── Issue #257: auto-convert reward on claim ────────────────────────────────────
+
+pub fn reward_converted(
+    env: &Env,
+    user: &Address,
+    reward_amount: i128,
+    converted_amount: i128,
+    target_token: &Address,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rwd_conv"), user);
+    env.events().publish(
+        topics,
+        (
+            reward_amount,
+            converted_amount,
+            target_token.clone(),
+            ledger,
+        ),
+    );
+}

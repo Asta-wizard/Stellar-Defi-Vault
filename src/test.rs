@@ -7041,3 +7041,111 @@ fn test_redelegating_to_a_new_delegate_moves_weight() {
     assert_eq!(f.vault.get_delegated_vote_weight(&charlie), 300_000);
     assert_eq!(f.vault.get_vote_delegate(&f.alice), Some(charlie));
 }
+
+// ── Issue #257: auto-convert reward on claim ────────────────────────────────────
+
+#[test]
+fn test_auto_convert_swaps_reward_to_target_token() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    let (target_addr, target_token, target_admin) = create_token(&f.env, &f.admin);
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&1); // 1:1 swap
+    target_admin.mint(&router_id, &1_000_000);
+
+    f.vault.set_dex_router(&router_id);
+    f.vault.set_auto_convert(&f.alice, &target_addr, &9_500_u32);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let claimed = f.vault.claim(&f.alice);
+
+    assert!(claimed > 0);
+    // Reward was converted: alice's stake/reward-token balance is unchanged...
+    assert_eq!(f.token.balance(&f.alice), stake_token_before);
+    // ...and she received the target token instead, 1:1 with the claimed amount.
+    assert_eq!(target_token.balance(&f.alice), claimed);
+}
+
+#[test]
+fn test_auto_convert_slippage_reverts_whole_claim() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    let (target_addr, target_token, target_admin) = create_token(&f.env, &f.admin);
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&2); // output is half the input: heavy slippage
+    target_admin.mint(&router_id, &1_000_000);
+
+    f.vault.set_dex_router(&router_id);
+    // Requires at least 95% of the reward amount out — divisor=2 (50%) fails this.
+    f.vault.set_auto_convert(&f.alice, &target_addr, &9_500_u32);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let result = f.vault.try_claim(&f.alice);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+
+    // The whole claim reverted: nothing was paid out in either token.
+    assert_eq!(f.token.balance(&f.alice), stake_token_before);
+    assert_eq!(target_token.balance(&f.alice), 0);
+}
+
+#[test]
+fn test_clear_auto_convert_restores_normal_claim() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    let (target_addr, target_token, target_admin) = create_token(&f.env, &f.admin);
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&1);
+    target_admin.mint(&router_id, &1_000_000);
+    f.vault.set_dex_router(&router_id);
+
+    f.vault.set_auto_convert(&f.alice, &target_addr, &9_500_u32);
+    assert!(f.vault.get_auto_convert_config(&f.alice).is_some());
+    f.vault.clear_auto_convert(&f.alice);
+    assert!(f.vault.get_auto_convert_config(&f.alice).is_none());
+
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let claimed = f.vault.claim(&f.alice);
+
+    assert!(claimed > 0);
+    assert_eq!(f.token.balance(&f.alice), stake_token_before + claimed);
+    assert_eq!(target_token.balance(&f.alice), 0);
+}
+
+#[test]
+fn test_claim_with_no_auto_convert_config_pays_reward_token() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let claimed = f.vault.claim(&f.alice);
+
+    assert!(claimed > 0);
+    assert_eq!(f.token.balance(&f.alice), stake_token_before + claimed);
+}
+
+#[test]
+fn test_set_auto_convert_rejects_bps_above_10000() {
+    let f = VaultFixture::new();
+    let (target_addr, _target_token, _target_admin) = create_token(&f.env, &f.admin);
+    let result = f
+        .vault
+        .try_set_auto_convert(&f.alice, &target_addr, &10_001_u32);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}

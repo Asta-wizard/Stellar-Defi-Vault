@@ -1,7 +1,7 @@
 use crate::storage::{
-    AdminProposal, ChangelogEntry, ClaimWindow, DataKey, DayBucket, DynamicFeeConfig, FeeRecipient,
-    GovernanceProposal, LotteryConfig, Milestone, MultisigConfig, PendingAction, PriceCondition,
-    RateHistoryEntry, ReferralStats, StakePosition, VestingEntry,
+    AdminProposal, AutoConvertConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket,
+    DynamicFeeConfig, FeeRecipient, GovernanceProposal, LotteryConfig, Milestone, MultisigConfig,
+    PendingAction, PriceCondition, RateHistoryEntry, ReferralStats, StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1819,4 +1819,21 @@ pub fn get_delegated_vote_weight(env: &Env, delegate: &Address) -> i128 {
 pub fn set_delegated_vote_weight(env: &Env, delegate: &Address, weight: i128) {
     let key = (Symbol::new(env, "delegwt"), delegate.clone());
     env.storage().persistent().set(&key, &weight);
+}
+
+// ── Issue #257: auto-convert reward on claim ──────────────────────────────────
+
+pub fn get_auto_convert_config(env: &Env, user: &Address) -> Option<AutoConvertConfig> {
+    let key = (Symbol::new(env, "autoconv"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_auto_convert_config(env: &Env, user: &Address, config: &AutoConvertConfig) {
+    let key = (Symbol::new(env, "autoconv"), user.clone());
+    env.storage().persistent().set(&key, config);
+}
+
+pub fn remove_auto_convert_config(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "autoconv"), user.clone());
+    env.storage().persistent().remove(&key);
 }
