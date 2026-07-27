@@ -1,8 +1,8 @@
 use crate::storage::{
-    AdminProposal, ChangelogEntry, ClaimWindow, CohortStats, DataKey, DayBucket, DynamicFeeConfig,
-    FeeRecipient, GovernanceProposal, LotteryConfig, MatchingProgram, Milestone, MultisigConfig,
-    PendingAction, PriceCondition, RateHistoryEntry, ReferralStats, StakePosition,
-    UserMatchingStats, VestingEntry,
+    AdminProposal, AutoConvertConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket,
+    DynamicFeeConfig, FeeRecipient, GovernanceProposal, LotteryConfig, Milestone, MultisigConfig,
+    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
+    StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1776,107 +1776,104 @@ pub fn set_proposal_vetoer(env: &Env, proposal_id: u32, vetoer: &Address) {
     env.storage().persistent().set(&key, vetoer);
 }
 
-// ── Issue #242: stake matching program ────────────────────────────────────────
+// ── Issue #256: governance vote weight delegation ─────────────────────────────
 
-pub fn get_matching_program(env: &Env) -> Option<MatchingProgram> {
-    env.storage().instance().get(&symbol_short!("matchprg"))
+pub fn get_vote_delegate(env: &Env, user: &Address) -> Option<Address> {
+    let key = (Symbol::new(env, "votedeleg"), user.clone());
+    env.storage().persistent().get(&key)
 }
 
-pub fn set_matching_program(env: &Env, program: &MatchingProgram) {
-    env.storage()
-        .instance()
-        .set(&symbol_short!("matchprg"), program);
+pub fn set_vote_delegate(env: &Env, user: &Address, delegate: &Address) {
+    let key = (Symbol::new(env, "votedeleg"), user.clone());
+    env.storage().persistent().set(&key, delegate);
 }
 
-pub fn get_user_matching_stats(env: &Env, user: &Address) -> UserMatchingStats {
-    let key = (Symbol::new(env, "usr_match"), user.clone());
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or(UserMatchingStats { total_matched: 0 })
-}
-
-pub fn set_user_matching_stats(env: &Env, user: &Address, stats: &UserMatchingStats) {
-    let key = (Symbol::new(env, "usr_match"), user.clone());
-    env.storage().persistent().set(&key, stats);
-}
-
-// ── Issue #243: unstake insurance policy ──────────────────────────────────────
-
-pub fn get_unstake_insurance_bps(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&symbol_short!("uins_bps"))
-        .unwrap_or(0)
-}
-
-pub fn set_unstake_insurance_bps(env: &Env, bps: u32) {
-    env.storage()
-        .instance()
-        .set(&symbol_short!("uins_bps"), &bps);
-}
-
-pub fn is_position_insured(env: &Env, user: &Address) -> bool {
-    let key = (Symbol::new(env, "ins_pos"), user.clone());
-    env.storage().persistent().get(&key).unwrap_or(false)
-}
-
-pub fn set_position_insured(env: &Env, user: &Address, insured: bool) {
-    let key = (Symbol::new(env, "ins_pos"), user.clone());
-    env.storage().persistent().set(&key, &insured);
-}
-
-pub fn clear_position_insured(env: &Env, user: &Address) {
-    let key = (Symbol::new(env, "ins_pos"), user.clone());
+pub fn remove_vote_delegate(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "votedeleg"), user.clone());
     env.storage().persistent().remove(&key);
 }
 
-// ── Issue #244: multi-currency claim output token whitelist ───────────────────
-
-pub fn get_output_tokens(env: &Env) -> Vec<Address> {
-    env.storage()
-        .instance()
-        .get(&symbol_short!("out_toks"))
-        .unwrap_or(Vec::new(env))
+/// Snapshot of the weight `user` contributed to their delegate at the moment
+/// they delegated — used to subtract exactly this amount from the delegate's
+/// `delegated_vote_weight` accumulator on revoke, rather than a possibly
+/// since-changed live recomputation.
+pub fn get_delegated_weight_snapshot(env: &Env, user: &Address) -> i128 {
+    let key = (Symbol::new(env, "delegsnap"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
 }
 
-pub fn set_output_tokens(env: &Env, tokens: &Vec<Address>) {
-    env.storage()
-        .instance()
-        .set(&symbol_short!("out_toks"), tokens);
+pub fn set_delegated_weight_snapshot(env: &Env, user: &Address, weight: i128) {
+    let key = (Symbol::new(env, "delegsnap"), user.clone());
+    env.storage().persistent().set(&key, &weight);
 }
 
-// ── Issue #245: staking cohort analytics ──────────────────────────────────────
+pub fn remove_delegated_weight_snapshot(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "delegsnap"), user.clone());
+    env.storage().persistent().remove(&key);
+}
 
-pub fn get_cohort_of(env: &Env, user: &Address) -> Option<u32> {
-    let key = (Symbol::new(env, "cohort"), user.clone());
+pub fn get_delegated_vote_weight(env: &Env, delegate: &Address) -> i128 {
+    let key = (Symbol::new(env, "delegwt"), delegate.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_delegated_vote_weight(env: &Env, delegate: &Address, weight: i128) {
+    let key = (Symbol::new(env, "delegwt"), delegate.clone());
+    env.storage().persistent().set(&key, &weight);
+}
+
+// ── Issue #257: auto-convert reward on claim ──────────────────────────────────
+
+pub fn get_auto_convert_config(env: &Env, user: &Address) -> Option<AutoConvertConfig> {
+    let key = (Symbol::new(env, "autoconv"), user.clone());
     env.storage().persistent().get(&key)
 }
 
-pub fn set_cohort_of(env: &Env, user: &Address, cohort_id: u32) {
-    let key = (Symbol::new(env, "cohort"), user.clone());
-    env.storage().persistent().set(&key, &cohort_id);
+pub fn set_auto_convert_config(env: &Env, user: &Address, config: &AutoConvertConfig) {
+    let key = (Symbol::new(env, "autoconv"), user.clone());
+    env.storage().persistent().set(&key, config);
 }
 
-pub fn get_cohort_stats(env: &Env, cohort_id: u32) -> Option<CohortStats> {
-    let key = (Symbol::new(env, "chrt_st"), cohort_id);
-    env.storage().persistent().get(&key)
+pub fn remove_auto_convert_config(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "autoconv"), user.clone());
+    env.storage().persistent().remove(&key);
 }
 
-pub fn set_cohort_stats(env: &Env, cohort_id: u32, stats: &CohortStats) {
-    let key = (Symbol::new(env, "chrt_st"), cohort_id);
-    env.storage().persistent().set(&key, stats);
-}
+// ── Issue #251: exit-queue priority bidding ───────────────────────────────────
 
-pub fn get_cohort_ids(env: &Env) -> Vec<u32> {
+pub fn get_exit_queue(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
-        .get(&symbol_short!("chrt_ids"))
+        .get(&symbol_short!("exitq"))
         .unwrap_or(Vec::new(env))
 }
 
-pub fn set_cohort_ids(env: &Env, ids: &Vec<u32>) {
+pub fn set_exit_queue(env: &Env, queue: &Vec<Address>) {
+    env.storage().instance().set(&symbol_short!("exitq"), queue);
+}
+
+pub fn get_min_priority_bid(env: &Env) -> i128 {
     env.storage()
         .instance()
-        .set(&symbol_short!("chrt_ids"), ids);
+        .get(&symbol_short!("minpbid"))
+        .unwrap_or(0)
+}
+
+pub fn set_min_priority_bid(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("minpbid"), &amount);
+}
+
+pub fn get_priority_bids(env: &Env) -> Vec<PriorityBidRecord> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("pbidrec"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_priority_bids(env: &Env, records: &Vec<PriorityBidRecord>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("pbidrec"), records);
 }

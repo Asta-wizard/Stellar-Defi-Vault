@@ -888,47 +888,52 @@ pub fn proposal_vetoed(
         .publish(topics, (proposal_id, user_stake_bps, ledger));
 }
 
-// ── Issue #242: stake matching program ────────────────────────────────────────
+// ── Issue #256: governance vote weight delegation ──────────────────────────────
 
-pub fn stake_matched(
+pub fn vote_delegated(
     env: &Env,
-    user: &Address,
-    stake_amount: i128,
-    match_amount: i128,
+    delegator: &Address,
+    delegate: &Address,
+    weight: i128,
     ledger: u32,
 ) {
-    let topics = (symbol_short!("stk_mtch"), user);
+    let topics = (symbol_short!("votedeleg"), delegator);
     env.events()
-        .publish(topics, (stake_amount, match_amount, ledger));
+        .publish(topics, (delegate.clone(), weight, ledger));
 }
 
-// ── Issue #243: unstake insurance policy ──────────────────────────────────────
+// ── Issue #257: auto-convert reward on claim ────────────────────────────────────
 
-pub fn insurance_purchased(
-    env: &Env,
-    user: &Address,
-    premium_paid: i128,
-    position_amount: i128,
-    ledger: u32,
-) {
-    let topics = (symbol_short!("ins_purc"), user);
-    env.events()
-        .publish(topics, (premium_paid, position_amount, ledger));
-}
-
-// ── Issue #244: multi-currency claim ──────────────────────────────────────────
-
-pub fn reward_claimed_in_token(
+pub fn reward_converted(
     env: &Env,
     user: &Address,
     reward_amount: i128,
-    output_token: &Address,
-    output_amount: i128,
+    converted_amount: i128,
+    target_token: &Address,
     ledger: u32,
 ) {
-    let topics = (symbol_short!("clm_tok"), user);
+    let topics = (symbol_short!("rwd_conv"), user);
     env.events().publish(
         topics,
-        (reward_amount, output_token.clone(), output_amount, ledger),
+        (
+            reward_amount,
+            converted_amount,
+            target_token.clone(),
+            ledger,
+        ),
     );
+}
+
+// ── Issue #251: exit-queue priority bidding ─────────────────────────────────────
+
+pub fn priority_bid_placed(
+    env: &Env,
+    user: &Address,
+    bid_amount: i128,
+    previous_position: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("pbid_plc"), user);
+    env.events()
+        .publish(topics, (bid_amount, previous_position, ledger));
 }

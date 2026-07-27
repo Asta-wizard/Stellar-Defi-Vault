@@ -6841,3 +6841,425 @@ fn test_check_and_release_no_price_condition_reverts() {
     let result = f.vault.try_check_and_release(&f.alice);
     assert_eq!(result, Err(Ok(VaultExtError::NotInitialized)));
 }
+
+// ── Issue #250: get_optimal_claim_frequency ─────────────────────────────────────
+
+#[test]
+fn test_optimal_claim_frequency_no_position_returns_zero() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    assert_eq!(advice.recommended_interval_ledgers, 0);
+    assert_eq!(advice.recommended_interval_days, 0);
+    assert_eq!(advice.annual_compounding_gain, 0);
+    assert_eq!(advice.break_even_reward_per_claim, 0);
+}
+
+#[test]
+fn test_optimal_claim_frequency_zero_rate_returns_zero() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    assert_eq!(advice.recommended_interval_ledgers, 0);
+    assert_eq!(advice.recommended_interval_days, 0);
+    assert_eq!(advice.annual_compounding_gain, 0);
+    assert_eq!(advice.break_even_reward_per_claim, 0);
+}
+
+#[test]
+fn test_optimal_claim_frequency_break_even_echoes_tx_cost() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &12_345_i128);
+    assert_eq!(advice.break_even_reward_per_claim, 12_345);
+}
+
+#[test]
+fn test_optimal_claim_frequency_higher_cost_gives_longer_interval() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let low_cost = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    let high_cost = f.vault.get_optimal_claim_frequency(&f.alice, &10_000_i128);
+
+    assert!(low_cost.recommended_interval_ledgers < high_cost.recommended_interval_ledgers);
+    assert!(low_cost.recommended_interval_days <= high_cost.recommended_interval_days);
+}
+
+#[test]
+fn test_optimal_claim_frequency_zero_tx_cost_recommends_claiming_now() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &0_i128);
+    assert_eq!(advice.recommended_interval_ledgers, 0);
+    assert_eq!(advice.recommended_interval_days, 0);
+    assert_eq!(advice.break_even_reward_per_claim, 0);
+}
+
+#[test]
+fn test_optimal_claim_frequency_compounding_gain_is_positive() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // A small tx cost relative to the position recommends a short interval
+    // well under a year, so compounding at that interval should beat simple
+    // annual accrual.
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    assert!(advice.recommended_interval_ledgers < STELLAR_LEDGERS_PER_YEAR);
+    assert!(advice.annual_compounding_gain > 0);
+}
+
+// ── Issue #256: governance vote weight delegation ───────────────────────────────
+
+#[test]
+fn test_delegate_vote_weight_requires_active_position() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(result, Err(Ok(VaultError::PositionNotFound)));
+}
+
+#[test]
+fn test_delegate_votes_with_combined_weight() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+
+    let id = f
+        .vault
+        .create_proposal(&f.bob, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), Some(f.bob.clone()));
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 300_000);
+
+    f.vault.vote(&f.bob, &id, &true);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 300_000 + 700_000);
+}
+
+#[test]
+fn test_delegator_cannot_also_vote() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+    let id = f
+        .vault
+        .create_proposal(&f.bob, &ProposableParam::RewardRate, &500_i128, &100_u32);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+
+    let result = f.vault.try_vote(&f.alice, &id, &true);
+    assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+}
+
+#[test]
+fn test_revoke_vote_delegation_restores_own_weight() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+    f.vault.revoke_vote_delegation(&f.alice);
+
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), None);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 0);
+
+    let id = f
+        .vault
+        .create_proposal(&f.bob, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.vote(&f.alice, &id, &true);
+
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 300_000);
+}
+
+#[test]
+fn test_revoke_vote_delegation_with_no_delegate_is_noop() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &300_000);
+    // Should not revert even though alice never delegated.
+    f.vault.revoke_vote_delegation(&f.alice);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), None);
+}
+
+#[test]
+fn test_self_delegation_is_noop() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.alice);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), None);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.alice), 0);
+
+    // Self-delegation being a no-op means alice can still vote directly.
+    let id = f
+        .vault
+        .create_proposal(&f.alice, &ProposableParam::RewardRate, &500_i128, &100_u32);
+    f.vault.vote(&f.alice, &id, &true);
+    let proposal = f.vault.get_proposal(&id).unwrap();
+    assert_eq!(proposal.votes_for, 300_000);
+}
+
+#[test]
+fn test_redelegation_to_an_already_delegated_address_rejected() {
+    let f = VaultFixture::new();
+    let charlie = Address::generate(&f.env);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+
+    // Bob has already delegated his own vote weight to charlie.
+    f.vault.delegate_vote_weight(&f.bob, &charlie);
+
+    // Alice cannot now delegate to bob — that would be a second hop.
+    let result = f.vault.try_delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(result, Err(Ok(VaultError::NotADelegate)));
+}
+
+#[test]
+fn test_redelegating_to_a_new_delegate_moves_weight() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &300_000);
+    f.vault.stake(&f.bob, &700_000);
+    let charlie = Address::generate(&f.env);
+
+    f.vault.delegate_vote_weight(&f.alice, &f.bob);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 300_000);
+
+    f.vault.delegate_vote_weight(&f.alice, &charlie);
+    assert_eq!(f.vault.get_delegated_vote_weight(&f.bob), 0);
+    assert_eq!(f.vault.get_delegated_vote_weight(&charlie), 300_000);
+    assert_eq!(f.vault.get_vote_delegate(&f.alice), Some(charlie));
+}
+
+// ── Issue #257: auto-convert reward on claim ────────────────────────────────────
+
+#[test]
+fn test_auto_convert_swaps_reward_to_target_token() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    let (target_addr, target_token, target_admin) = create_token(&f.env, &f.admin);
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&1); // 1:1 swap
+    target_admin.mint(&router_id, &1_000_000);
+
+    f.vault.set_dex_router(&router_id);
+    f.vault.set_auto_convert(&f.alice, &target_addr, &9_500_u32);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let claimed = f.vault.claim(&f.alice);
+
+    assert!(claimed > 0);
+    // Reward was converted: alice's stake/reward-token balance is unchanged...
+    assert_eq!(f.token.balance(&f.alice), stake_token_before);
+    // ...and she received the target token instead, 1:1 with the claimed amount.
+    assert_eq!(target_token.balance(&f.alice), claimed);
+}
+
+#[test]
+fn test_auto_convert_slippage_reverts_whole_claim() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    let (target_addr, target_token, target_admin) = create_token(&f.env, &f.admin);
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&2); // output is half the input: heavy slippage
+    target_admin.mint(&router_id, &1_000_000);
+
+    f.vault.set_dex_router(&router_id);
+    // Requires at least 95% of the reward amount out — divisor=2 (50%) fails this.
+    f.vault.set_auto_convert(&f.alice, &target_addr, &9_500_u32);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let result = f.vault.try_claim(&f.alice);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+
+    // The whole claim reverted: nothing was paid out in either token.
+    assert_eq!(f.token.balance(&f.alice), stake_token_before);
+    assert_eq!(target_token.balance(&f.alice), 0);
+}
+
+#[test]
+fn test_clear_auto_convert_restores_normal_claim() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    let (target_addr, target_token, target_admin) = create_token(&f.env, &f.admin);
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&1);
+    target_admin.mint(&router_id, &1_000_000);
+    f.vault.set_dex_router(&router_id);
+
+    f.vault.set_auto_convert(&f.alice, &target_addr, &9_500_u32);
+    assert!(f.vault.get_auto_convert_config(&f.alice).is_some());
+    f.vault.clear_auto_convert(&f.alice);
+    assert!(f.vault.get_auto_convert_config(&f.alice).is_none());
+
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let claimed = f.vault.claim(&f.alice);
+
+    assert!(claimed > 0);
+    assert_eq!(f.token.balance(&f.alice), stake_token_before + claimed);
+    assert_eq!(target_token.balance(&f.alice), 0);
+}
+
+#[test]
+fn test_claim_with_no_auto_convert_config_pays_reward_token() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    let stake_token_before = f.token.balance(&f.alice);
+    let claimed = f.vault.claim(&f.alice);
+
+    assert!(claimed > 0);
+    assert_eq!(f.token.balance(&f.alice), stake_token_before + claimed);
+}
+
+#[test]
+fn test_set_auto_convert_rejects_bps_above_10000() {
+    let f = VaultFixture::new();
+    let (target_addr, _target_token, _target_admin) = create_token(&f.env, &f.admin);
+    let result = f
+        .vault
+        .try_set_auto_convert(&f.alice, &target_addr, &10_001_u32);
+    assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
+}
+
+// ── Issue #251: exit-queue priority bidding ─────────────────────────────────────
+
+#[test]
+fn test_bid_for_queue_priority_moves_user_to_front() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+
+    // Alice queues first, bob second.
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+    assert_eq!(
+        f.vault.get_exit_queue(),
+        soroban_sdk::vec![&f.env, f.alice.clone(), f.bob.clone()]
+    );
+
+    f.vault.bid_for_queue_priority(&f.bob, &1_000);
+
+    assert_eq!(
+        f.vault.get_exit_queue(),
+        soroban_sdk::vec![&f.env, f.bob.clone(), f.alice.clone()]
+    );
+}
+
+#[test]
+fn test_bid_for_queue_priority_distributes_proceeds_to_remaining_queue() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+
+    let bob_balance_before = f.token.balance(&f.bob);
+    f.vault.bid_for_queue_priority(&f.alice, &1_000);
+
+    // Bob is the only other queued user, so he receives the full bid.
+    assert_eq!(f.token.balance(&f.bob), bob_balance_before + 1_000);
+}
+
+#[test]
+fn test_bid_below_minimum_rejected() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    f.vault.set_min_priority_bid(&5_000);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+
+    let result = f.vault.try_bid_for_queue_priority(&f.alice, &4_999);
+    assert_eq!(result, Err(Ok(VaultExtError::BidBelowMinimum)));
+}
+
+#[test]
+fn test_bid_without_queued_exit_rejected() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    f.vault.stake(&f.alice, &1_000_000);
+    // Alice never called request_unstake, so she has no queued exit.
+
+    let result = f.vault.try_bid_for_queue_priority(&f.alice, &1_000);
+    assert_eq!(result, Err(Ok(VaultExtError::ActionNotFound)));
+}
+
+#[test]
+fn test_bid_for_queue_priority_records_priority_bid() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+
+    f.vault.bid_for_queue_priority(&f.bob, &1_000);
+
+    let records = f.vault.get_priority_bids();
+    assert_eq!(records.len(), 1);
+    let record = records.get(0).unwrap();
+    assert_eq!(record.user, f.bob);
+    assert_eq!(record.bid_amount, 1_000);
+    assert_eq!(record.previous_position, 2);
+}
+
+#[test]
+fn test_same_ledger_bids_ordered_by_amount_descending() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    let charlie = Address::generate(&f.env);
+    f.token_admin.mint(&charlie, &20_000_000);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.stake(&charlie, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+    f.vault.request_unstake(&charlie, &500_000);
+
+    // Same ledger: bob bids a smaller amount first, then charlie bids
+    // larger. Despite bidding second, charlie's higher bid should rank
+    // ahead of bob's — not simply whoever called last.
+    f.vault.bid_for_queue_priority(&f.bob, &1_000);
+    f.vault.bid_for_queue_priority(&charlie, &2_000);
+
+    assert_eq!(
+        f.vault.get_exit_queue(),
+        soroban_sdk::vec![&f.env, charlie.clone(), f.bob.clone(), f.alice.clone()]
+    );
+}

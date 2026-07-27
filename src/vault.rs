@@ -9,18 +9,18 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        AdminAction, AdminProposal, AuctionBid, BoostTierProgress, BootstrapConfig, CampaignInfo,
-        CapacityAuction, ChangelogEntry, ClaimWindow, CohortStats, ContractAddresses,
-        ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig, EpochState,
-        FeeRecipient, GovernanceProposal, HalvingConfig, InterfaceId, LeaderboardEntry,
-        LotteryConfig, MatchingProgram, MerkleRoot, MigrationExport, Milestone, MilestoneCondition,
-        MultisigConfig, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        PoolHealthReport, PoolStats, PriceCondition, ProposableParam, RateHistoryEntry,
-        ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore, RewardMultiplierBreakdown,
-        RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction, StakeHistoryEntry,
-        StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore, StorageUsageReport,
-        TaxReport, Tournament, TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats,
-        UserSummary, VestingEntry,
+        AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
+        BootstrapConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
+        ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig,
+        EpochState, FeeRecipient, GovernanceProposal, HalvingConfig, InterfaceId, LeaderboardEntry,
+        LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
+        OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
+        PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
+        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
+        RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
+        StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
+        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -93,12 +93,9 @@ pub(crate) const MAX_REFERRAL_TREE_NODES: u32 = 50;
 pub(crate) const MAX_AUCTION_SPOTS: u32 = 20;
 /// Most distinct bidders one capacity auction accepts (issue #237).
 pub(crate) const MAX_AUCTION_BIDS: u32 = 50;
-/// Length of one staker cohort bucket — seven days of ledgers (issue #245).
-pub(crate) const LEDGERS_PER_COHORT: u32 = LEDGERS_PER_DAY * 7;
-/// Most cohorts `get_all_cohorts()` tracks and returns — one year (issue #245).
-pub(crate) const MAX_COHORTS: u32 = 52;
-/// Most output tokens the multi-currency claim whitelist may hold (issue #244).
-pub(crate) const MAX_OUTPUT_TOKENS: u32 = 10;
+/// Most `PriorityBidRecord` entries `get_priority_bids()` retains; oldest is
+/// evicted once full (issue #251).
+pub(crate) const MAX_PRIORITY_BID_RECORDS: u32 = 50;
 
 #[contract]
 pub struct VaultContract;
@@ -1286,6 +1283,137 @@ impl VaultContract {
         Ok(shares)
     }
 
+    // ── Issue #257: auto-convert reward on claim ────────────────────────────
+
+    /// Opt in to auto-converting future claimed rewards to `target_token` via
+    /// the configured DEX router (issue #205), instead of receiving the raw
+    /// reward token. `min_output_bps` is slippage protection relative to the
+    /// reward amount itself (10 000 = no loss tolerated; 9 500 = accept at
+    /// most 5% slippage) — mirrors `swap_and_stake`'s `min_stake_amount`
+    /// convention, just expressed in bps since this is a standing
+    /// configuration rather than a per-call amount.
+    ///
+    /// Takes effect on the next `claim` (including `stake_and_claim`,
+    /// `claim_on_behalf`, and any other path that pays out immediately).
+    /// Vested claims (`vesting_period > 0`) are unaffected — a vesting entry
+    /// defers payout to a future claim, which converts then if still
+    /// configured. If the swap's output falls short of `min_output_bps`,
+    /// the whole `claim` reverts with `InvalidRate` (reused) rather than
+    /// falling back to a reward-token payout in the same transaction — see
+    /// `try_auto_convert_reward`'s doc comment for why a same-transaction
+    /// fallback isn't fund-safe here. Reverts `InvalidRate` immediately if
+    /// `min_output_bps` itself exceeds 10 000.
+    pub fn set_auto_convert(
+        env: Env,
+        user: Address,
+        target_token: Address,
+        min_output_bps: u32,
+    ) -> Result<(), VaultError> {
+        user.require_auth();
+        if min_output_bps > 10_000 {
+            return Err(VaultError::InvalidRate);
+        }
+        balance::set_auto_convert_config(
+            &env,
+            &user,
+            &AutoConvertConfig {
+                target_token,
+                min_output_bps,
+            },
+        );
+        Ok(())
+    }
+
+    /// Disable auto-convert for `user`; future claims pay out in the raw
+    /// reward token again. A no-op if auto-convert wasn't configured.
+    pub fn clear_auto_convert(env: Env, user: Address) -> Result<(), VaultError> {
+        user.require_auth();
+        balance::remove_auto_convert_config(&env, &user);
+        Ok(())
+    }
+
+    /// Read-only: `user`'s current auto-convert configuration, if any.
+    pub fn get_auto_convert_config(env: Env, user: Address) -> Option<AutoConvertConfig> {
+        balance::get_auto_convert_config(&env, &user)
+    }
+
+    /// If `staker` has auto-convert enabled, swap the just-claimed
+    /// `reward_amount` (in `reward_token`) into their configured target
+    /// token via the DEX router and deliver it to `staker`. Returns
+    /// `Ok(true)` if the swap succeeded — the caller must then skip its own
+    /// direct reward-token transfer, since funds already moved. Returns
+    /// `Ok(false)` (nothing transferred, caller must pay out `reward_amount`
+    /// in `reward_token` as usual) if no auto-convert is configured, no DEX
+    /// router is configured, or the target token equals `reward_token`.
+    ///
+    /// Returns `Err(InvalidRate)` (reused) if the swap's output falls below
+    /// `min_output_bps` of `reward_amount` — which aborts the whole `claim`,
+    /// not just the conversion. This is a deliberate departure from a
+    /// same-transaction "skip conversion, pay reward_token instead"
+    /// fallback: the swap's destination is this contract (not `staker`
+    /// directly) specifically so a shortfall can be detected before any
+    /// tokens reach the user, mirroring `swap_and_stake`'s own defensive
+    /// re-check (issue #205) — but unlike that function, this runs inside
+    /// `do_claim`, where a *partial* failure can't safely fall back to a
+    /// second reward-token transfer: the swap has already pulled
+    /// `reward_amount` out of this contract's balance, so paying it out
+    /// again would silently double-spend from the shared reward pool.
+    /// Soroban also has no way to let a nested cross-contract call revert
+    /// without aborting the whole invocation, so relying on the router
+    /// itself to enforce the minimum (and catching that failure) isn't an
+    /// option either. Reverting the whole claim is therefore the only
+    /// fund-safe outcome; the caller may retry after disabling auto-convert
+    /// or once market conditions improve.
+    fn try_auto_convert_reward(
+        env: &Env,
+        staker: &Address,
+        reward_token: &Address,
+        reward_amount: i128,
+    ) -> Result<bool, VaultError> {
+        let config = match balance::get_auto_convert_config(env, staker) {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+        if config.target_token == *reward_token {
+            return Ok(false);
+        }
+        let router = match balance::get_dex_router(env) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+
+        let min_output = reward_amount
+            .checked_mul(config.min_output_bps as i128)
+            .and_then(|v| v.checked_div(10_000))
+            .unwrap_or(i128::MAX);
+
+        let router_client = DexRouterClient::new(env, &router);
+        let converted_amount = router_client.swap(
+            reward_token,
+            &config.target_token,
+            &reward_amount,
+            &0,
+            &env.current_contract_address(),
+        );
+
+        if converted_amount < min_output {
+            return Err(VaultError::InvalidRate);
+        }
+
+        let target_client = token::Client::new(env, &config.target_token);
+        target_client.transfer(&env.current_contract_address(), staker, &converted_amount);
+
+        events::reward_converted(
+            env,
+            staker,
+            reward_amount,
+            converted_amount,
+            &config.target_token,
+            env.ledger().sequence(),
+        );
+        Ok(true)
+    }
+
     /// Admin: enable or disable `bridge_packet` event emission on stake/unstake
     /// (issue #207). Purely additive/supplementary — toggling this never
     /// affects core stake/unstake logic or return values.
@@ -1492,6 +1620,11 @@ impl VaultContract {
         // advance reward checkpoint so no further rewards accrue to the removed shares
         balance::set_reward_checkpoint_ledger(&env, &user, current_ledger);
 
+        // Issue #251: join the exit queue (position tracked for
+        // bid_for_queue_priority). A top-up request_unstake call while
+        // already unbonding doesn't re-queue or reorder the existing entry.
+        Self::add_to_exit_queue(&env, &user);
+
         // If cooldown == 0, optionally auto-execute withdrawal immediately
         if cooldown == 0 {
             // transfer tokens immediately
@@ -1502,6 +1635,8 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .remove(&DataKey::UnbondingPosition(user.clone()));
+            // Issue #251: instant execution never actually queues.
+            Self::remove_from_exit_queue(&env, &user);
         }
 
         Ok(())
@@ -1539,6 +1674,8 @@ impl VaultContract {
         env.storage()
             .persistent()
             .remove(&DataKey::UnbondingPosition(user.clone()));
+        // Issue #251: leave the exit queue now that this position is settled.
+        Self::remove_from_exit_queue(&env, &user);
 
         Ok(pos.amount)
     }
@@ -1553,6 +1690,232 @@ impl VaultContract {
             .persistent()
             .get(&DataKey::UnbondingPosition(user.clone()));
         Ok(pos_opt)
+    }
+
+    // ── Issue #251: exit-queue priority bidding ─────────────────────────────
+
+    fn add_to_exit_queue(env: &Env, user: &Address) {
+        let mut queue = balance::get_exit_queue(env);
+        if Self::queue_index_of(&queue, user).is_none() {
+            queue.push_back(user.clone());
+            balance::set_exit_queue(env, &queue);
+        }
+    }
+
+    fn remove_from_exit_queue(env: &Env, user: &Address) {
+        let queue = balance::get_exit_queue(env);
+        let mut updated = Vec::new(env);
+        let mut i = 0u32;
+        while i < queue.len() {
+            let addr = queue.get(i).unwrap();
+            if addr != *user {
+                updated.push_back(addr);
+            }
+            i += 1;
+        }
+        balance::set_exit_queue(env, &updated);
+    }
+
+    fn queue_index_of(queue: &Vec<Address>, user: &Address) -> Option<u32> {
+        let mut i = 0u32;
+        while i < queue.len() {
+            if queue.get(i).unwrap() == *user {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The bid amount `user` placed via `bid_for_queue_priority()` at exactly
+    /// `ledger`, if any — used to order same-ledger bidders by amount
+    /// descending. Records are appended chronologically, so scanning
+    /// backward from the most recent and stopping at the first older ledger
+    /// is sufficient without walking the whole list.
+    fn latest_bid_this_ledger(
+        records: &Vec<PriorityBidRecord>,
+        user: &Address,
+        ledger: u32,
+    ) -> Option<i128> {
+        let mut i = records.len();
+        while i > 0 {
+            i -= 1;
+            let record = records.get(i).unwrap();
+            if record.ledger != ledger {
+                break;
+            }
+            if record.user == *user {
+                return Some(record.bid_amount);
+            }
+        }
+        None
+    }
+
+    /// Pay `bid_amount` reward tokens to jump to the front of the exit queue
+    /// (issue #251). `user` must currently have an active unbonding position
+    /// (i.e. have called `request_unstake` and not yet `execute_unstake`).
+    ///
+    /// Proceeds are distributed to every OTHER user currently in the queue,
+    /// proportionally to each recipient's own unbonding `amount` — the only
+    /// quantifiable stake each queued user has, and a reasonable proxy for
+    /// "compensation for a comparatively later position": someone unbonding
+    /// more is delayed by more value for the same one-slot wait. Rounding
+    /// remainder goes to the last recipient so no dust is lost. If the
+    /// bidder is the only one queued, the whole bid stays with the contract.
+    ///
+    /// **This moves queue *position* only.** There is no shared exit-queue
+    /// mechanism elsewhere in this contract gating *when* `execute_unstake`
+    /// succeeds — that remains governed purely by each user's own cooldown
+    /// timer (`unbonding_since` + the configured cooldown period),
+    /// independent of everyone else. Moving to position 1 does not change
+    /// when `user` can withdraw; it only changes the bookkeeping exposed via
+    /// `get_priority_bids()` / the exit queue's ordering.
+    ///
+    /// If multiple users bid within the same ledger, they're ordered among
+    /// themselves by bid amount descending (all still ahead of everyone
+    /// else), rather than strictly by call order.
+    ///
+    /// Reverts `ActionNotFound` (reused — no queued exit request exists for
+    /// `user`) if `user` has no active unbonding position. Reverts
+    /// `ZeroAmount` if `bid_amount <= 0`. Reverts `BidBelowMinimum` (reused)
+    /// if `bid_amount` is below the configured minimum.
+    pub fn bid_for_queue_priority(
+        env: Env,
+        user: Address,
+        bid_amount: i128,
+    ) -> Result<(), VaultExtError> {
+        user.require_auth();
+
+        if bid_amount <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        let min_bid = balance::get_min_priority_bid(&env);
+        if bid_amount < min_bid {
+            return Err(VaultExtError::BidBelowMinimum);
+        }
+
+        let mut queue = balance::get_exit_queue(&env);
+        let current_index =
+            Self::queue_index_of(&queue, &user).ok_or(VaultExtError::ActionNotFound)?;
+        let previous_position = current_index + 1;
+
+        // Collect every other queued user's unbonding amount as their
+        // distribution weight, before moving any tokens.
+        let mut recipients: Vec<(Address, i128)> = Vec::new(&env);
+        let mut total_weight: i128 = 0;
+        let mut i = 0u32;
+        while i < queue.len() {
+            let addr = queue.get(i).unwrap();
+            if addr != user {
+                let pos_opt: Option<UnbondingPosition> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::UnbondingPosition(addr.clone()));
+                if let Some(pos) = pos_opt {
+                    if pos.amount > 0 {
+                        total_weight = total_weight
+                            .checked_add(pos.amount)
+                            .ok_or(VaultExtError::ArithmeticError)?;
+                        recipients.push_back((addr, pos.amount));
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&user, &env.current_contract_address(), &bid_amount);
+
+        if total_weight > 0 {
+            let mut distributed: i128 = 0;
+            let mut j = 0u32;
+            while j < recipients.len() {
+                let (addr, weight) = recipients.get(j).unwrap();
+                let share = if j + 1 == recipients.len() {
+                    // Last recipient takes the remainder so integer-division
+                    // rounding never leaves dust stuck in the contract.
+                    bid_amount - distributed
+                } else {
+                    bid_amount
+                        .checked_mul(weight)
+                        .ok_or(VaultExtError::ArithmeticError)?
+                        .checked_div(total_weight)
+                        .ok_or(VaultExtError::ArithmeticError)?
+                };
+                if share > 0 {
+                    token_client.transfer(&env.current_contract_address(), &addr, &share);
+                    distributed = distributed
+                        .checked_add(share)
+                        .ok_or(VaultExtError::ArithmeticError)?;
+                }
+                j += 1;
+            }
+        }
+
+        // Move the bidder to the front, honoring same-ledger tie-break by
+        // bid amount descending against whoever else already bid this ledger.
+        queue.remove(current_index);
+        let current_ledger = env.ledger().sequence();
+        let mut records = balance::get_priority_bids(&env);
+        let mut insert_at = 0u32;
+        while insert_at < queue.len() {
+            let addr = queue.get(insert_at).unwrap();
+            match Self::latest_bid_this_ledger(&records, &addr, current_ledger) {
+                Some(existing_amount) if existing_amount >= bid_amount => insert_at += 1,
+                _ => break,
+            }
+        }
+        queue.insert(insert_at, user.clone());
+        balance::set_exit_queue(&env, &queue);
+
+        if records.len() >= MAX_PRIORITY_BID_RECORDS {
+            records.remove(0);
+        }
+        records.push_back(PriorityBidRecord {
+            user: user.clone(),
+            bid_amount,
+            previous_position,
+            ledger: current_ledger,
+        });
+        balance::set_priority_bids(&env, &records);
+
+        events::priority_bid_placed(&env, &user, bid_amount, previous_position, current_ledger);
+        Ok(())
+    }
+
+    /// Admin: set the minimum `bid_for_queue_priority()` amount. `0`
+    /// (the default) disables the minimum. Takes no explicit `admin`
+    /// parameter, matching this contract's other admin setters (e.g.
+    /// `set_lock_period`) — the caller is authenticated via the stored
+    /// admin address, not a passed-in one.
+    pub fn set_min_priority_bid(env: Env, amount: i128) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        if amount < 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        balance::set_min_priority_bid(&env, amount);
+        Ok(())
+    }
+
+    /// Read-only: the currently configured minimum priority bid.
+    pub fn get_min_priority_bid(env: Env) -> i128 {
+        balance::get_min_priority_bid(&env)
+    }
+
+    /// Read-only: all recorded priority bids, oldest first, capped at
+    /// `MAX_PRIORITY_BID_RECORDS` entries (oldest evicted once full). Public
+    /// like every other read-only query in this contract (e.g.
+    /// `get_auction_bids`) rather than admin-gated, despite the issue
+    /// describing it as an "admin" query — no other read-only query in this
+    /// contract requires admin auth to call.
+    pub fn get_priority_bids(env: Env) -> Vec<PriorityBidRecord> {
+        balance::get_priority_bids(&env)
+    }
+
+    /// Read-only: the current exit-queue order (front to back).
+    pub fn get_exit_queue(env: Env) -> Vec<Address> {
+        balance::get_exit_queue(&env)
     }
 
     /// Query the current withdrawal limit per transaction.
@@ -4227,6 +4590,97 @@ impl VaultContract {
         Self::normalize_to_reward_decimals(&env, raw).unwrap_or(raw)
     }
 
+    /// Read-only advisory: the mathematically optimal claim frequency for
+    /// `user`'s position at the CURRENT reward rate, balancing
+    /// `tx_cost_in_reward_token` against the benefit of compounding claimed
+    /// rewards back into new shares (issue #250).
+    ///
+    /// `tx_cost_in_reward_token` is caller-supplied — the contract cannot
+    /// know actual network fees. `break_even_reward_per_claim` is that same
+    /// value echoed back: claiming is only worth it once accrued reward
+    /// exceeds it. `recommended_interval_ledgers` is how long, from now, it
+    /// takes to accrue that much (reusing the same math as
+    /// `ledgers_to_target`, so it counts any reward already pending toward
+    /// the threshold). `annual_compounding_gain` compares a
+    /// year of claiming+restaking every `recommended_interval_ledgers`
+    /// against a year of simple (non-compounding) accrual, both computed via
+    /// `simulate_compound` so the two figures stay in the same unit space as
+    /// real claims. All figures are approximations at the current reward
+    /// rate/boost tier/campaign multiplier only — they do not account for
+    /// any of these changing over the period estimated.
+    ///
+    /// Returns an all-zero `OptimalClaimAdvice` if `user` has no position or
+    /// the reward rate is 0. No auth required, no state changes.
+    pub fn get_optimal_claim_frequency(
+        env: Env,
+        user: Address,
+        tx_cost_in_reward_token: i128,
+    ) -> OptimalClaimAdvice {
+        let zero = OptimalClaimAdvice {
+            recommended_interval_ledgers: 0,
+            recommended_interval_days: 0,
+            annual_compounding_gain: 0,
+            break_even_reward_per_claim: 0,
+        };
+
+        if balance::get_shares(&env, &user) == 0 {
+            return zero;
+        }
+        if balance::get_reward_rate_bps(&env) == 0 {
+            return zero;
+        }
+
+        let position_amount = match Self::build_position(&env, &user) {
+            Ok(Some(position)) => position.amount,
+            _ => return zero,
+        };
+
+        let break_even_reward_per_claim = tx_cost_in_reward_token;
+
+        let recommended_interval_ledgers =
+            match Self::ledgers_to_target(env.clone(), user.clone(), break_even_reward_per_claim) {
+                Ok(ledgers) if ledgers != u32::MAX => ledgers,
+                _ => {
+                    return OptimalClaimAdvice {
+                        break_even_reward_per_claim,
+                        ..zero
+                    }
+                }
+            };
+
+        let recommended_interval_days = ((recommended_interval_ledgers as u64) * 5)
+            .div_ceil(86400)
+            .min(u32::MAX as u64) as u32;
+
+        // Compounding periods of 0 are meaningless to simulate_compound (it
+        // treats claim_interval 0 as "nothing accrues"); a 0 recommendation
+        // just means "claim now", so simulate at the smallest real interval
+        // instead while still reporting the literal 0 above.
+        let compounding_interval = recommended_interval_ledgers.max(1);
+        let compounded = Self::simulate_compound(
+            env.clone(),
+            position_amount,
+            STELLAR_LEDGERS_PER_YEAR,
+            compounding_interval,
+        )
+        .unwrap_or(0);
+        let simple = Self::simulate_compound(
+            env,
+            position_amount,
+            STELLAR_LEDGERS_PER_YEAR,
+            STELLAR_LEDGERS_PER_YEAR,
+        )
+        .unwrap_or(0);
+        let annual_compounding_gain = compounded.saturating_sub(simple).max(0);
+
+        OptimalClaimAdvice {
+            recommended_interval_ledgers,
+            recommended_interval_days,
+            annual_compounding_gain,
+            break_even_reward_per_claim,
+        }
+    }
+
     // --- Boost campaign (#48) ---
 
     /// Admin: activate a time-limited reward boost for all stakers.
@@ -6023,7 +6477,7 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::VestingEntries(staker.clone()), &entries);
-        } else {
+        } else if !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)? {
             let token_client = token::Client::new(env, &token_addr);
             token_client.transfer(&env.current_contract_address(), staker, &user_reward);
         }
@@ -7740,13 +8194,17 @@ impl VaultContract {
     }
 
     /// Vote on an open proposal, weighted by the caller's staked token amount
-    /// at the time of the call. Voting power is not adjusted retroactively if
-    /// the caller stakes more (or less) after voting.
+    /// at the time of the call, plus any weight delegated to the caller via
+    /// `delegate_vote_weight()` (issue #256). Voting power is not adjusted
+    /// retroactively if the caller stakes more (or less) after voting.
     ///
     /// Reverts with `PositionNotFound` if the proposal does not exist or the
     /// caller has no active position, `TooManyStakers` if the caller already
-    /// voted on this proposal, or `BatchKycTooLarge` if voting has ended or
-    /// the proposal was already enacted.
+    /// voted on this proposal, `BatchKycTooLarge` if voting has ended or the
+    /// proposal was already enacted, or `Unauthorized` (reused — the caller
+    /// has routed their vote weight to a delegate via `delegate_vote_weight`
+    /// and so cannot also vote directly) if the caller currently has a
+    /// delegate set.
     pub fn vote(
         env: Env,
         user: Address,
@@ -7756,6 +8214,10 @@ impl VaultContract {
         user.require_auth();
         let mut proposal =
             balance::get_proposal(&env, proposal_id).ok_or(VaultError::PositionNotFound)?;
+
+        if balance::get_vote_delegate(&env, &user).is_some() {
+            return Err(VaultError::Unauthorized);
+        }
 
         let shares = balance::get_shares(&env, &user);
         if shares == 0 {
@@ -7770,7 +8232,11 @@ impl VaultContract {
 
         let total_shares = balance::get_total_shares(&env);
         let total_deposited = balance::get_total_deposited(&env);
-        let weight = balance::shares_to_amount(total_shares, total_deposited, shares)
+        let own_weight = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+        let delegated_weight = balance::get_delegated_vote_weight(&env, &user);
+        let weight = own_weight
+            .checked_add(delegated_weight)
             .ok_or(VaultError::ArithmeticError)?;
 
         if support {
@@ -7875,6 +8341,100 @@ impl VaultContract {
     /// Read-only query for a governance proposal by id.
     pub fn get_proposal(env: Env, id: u32) -> Option<GovernanceProposal> {
         balance::get_proposal(&env, id)
+    }
+
+    // ── Issue #256: governance vote weight delegation ──────────────────────────
+
+    /// Delegate `user`'s governance vote weight to `delegate`. Once
+    /// delegated, `delegate`'s own `vote()` calls count `user`'s live weight
+    /// (staked amount at the time each vote is cast) in addition to their
+    /// own, and `user` can no longer call `vote()` directly (reverts
+    /// `Unauthorized`) until they revoke.
+    ///
+    /// Self-delegation (`delegate == user`) is a no-op, equivalent to no
+    /// delegation. Re-delegating to a new address first removes the prior
+    /// delegation's contribution to that delegate's combined weight.
+    ///
+    /// One hop only: reverts `NotADelegate` (reused — closest existing error
+    /// for "this address isn't a valid delegation target") if `delegate` has
+    /// themselves delegated their vote weight elsewhere. Reverts
+    /// `PositionNotFound` if `user` has no active stake.
+    pub fn delegate_vote_weight(
+        env: Env,
+        user: Address,
+        delegate: Address,
+    ) -> Result<(), VaultError> {
+        user.require_auth();
+
+        if delegate == user {
+            return Ok(());
+        }
+        if balance::get_vote_delegate(&env, &delegate).is_some() {
+            return Err(VaultError::NotADelegate);
+        }
+
+        let shares = balance::get_shares(&env, &user);
+        if shares == 0 {
+            return Err(VaultError::PositionNotFound);
+        }
+
+        if let Some(prev_delegate) = balance::get_vote_delegate(&env, &user) {
+            if prev_delegate == delegate {
+                return Ok(());
+            }
+            Self::withdraw_delegated_weight(&env, &user, &prev_delegate);
+        }
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let weight = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        balance::set_vote_delegate(&env, &user, &delegate);
+        balance::set_delegated_weight_snapshot(&env, &user, weight);
+        let combined = balance::get_delegated_vote_weight(&env, &delegate)
+            .checked_add(weight)
+            .ok_or(VaultError::ArithmeticError)?;
+        balance::set_delegated_vote_weight(&env, &delegate, combined);
+
+        events::vote_delegated(&env, &user, &delegate, weight, env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Revoke `user`'s current vote delegation, if any, restoring their
+    /// ability to vote directly. A no-op if `user` has no delegate set.
+    pub fn revoke_vote_delegation(env: Env, user: Address) -> Result<(), VaultError> {
+        user.require_auth();
+
+        let delegate = match balance::get_vote_delegate(&env, &user) {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        Self::withdraw_delegated_weight(&env, &user, &delegate);
+        balance::remove_vote_delegate(&env, &user);
+        Ok(())
+    }
+
+    /// Subtract `user`'s stored delegated-weight snapshot from `delegate`'s
+    /// combined weight accumulator, and clear the snapshot. Shared by
+    /// `revoke_vote_delegation` and by `delegate_vote_weight` when
+    /// re-delegating to a new address.
+    fn withdraw_delegated_weight(env: &Env, user: &Address, delegate: &Address) {
+        let snapshot = balance::get_delegated_weight_snapshot(env, user);
+        let remaining = (balance::get_delegated_vote_weight(env, delegate) - snapshot).max(0);
+        balance::set_delegated_vote_weight(env, delegate, remaining);
+        balance::remove_delegated_weight_snapshot(env, user);
+    }
+
+    /// Read-only: the address `user` has delegated their vote weight to, if any.
+    pub fn get_vote_delegate(env: Env, user: Address) -> Option<Address> {
+        balance::get_vote_delegate(&env, &user)
+    }
+
+    /// Read-only: the sum of vote weight currently delegated to `delegate`,
+    /// as of each delegator's snapshot at the time they delegated.
+    pub fn get_delegated_vote_weight(env: Env, delegate: Address) -> i128 {
+        balance::get_delegated_vote_weight(&env, &delegate)
     }
 
     // ── Reward refill alert helper ─────────────────────────────────────────────

@@ -885,49 +885,45 @@ pub struct PriceCondition {
     pub direction: TriggerDirection,
 }
 
-// ── Issue #242: stake matching program ────────────────────────────────────────
+// ── Issue #250: optimal claim frequency advisory ───────────────────────────────
 
-/// An admin-funded program that matches every user stake with an extra
-/// contribution, bounded by a per-user cap and a total program budget.
-///
-/// `total_budget` is transferred into the contract up front by
-/// `start_matching_program()`; `budget_used` is the portion already credited to
-/// stakers. Unused budget is returned to the admin by `end_matching_program()`.
+/// Advisory result from `get_optimal_claim_frequency()` (issue #250). Every
+/// field is an approximation at the current reward rate/boost/campaign — see
+/// that function's doc comment for the exact assumptions.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct MatchingProgram {
-    pub match_rate_bps: u32,
-    pub per_user_cap: i128,
-    pub total_budget: i128,
-    pub budget_used: i128,
-    pub active: bool,
+pub struct OptimalClaimAdvice {
+    pub recommended_interval_ledgers: u32,
+    pub recommended_interval_days: u32,
+    /// Estimated annual reward gain from compounding at
+    /// `recommended_interval_ledgers` vs. simple (non-compounding) accrual.
+    /// Named `annual_compounding_gain` rather than the longer
+    /// `estimated_annual_gain_from_compounding` — Soroban's contracttype
+    /// struct field names are capped at 30 characters.
+    pub annual_compounding_gain: i128,
+    pub break_even_reward_per_claim: i128,
 }
 
-/// Per-user running total of matched contributions received (issue #242).
+// ── Issue #257: auto-convert reward on claim ────────────────────────────────────
+
+/// A user's auto-convert-on-claim configuration (issue #257): reward tokens
+/// are swapped to `target_token` via the configured DEX router (issue #205)
+/// on every `claim`, subject to `min_output_bps` slippage protection.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct UserMatchingStats {
-    pub total_matched: i128,
+pub struct AutoConvertConfig {
+    pub target_token: Address,
+    pub min_output_bps: u32,
 }
 
-// ── Issue #245: staking cohort analytics ──────────────────────────────────────
+// ── Issue #251: exit-queue priority bidding ─────────────────────────────────────
 
-/// Aggregate metrics for one weekly staker cohort (issue #245).
-///
-/// A cohort groups every address whose first stake landed in the same week:
-/// `cohort_id = staked_at_ledger / (LEDGERS_PER_DAY * 7)`.
-///
-/// - `member_count`: addresses that have ever joined this cohort.
-/// - `active_members`: members that still hold an open position — the ratio of
-///   this to `member_count` is the cohort's retention rate.
-/// - `avg_position`: `total_staked / active_members`, or 0 when none remain.
+/// A single recorded call to `bid_for_queue_priority()` (issue #251).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct CohortStats {
-    pub cohort_id: u32,
-    pub member_count: u32,
-    pub total_staked: i128,
-    pub avg_position: i128,
-    pub total_rewards_claimed: i128,
-    pub active_members: u32,
+pub struct PriorityBidRecord {
+    pub user: Address,
+    pub bid_amount: i128,
+    pub previous_position: u32,
+    pub ledger: u32,
 }
