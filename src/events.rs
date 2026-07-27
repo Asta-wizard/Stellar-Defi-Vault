@@ -923,3 +923,17 @@ pub fn reward_converted(
         ),
     );
 }
+
+// ── Issue #251: exit-queue priority bidding ─────────────────────────────────────
+
+pub fn priority_bid_placed(
+    env: &Env,
+    user: &Address,
+    bid_amount: i128,
+    previous_position: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("pbid_plc"), user);
+    env.events()
+        .publish(topics, (bid_amount, previous_position, ledger));
+}

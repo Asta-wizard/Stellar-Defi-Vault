@@ -915,3 +915,15 @@ pub struct AutoConvertConfig {
     pub target_token: Address,
     pub min_output_bps: u32,
 }
+
+// ── Issue #251: exit-queue priority bidding ─────────────────────────────────────
+
+/// A single recorded call to `bid_for_queue_priority()` (issue #251).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriorityBidRecord {
+    pub user: Address,
+    pub bid_amount: i128,
+    pub previous_position: u32,
+    pub ledger: u32,
+}

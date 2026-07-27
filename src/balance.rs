@@ -1,7 +1,8 @@
 use crate::storage::{
     AdminProposal, AutoConvertConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket,
     DynamicFeeConfig, FeeRecipient, GovernanceProposal, LotteryConfig, Milestone, MultisigConfig,
-    PendingAction, PriceCondition, RateHistoryEntry, ReferralStats, StakePosition, VestingEntry,
+    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
+    StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1836,4 +1837,43 @@ pub fn set_auto_convert_config(env: &Env, user: &Address, config: &AutoConvertCo
 pub fn remove_auto_convert_config(env: &Env, user: &Address) {
     let key = (Symbol::new(env, "autoconv"), user.clone());
     env.storage().persistent().remove(&key);
+}
+
+// ── Issue #251: exit-queue priority bidding ───────────────────────────────────
+
+pub fn get_exit_queue(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("exitq"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_exit_queue(env: &Env, queue: &Vec<Address>) {
+    env.storage().instance().set(&symbol_short!("exitq"), queue);
+}
+
+pub fn get_min_priority_bid(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("minpbid"))
+        .unwrap_or(0)
+}
+
+pub fn set_min_priority_bid(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("minpbid"), &amount);
+}
+
+pub fn get_priority_bids(env: &Env) -> Vec<PriorityBidRecord> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("pbidrec"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_priority_bids(env: &Env, records: &Vec<PriorityBidRecord>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("pbidrec"), records);
 }

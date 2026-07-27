@@ -7149,3 +7149,117 @@ fn test_set_auto_convert_rejects_bps_above_10000() {
         .try_set_auto_convert(&f.alice, &target_addr, &10_001_u32);
     assert_eq!(result, Err(Ok(VaultError::InvalidRate)));
 }
+
+// ── Issue #251: exit-queue priority bidding ─────────────────────────────────────
+
+#[test]
+fn test_bid_for_queue_priority_moves_user_to_front() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+
+    // Alice queues first, bob second.
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+    assert_eq!(
+        f.vault.get_exit_queue(),
+        soroban_sdk::vec![&f.env, f.alice.clone(), f.bob.clone()]
+    );
+
+    f.vault.bid_for_queue_priority(&f.bob, &1_000);
+
+    assert_eq!(
+        f.vault.get_exit_queue(),
+        soroban_sdk::vec![&f.env, f.bob.clone(), f.alice.clone()]
+    );
+}
+
+#[test]
+fn test_bid_for_queue_priority_distributes_proceeds_to_remaining_queue() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+
+    let bob_balance_before = f.token.balance(&f.bob);
+    f.vault.bid_for_queue_priority(&f.alice, &1_000);
+
+    // Bob is the only other queued user, so he receives the full bid.
+    assert_eq!(f.token.balance(&f.bob), bob_balance_before + 1_000);
+}
+
+#[test]
+fn test_bid_below_minimum_rejected() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    f.vault.set_min_priority_bid(&5_000);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+
+    let result = f.vault.try_bid_for_queue_priority(&f.alice, &4_999);
+    assert_eq!(result, Err(Ok(VaultExtError::BidBelowMinimum)));
+}
+
+#[test]
+fn test_bid_without_queued_exit_rejected() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    f.vault.stake(&f.alice, &1_000_000);
+    // Alice never called request_unstake, so she has no queued exit.
+
+    let result = f.vault.try_bid_for_queue_priority(&f.alice, &1_000);
+    assert_eq!(result, Err(Ok(VaultExtError::ActionNotFound)));
+}
+
+#[test]
+fn test_bid_for_queue_priority_records_priority_bid() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+
+    f.vault.bid_for_queue_priority(&f.bob, &1_000);
+
+    let records = f.vault.get_priority_bids();
+    assert_eq!(records.len(), 1);
+    let record = records.get(0).unwrap();
+    assert_eq!(record.user, f.bob);
+    assert_eq!(record.bid_amount, 1_000);
+    assert_eq!(record.previous_position, 2);
+}
+
+#[test]
+fn test_same_ledger_bids_ordered_by_amount_descending() {
+    let f = VaultFixture::new();
+    f.vault.set_cooldown_period(&100);
+    let charlie = Address::generate(&f.env);
+    f.token_admin.mint(&charlie, &20_000_000);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.stake(&charlie, &1_000_000);
+    f.vault.request_unstake(&f.alice, &500_000);
+    f.vault.request_unstake(&f.bob, &500_000);
+    f.vault.request_unstake(&charlie, &500_000);
+
+    // Same ledger: bob bids a smaller amount first, then charlie bids
+    // larger. Despite bidding second, charlie's higher bid should rank
+    // ahead of bob's — not simply whoever called last.
+    f.vault.bid_for_queue_priority(&f.bob, &1_000);
+    f.vault.bid_for_queue_priority(&charlie, &2_000);
+
+    assert_eq!(
+        f.vault.get_exit_queue(),
+        soroban_sdk::vec![&f.env, charlie.clone(), f.bob.clone(), f.alice.clone()]
+    );
+}

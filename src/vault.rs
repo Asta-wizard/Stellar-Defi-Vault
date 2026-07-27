@@ -15,12 +15,12 @@ use crate::{
         EpochState, FeeRecipient, GovernanceProposal, HalvingConfig, InterfaceId, LeaderboardEntry,
         LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        PoolHealthReport, PoolStats, PriceCondition, ProposableParam, RateHistoryEntry,
-        ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore, RewardMultiplierBreakdown,
-        RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction, StakeHistoryEntry,
-        StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore, StorageUsageReport,
-        TaxReport, Tournament, TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats,
-        UserSummary, VestingEntry,
+        PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
+        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
+        RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
+        StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
+        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
     },
 };
 
@@ -93,6 +93,9 @@ pub(crate) const MAX_REFERRAL_TREE_NODES: u32 = 50;
 pub(crate) const MAX_AUCTION_SPOTS: u32 = 20;
 /// Most distinct bidders one capacity auction accepts (issue #237).
 pub(crate) const MAX_AUCTION_BIDS: u32 = 50;
+/// Most `PriorityBidRecord` entries `get_priority_bids()` retains; oldest is
+/// evicted once full (issue #251).
+pub(crate) const MAX_PRIORITY_BID_RECORDS: u32 = 50;
 
 #[contract]
 pub struct VaultContract;
@@ -1617,6 +1620,11 @@ impl VaultContract {
         // advance reward checkpoint so no further rewards accrue to the removed shares
         balance::set_reward_checkpoint_ledger(&env, &user, current_ledger);
 
+        // Issue #251: join the exit queue (position tracked for
+        // bid_for_queue_priority). A top-up request_unstake call while
+        // already unbonding doesn't re-queue or reorder the existing entry.
+        Self::add_to_exit_queue(&env, &user);
+
         // If cooldown == 0, optionally auto-execute withdrawal immediately
         if cooldown == 0 {
             // transfer tokens immediately
@@ -1627,6 +1635,8 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .remove(&DataKey::UnbondingPosition(user.clone()));
+            // Issue #251: instant execution never actually queues.
+            Self::remove_from_exit_queue(&env, &user);
         }
 
         Ok(())
@@ -1664,6 +1674,8 @@ impl VaultContract {
         env.storage()
             .persistent()
             .remove(&DataKey::UnbondingPosition(user.clone()));
+        // Issue #251: leave the exit queue now that this position is settled.
+        Self::remove_from_exit_queue(&env, &user);
 
         Ok(pos.amount)
     }
@@ -1678,6 +1690,232 @@ impl VaultContract {
             .persistent()
             .get(&DataKey::UnbondingPosition(user.clone()));
         Ok(pos_opt)
+    }
+
+    // ── Issue #251: exit-queue priority bidding ─────────────────────────────
+
+    fn add_to_exit_queue(env: &Env, user: &Address) {
+        let mut queue = balance::get_exit_queue(env);
+        if Self::queue_index_of(&queue, user).is_none() {
+            queue.push_back(user.clone());
+            balance::set_exit_queue(env, &queue);
+        }
+    }
+
+    fn remove_from_exit_queue(env: &Env, user: &Address) {
+        let queue = balance::get_exit_queue(env);
+        let mut updated = Vec::new(env);
+        let mut i = 0u32;
+        while i < queue.len() {
+            let addr = queue.get(i).unwrap();
+            if addr != *user {
+                updated.push_back(addr);
+            }
+            i += 1;
+        }
+        balance::set_exit_queue(env, &updated);
+    }
+
+    fn queue_index_of(queue: &Vec<Address>, user: &Address) -> Option<u32> {
+        let mut i = 0u32;
+        while i < queue.len() {
+            if queue.get(i).unwrap() == *user {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The bid amount `user` placed via `bid_for_queue_priority()` at exactly
+    /// `ledger`, if any — used to order same-ledger bidders by amount
+    /// descending. Records are appended chronologically, so scanning
+    /// backward from the most recent and stopping at the first older ledger
+    /// is sufficient without walking the whole list.
+    fn latest_bid_this_ledger(
+        records: &Vec<PriorityBidRecord>,
+        user: &Address,
+        ledger: u32,
+    ) -> Option<i128> {
+        let mut i = records.len();
+        while i > 0 {
+            i -= 1;
+            let record = records.get(i).unwrap();
+            if record.ledger != ledger {
+                break;
+            }
+            if record.user == *user {
+                return Some(record.bid_amount);
+            }
+        }
+        None
+    }
+
+    /// Pay `bid_amount` reward tokens to jump to the front of the exit queue
+    /// (issue #251). `user` must currently have an active unbonding position
+    /// (i.e. have called `request_unstake` and not yet `execute_unstake`).
+    ///
+    /// Proceeds are distributed to every OTHER user currently in the queue,
+    /// proportionally to each recipient's own unbonding `amount` — the only
+    /// quantifiable stake each queued user has, and a reasonable proxy for
+    /// "compensation for a comparatively later position": someone unbonding
+    /// more is delayed by more value for the same one-slot wait. Rounding
+    /// remainder goes to the last recipient so no dust is lost. If the
+    /// bidder is the only one queued, the whole bid stays with the contract.
+    ///
+    /// **This moves queue *position* only.** There is no shared exit-queue
+    /// mechanism elsewhere in this contract gating *when* `execute_unstake`
+    /// succeeds — that remains governed purely by each user's own cooldown
+    /// timer (`unbonding_since` + the configured cooldown period),
+    /// independent of everyone else. Moving to position 1 does not change
+    /// when `user` can withdraw; it only changes the bookkeeping exposed via
+    /// `get_priority_bids()` / the exit queue's ordering.
+    ///
+    /// If multiple users bid within the same ledger, they're ordered among
+    /// themselves by bid amount descending (all still ahead of everyone
+    /// else), rather than strictly by call order.
+    ///
+    /// Reverts `ActionNotFound` (reused — no queued exit request exists for
+    /// `user`) if `user` has no active unbonding position. Reverts
+    /// `ZeroAmount` if `bid_amount <= 0`. Reverts `BidBelowMinimum` (reused)
+    /// if `bid_amount` is below the configured minimum.
+    pub fn bid_for_queue_priority(
+        env: Env,
+        user: Address,
+        bid_amount: i128,
+    ) -> Result<(), VaultExtError> {
+        user.require_auth();
+
+        if bid_amount <= 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        let min_bid = balance::get_min_priority_bid(&env);
+        if bid_amount < min_bid {
+            return Err(VaultExtError::BidBelowMinimum);
+        }
+
+        let mut queue = balance::get_exit_queue(&env);
+        let current_index =
+            Self::queue_index_of(&queue, &user).ok_or(VaultExtError::ActionNotFound)?;
+        let previous_position = current_index + 1;
+
+        // Collect every other queued user's unbonding amount as their
+        // distribution weight, before moving any tokens.
+        let mut recipients: Vec<(Address, i128)> = Vec::new(&env);
+        let mut total_weight: i128 = 0;
+        let mut i = 0u32;
+        while i < queue.len() {
+            let addr = queue.get(i).unwrap();
+            if addr != user {
+                let pos_opt: Option<UnbondingPosition> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::UnbondingPosition(addr.clone()));
+                if let Some(pos) = pos_opt {
+                    if pos.amount > 0 {
+                        total_weight = total_weight
+                            .checked_add(pos.amount)
+                            .ok_or(VaultExtError::ArithmeticError)?;
+                        recipients.push_back((addr, pos.amount));
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&user, &env.current_contract_address(), &bid_amount);
+
+        if total_weight > 0 {
+            let mut distributed: i128 = 0;
+            let mut j = 0u32;
+            while j < recipients.len() {
+                let (addr, weight) = recipients.get(j).unwrap();
+                let share = if j + 1 == recipients.len() {
+                    // Last recipient takes the remainder so integer-division
+                    // rounding never leaves dust stuck in the contract.
+                    bid_amount - distributed
+                } else {
+                    bid_amount
+                        .checked_mul(weight)
+                        .ok_or(VaultExtError::ArithmeticError)?
+                        .checked_div(total_weight)
+                        .ok_or(VaultExtError::ArithmeticError)?
+                };
+                if share > 0 {
+                    token_client.transfer(&env.current_contract_address(), &addr, &share);
+                    distributed = distributed
+                        .checked_add(share)
+                        .ok_or(VaultExtError::ArithmeticError)?;
+                }
+                j += 1;
+            }
+        }
+
+        // Move the bidder to the front, honoring same-ledger tie-break by
+        // bid amount descending against whoever else already bid this ledger.
+        queue.remove(current_index);
+        let current_ledger = env.ledger().sequence();
+        let mut records = balance::get_priority_bids(&env);
+        let mut insert_at = 0u32;
+        while insert_at < queue.len() {
+            let addr = queue.get(insert_at).unwrap();
+            match Self::latest_bid_this_ledger(&records, &addr, current_ledger) {
+                Some(existing_amount) if existing_amount >= bid_amount => insert_at += 1,
+                _ => break,
+            }
+        }
+        queue.insert(insert_at, user.clone());
+        balance::set_exit_queue(&env, &queue);
+
+        if records.len() >= MAX_PRIORITY_BID_RECORDS {
+            records.remove(0);
+        }
+        records.push_back(PriorityBidRecord {
+            user: user.clone(),
+            bid_amount,
+            previous_position,
+            ledger: current_ledger,
+        });
+        balance::set_priority_bids(&env, &records);
+
+        events::priority_bid_placed(&env, &user, bid_amount, previous_position, current_ledger);
+        Ok(())
+    }
+
+    /// Admin: set the minimum `bid_for_queue_priority()` amount. `0`
+    /// (the default) disables the minimum. Takes no explicit `admin`
+    /// parameter, matching this contract's other admin setters (e.g.
+    /// `set_lock_period`) — the caller is authenticated via the stored
+    /// admin address, not a passed-in one.
+    pub fn set_min_priority_bid(env: Env, amount: i128) -> Result<(), VaultExtError> {
+        admin::require_admin(&env)?;
+        if amount < 0 {
+            return Err(VaultExtError::ZeroAmount);
+        }
+        balance::set_min_priority_bid(&env, amount);
+        Ok(())
+    }
+
+    /// Read-only: the currently configured minimum priority bid.
+    pub fn get_min_priority_bid(env: Env) -> i128 {
+        balance::get_min_priority_bid(&env)
+    }
+
+    /// Read-only: all recorded priority bids, oldest first, capped at
+    /// `MAX_PRIORITY_BID_RECORDS` entries (oldest evicted once full). Public
+    /// like every other read-only query in this contract (e.g.
+    /// `get_auction_bids`) rather than admin-gated, despite the issue
+    /// describing it as an "admin" query — no other read-only query in this
+    /// contract requires admin auth to call.
+    pub fn get_priority_bids(env: Env) -> Vec<PriorityBidRecord> {
+        balance::get_priority_bids(&env)
+    }
+
+    /// Read-only: the current exit-queue order (front to back).
+    pub fn get_exit_queue(env: Env) -> Vec<Address> {
+        balance::get_exit_queue(&env)
     }
 
     /// Query the current withdrawal limit per transaction.
