@@ -5,22 +5,23 @@ use soroban_sdk::{
 
 use crate::{
     admin, balance,
-    errors::{VaultError, VaultExtError},
+    errors::{VaultError, VaultExtError, VaultFeatureError},
     events,
     nft::StakeReceiptNFTClient,
     storage::{
         AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
         BootstrapConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
-        ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig,
-        EpochState, FeeRecipient, GovernanceProposal, HalvingConfig, InterfaceId, LeaderboardEntry,
-        LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
-        OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
-        RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction,
-        StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
-        StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        ContractAddresses, ContractMetadata, DCAConfig, DataKey, DayBucket, DelegationChain,
+        DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal, HalvingConfig, InterfaceId,
+        LeaderboardEntry, LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition,
+        MultisigConfig, OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison,
+        PoolConfig, PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
+        RateHistoryEntry, RatingDistribution, ReferralLeaderboardEntry, ReferralTreeNode,
+        ReputationScore, RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule,
+        SmoothingStatus, SocialProfile, StakeAction, StakeHistoryEntry, StakePosition, StakeStreak,
+        StakingCertificate, StakingEfficiencyScore, StorageUsageReport, TaxReport, Tournament,
+        TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
+        VestingEntry,
     },
 };
 
@@ -96,6 +97,14 @@ pub(crate) const MAX_AUCTION_BIDS: u32 = 50;
 /// Most `PriorityBidRecord` entries `get_priority_bids()` retains; oldest is
 /// evicted once full (issue #251).
 pub(crate) const MAX_PRIORITY_BID_RECORDS: u32 = 50;
+/// Keeper incentive for `execute_dca()`, in basis points of the staked amount
+/// (100 bps = 1%). Charged to the user's token allowance on top of the stake.
+pub(crate) const DCA_KEEPER_FEE_BPS: u32 = 100;
+/// Byte limits on the fields of `SocialProfile`. These bound bytes, not
+/// codepoints, so a multi-byte UTF-8 username fits fewer visible characters.
+pub(crate) const MAX_USERNAME_BYTES: u32 = 20;
+pub(crate) const MAX_AVATAR_HASH_BYTES: u32 = 64;
+pub(crate) const MAX_BIO_BYTES: u32 = 160;
 
 #[contract]
 pub struct VaultContract;
@@ -6477,7 +6486,9 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::VestingEntries(staker.clone()), &entries);
-        } else if !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)? {
+        } else if !Self::try_reinvest_reward(env, staker, &token_addr, user_reward)?
+            && !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)?
+        {
             let token_client = token::Client::new(env, &token_addr);
             token_client.transfer(&env.current_contract_address(), staker, &user_reward);
         }
@@ -10036,5 +10047,441 @@ impl VaultContract {
         let mut stats = Self::cohort_stats_or_new(env, cohort_id);
         stats.total_rewards_claimed = stats.total_rewards_claimed.saturating_add(reward);
         Self::cohort_save(env, stats);
+    }
+
+    // ── DCA stake scheduler ─────────────────────────────────────────────────────
+
+    /// Configure a dollar-cost-averaging schedule: every `interval_ledgers`, any
+    /// keeper may call `execute_dca()` to stake roughly `amount` on the caller's
+    /// behalf, funded from the token allowance the user has granted this
+    /// contract.
+    ///
+    /// The user must keep an allowance covering `amount` plus the 1% keeper
+    /// incentive for each execution they want to happen; an execution that runs
+    /// short simply reverts and can be retried after the allowance is topped up.
+    ///
+    /// `variance_bps` applies ±that fraction of `amount` as per-execution
+    /// randomness drawn from `env.prng()`, so the exact size hitting the pool
+    /// isn't predictable to MEV searchers watching the schedule. `0` disables
+    /// randomization; the drawn amount is always clamped to at least 1 unit.
+    /// Note that `env.prng()` is seeded per-ledger and is **not**
+    /// validator-manipulation resistant (same caveat as `draw_lottery`) — it
+    /// raises the cost of front-running, it does not make it impossible.
+    ///
+    /// `max_executions` of `0` means unlimited. `last_executed_at` is seeded
+    /// with the current ledger, so the first execution becomes available one
+    /// full interval after this call. Calling again overwrites the whole config,
+    /// including resetting `executions_done` to 0.
+    ///
+    /// Distinct from a plain recurring stake in that this is DCA-shaped: fixed
+    /// nominal size, randomized actual size, and a bounded execution count.
+    pub fn set_dca_config(
+        env: Env,
+        user: Address,
+        amount: i128,
+        interval_ledgers: u32,
+        variance_bps: u32,
+        max_executions: u32,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+        if interval_ledgers == 0 || variance_bps > BOOST_BPS_BASE {
+            return Err(VaultFeatureError::InvalidDcaConfig);
+        }
+
+        balance::set_dca_config(
+            &env,
+            &user,
+            &DCAConfig {
+                amount,
+                interval_ledgers,
+                variance_bps,
+                max_executions,
+                executions_done: 0,
+                last_executed_at: env.ledger().sequence(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Cancel `user`'s DCA schedule. Reverts with `DcaConfigNotFound` if there
+    /// is nothing to cancel.
+    pub fn cancel_dca(env: Env, user: Address) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        if balance::get_dca_config(&env, &user).is_none() {
+            return Err(VaultFeatureError::DcaConfigNotFound);
+        }
+        balance::remove_dca_config(&env, &user);
+        Ok(())
+    }
+
+    /// Read-only query for `user`'s DCA schedule, if configured.
+    pub fn get_dca_config(env: Env, user: Address) -> Option<DCAConfig> {
+        balance::get_dca_config(&env, &user)
+    }
+
+    /// Permissionless keeper entrypoint: executes `user`'s due DCA stake and
+    /// pays the keeper `DCA_KEEPER_FEE_BPS` (1%) of the staked amount as an
+    /// incentive. Returns the amount staked.
+    ///
+    /// Both the stake and the keeper fee are pulled from `user`'s pre-approved
+    /// allowance via `transfer_from`, so the user never has to be online. Only
+    /// the keeper authorizes this call — the user's standing authorization is
+    /// the allowance plus the stored config.
+    ///
+    /// Reverts with `DcaIntervalNotElapsed` before the interval is up, and
+    /// `DcaExecutionsExhausted` once a non-zero `max_executions` is reached
+    /// (the config is left in place so `get_dca_config` still shows the final
+    /// tally; `cancel_dca` clears it).
+    pub fn execute_dca(
+        env: Env,
+        keeper: Address,
+        user: Address,
+    ) -> Result<i128, VaultFeatureError> {
+        keeper.require_auth();
+        Self::require_not_stopped(&env)?;
+        Self::require_not_shutting_down(&env)?;
+        Self::require_not_paused(&env)?;
+
+        let mut config =
+            balance::get_dca_config(&env, &user).ok_or(VaultFeatureError::DcaConfigNotFound)?;
+
+        if config.max_executions > 0 && config.executions_done >= config.max_executions {
+            return Err(VaultFeatureError::DcaExecutionsExhausted);
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let due_at = config
+            .last_executed_at
+            .saturating_add(config.interval_ledgers);
+        if current_ledger < due_at {
+            return Err(VaultFeatureError::DcaIntervalNotElapsed);
+        }
+
+        let stake_amount = Self::dca_randomized_amount(&env, config.amount, config.variance_bps)?;
+        let keeper_fee = stake_amount
+            .checked_mul(DCA_KEEPER_FEE_BPS as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?
+            .checked_div(BOOST_BPS_BASE as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+
+        // Pull the stake into the contract and pay the keeper straight from the
+        // user's allowance, then credit the position without a second transfer.
+        let token_addr = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract = env.current_contract_address();
+        token_client.transfer_from(&contract, &user, &contract, &stake_amount);
+        if keeper_fee > 0 {
+            token_client.transfer_from(&contract, &user, &keeper, &keeper_fee);
+        }
+
+        Self::credit_escrow_stake(&env, &user, stake_amount)?;
+
+        config.executions_done = config.executions_done.saturating_add(1);
+        config.last_executed_at = current_ledger;
+        balance::set_dca_config(&env, &user, &config);
+
+        events::dca_executed(
+            &env,
+            &user,
+            &keeper,
+            stake_amount,
+            config.executions_done,
+            current_ledger,
+        );
+        Ok(stake_amount)
+    }
+
+    /// Draw the actual DCA stake size: `amount` ± `variance_bps` of itself.
+    /// Clamped to a minimum of 1 so a 100% variance draw can't produce a
+    /// zero-amount stake.
+    fn dca_randomized_amount(
+        env: &Env,
+        amount: i128,
+        variance_bps: u32,
+    ) -> Result<i128, VaultFeatureError> {
+        if variance_bps == 0 {
+            return Ok(amount);
+        }
+        let variance = amount
+            .checked_mul(variance_bps as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?
+            .checked_div(BOOST_BPS_BASE as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        if variance <= 0 {
+            return Ok(amount);
+        }
+
+        // Draw uniformly from [amount - variance, amount + variance].
+        let span = variance
+            .checked_mul(2)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        let span_u64 = u64::try_from(span).map_err(|_| VaultFeatureError::ArithmeticError)?;
+        let offset: u64 = env.prng().gen_range(0..span_u64.saturating_add(1));
+        let drawn = amount
+            .checked_sub(variance)
+            .ok_or(VaultFeatureError::ArithmeticError)?
+            .checked_add(offset as i128)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        Ok(drawn.max(1))
+    }
+
+    // ── Staker social profile ───────────────────────────────────────────────────
+
+    /// Store a public display identity for the caller: `username`, an
+    /// `avatar_hash` (an IPFS CID or similar content hash — this contract never
+    /// dereferences it), and a short `bio`. Requires an active staking position,
+    /// which keeps the profile table bounded by the staker set.
+    ///
+    /// Limits are 20 / 64 / 160 bytes respectively; exceeding any of them
+    /// reverts with `InvalidProfileField` and emits `profile_field_rejected`
+    /// naming the offending field, since Soroban error values can't carry one.
+    /// Empty strings are allowed for all three fields.
+    ///
+    /// **Usernames are not unique.** Enforcing uniqueness would need a reverse
+    /// index and a lookup on every write; consumers must treat the address as
+    /// the identity and the username as a display hint that may collide or be
+    /// deliberately impersonating.
+    pub fn set_social_profile(
+        env: Env,
+        user: Address,
+        username: String,
+        avatar_hash: String,
+        bio: String,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        if balance::get_shares(&env, &user) <= 0 {
+            return Err(VaultFeatureError::PositionNotFound);
+        }
+
+        let ledger = env.ledger().sequence();
+        if username.len() > MAX_USERNAME_BYTES {
+            events::profile_field_rejected(&env, &user, &String::from_str(&env, "username"), ledger);
+            return Err(VaultFeatureError::InvalidProfileField);
+        }
+        if avatar_hash.len() > MAX_AVATAR_HASH_BYTES {
+            events::profile_field_rejected(
+                &env,
+                &user,
+                &String::from_str(&env, "avatar_hash"),
+                ledger,
+            );
+            return Err(VaultFeatureError::InvalidProfileField);
+        }
+        if bio.len() > MAX_BIO_BYTES {
+            events::profile_field_rejected(&env, &user, &String::from_str(&env, "bio"), ledger);
+            return Err(VaultFeatureError::InvalidProfileField);
+        }
+
+        balance::set_social_profile(
+            &env,
+            &user,
+            &SocialProfile {
+                username: username.clone(),
+                avatar_hash,
+                bio,
+                updated_at: ledger,
+            },
+        );
+        events::profile_updated(&env, &user, &username, ledger);
+        Ok(())
+    }
+
+    /// Read-only query for `user`'s social profile, if they have set one.
+    pub fn get_social_profile(env: Env, user: Address) -> Option<SocialProfile> {
+        balance::get_social_profile(&env, &user)
+    }
+
+    /// Delete the caller's social profile. A no-op if none was set — unlike
+    /// `set_social_profile`, this does not require an active position, so a
+    /// staker who has fully exited can still clean up their data.
+    pub fn delete_social_profile(env: Env, user: Address) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        balance::remove_social_profile(&env, &user);
+        events::profile_deleted(&env, &user, env.ledger().sequence());
+        Ok(())
+    }
+
+    // ── Pool rating system ──────────────────────────────────────────────────────
+
+    /// Submit a 1–5 star rating for this pool. Requires an active staking
+    /// position, so ratings come from addresses with skin in the game.
+    ///
+    /// One rating per address: submitting again replaces the previous one
+    /// (the old star bucket is decremented, the new one incremented), so the
+    /// distribution can never be inflated by repeat calls. Reverts with
+    /// `InvalidRating` for anything outside 1–5.
+    pub fn submit_rating(env: Env, user: Address, rating: u32) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        if rating == 0 || rating > 5 {
+            return Err(VaultFeatureError::InvalidRating);
+        }
+        if balance::get_shares(&env, &user) <= 0 {
+            return Err(VaultFeatureError::PositionNotFound);
+        }
+
+        let mut buckets = balance::get_rating_buckets(&env);
+        if let Some(previous) = balance::get_user_rating(&env, &user) {
+            if (1..=5).contains(&previous) {
+                let idx = previous - 1;
+                let count = buckets.get(idx).unwrap_or(0);
+                buckets.set(idx, count.saturating_sub(1));
+            }
+        }
+        let idx = rating - 1;
+        let count = buckets.get(idx).unwrap_or(0);
+        buckets.set(idx, count.saturating_add(1));
+
+        balance::set_rating_buckets(&env, &buckets);
+        balance::set_user_rating(&env, &user, rating);
+
+        let distribution = Self::rating_distribution_from(&buckets);
+        events::rating_submitted(
+            &env,
+            &user,
+            rating,
+            distribution.average_bps,
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
+    /// Read-only query for the pool's aggregate rating spread. All fields are 0
+    /// before any rating has been submitted.
+    pub fn get_rating_distribution(env: Env) -> RatingDistribution {
+        Self::rating_distribution_from(&balance::get_rating_buckets(&env))
+    }
+
+    /// Read-only query for `user`'s own rating, if they have submitted one.
+    pub fn get_user_rating(env: Env, user: Address) -> Option<u32> {
+        balance::get_user_rating(&env, &user)
+    }
+
+    /// Derive the public distribution (totals and mean) from the raw star
+    /// buckets. `average_bps` is the mean scored out of 10 000, i.e.
+    /// `(sum_of_all_ratings * 10000) / (total_ratings * 5)` — 5 stars = 10 000.
+    fn rating_distribution_from(buckets: &Vec<u32>) -> RatingDistribution {
+        let one_star = buckets.get(0).unwrap_or(0);
+        let two_star = buckets.get(1).unwrap_or(0);
+        let three_star = buckets.get(2).unwrap_or(0);
+        let four_star = buckets.get(3).unwrap_or(0);
+        let five_star = buckets.get(4).unwrap_or(0);
+
+        let total_ratings = one_star
+            .saturating_add(two_star)
+            .saturating_add(three_star)
+            .saturating_add(four_star)
+            .saturating_add(five_star);
+
+        let sum: u64 = one_star as u64
+            + 2 * two_star as u64
+            + 3 * three_star as u64
+            + 4 * four_star as u64
+            + 5 * five_star as u64;
+
+        let average_bps = if total_ratings == 0 {
+            0
+        } else {
+            let denominator = total_ratings as u64 * 5;
+            u32::try_from(sum.saturating_mul(BOOST_BPS_BASE as u64) / denominator)
+                .unwrap_or(BOOST_BPS_BASE)
+        };
+
+        RatingDistribution {
+            one_star,
+            two_star,
+            three_star,
+            four_star,
+            five_star,
+            total_ratings,
+            average_bps,
+        }
+    }
+
+    // ── Reinvest rewards into an external pool ──────────────────────────────────
+
+    /// Redirect the caller's future reward claims into `target_pool` instead of
+    /// their own wallet, for cross-pool compounding.
+    ///
+    /// `target_pool` must expose `stake(user: Address, amount: i128)`. It is not
+    /// validated here — a wrong or non-conforming address surfaces on the next
+    /// claim as a `reinvestment_failed` event with the reward paid out
+    /// normally, rather than as a failed configuration call.
+    ///
+    /// Takes effect on the next immediate-payout claim. Pools with a vesting
+    /// period are unaffected at claim time: the reward is queued instead of
+    /// paid, and reinvestment applies when the vested entry is later withdrawn
+    /// if the target is still set. When both this and `set_auto_convert` are
+    /// configured, reinvestment wins and the conversion is skipped.
+    pub fn set_reinvestment_target(
+        env: Env,
+        user: Address,
+        target_pool: Address,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        balance::set_reinvestment_target(&env, &user, &target_pool);
+        Ok(())
+    }
+
+    /// Disable reward reinvestment for the caller; future claims pay out to
+    /// their wallet again. A no-op if no target was set.
+    pub fn clear_reinvestment_target(env: Env, user: Address) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        balance::remove_reinvestment_target(&env, &user);
+        Ok(())
+    }
+
+    /// Read-only query for `user`'s configured reinvestment pool, if any.
+    pub fn get_reinvestment_target(env: Env, user: Address) -> Option<Address> {
+        balance::get_reinvestment_target(&env, &user)
+    }
+
+    /// If `staker` has a reinvestment target, pay the just-claimed
+    /// `reward_amount` toward it and return `Ok(true)` so `do_claim` skips its
+    /// own transfer. Returns `Ok(false)` when no target is configured or the
+    /// reward is zero, leaving the normal payout path in charge.
+    ///
+    /// The reward is transferred to `staker` first and the target pool then
+    /// pulls it from them via its own `stake` — the same two-step shape
+    /// `migrate_position` uses, and the reason the external call can fail
+    /// softly: `try_invoke_contract` rolls back only the nested call, so a
+    /// target pool that reverts (wrong interface, paused, below its minimum)
+    /// leaves the tokens exactly where a direct transfer would have put them.
+    /// That is the required fallback, and `reinvestment_failed` records it.
+    fn try_reinvest_reward(
+        env: &Env,
+        staker: &Address,
+        reward_token: &Address,
+        reward_amount: i128,
+    ) -> Result<bool, VaultError> {
+        let target_pool = match balance::get_reinvestment_target(env, staker) {
+            Some(target) => target,
+            None => return Ok(false),
+        };
+        if reward_amount <= 0 {
+            return Ok(false);
+        }
+
+        let token_client = token::Client::new(env, reward_token);
+        token_client.transfer(&env.current_contract_address(), staker, &reward_amount);
+
+        use soroban_sdk::IntoVal;
+        let args: Vec<soroban_sdk::Val> = (staker.clone(), reward_amount).into_val(env);
+        let result = env.try_invoke_contract::<i128, soroban_sdk::Error>(
+            &target_pool,
+            &symbol_short!("stake"),
+            args,
+        );
+
+        let ledger = env.ledger().sequence();
+        match result {
+            Ok(Ok(_)) => {
+                events::reward_reinvested(env, staker, &target_pool, reward_amount, ledger)
+            }
+            _ => events::reinvestment_failed(env, staker, &target_pool, reward_amount, ledger),
+        }
+        Ok(true)
     }
 }

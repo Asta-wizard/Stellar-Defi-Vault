@@ -927,3 +927,66 @@ pub struct PriorityBidRecord {
     pub previous_position: u32,
     pub ledger: u32,
 }
+
+// ── DCA stake scheduler ─────────────────────────────────────────────────────────
+
+/// A user's dollar-cost-averaging schedule, set via `set_dca_config()` and
+/// executed by any keeper through `execute_dca()`.
+///
+/// - `amount`: nominal stake size per execution, before variance.
+/// - `interval_ledgers`: minimum ledgers between two executions.
+/// - `variance_bps`: ±randomness applied to `amount` on each execution so the
+///   staked size isn't predictable to MEV searchers. 0 disables randomization.
+/// - `max_executions`: total executions allowed; 0 means unlimited.
+/// - `executions_done`: how many executions have run so far.
+/// - `last_executed_at`: ledger of the last execution, seeded with the ledger
+///   the config was created at so the first stake waits a full interval.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DCAConfig {
+    pub amount: i128,
+    pub interval_ledgers: u32,
+    pub variance_bps: u32,
+    pub max_executions: u32,
+    pub executions_done: u32,
+    pub last_executed_at: u32,
+}
+
+// ── Staker social profile ───────────────────────────────────────────────────────
+
+/// Public, self-declared social identity for a staker, set via
+/// `set_social_profile()`.
+///
+/// Usernames are **not** unique: enforcing uniqueness on-chain would require a
+/// reverse username → address index plus a lookup on every write, which costs
+/// more than the feature is worth. Two stakers may hold the same username, so
+/// consumers must treat the address as the only identity and the username as a
+/// display hint only.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SocialProfile {
+    pub username: String,
+    pub avatar_hash: String,
+    pub bio: String,
+    pub updated_at: u32,
+}
+
+// ── Pool rating system ──────────────────────────────────────────────────────────
+
+/// Aggregate 1–5 star rating spread for the pool, returned by
+/// `get_rating_distribution()`.
+///
+/// `average_bps` is the mean rating scored out of 10 000:
+/// `(sum_of_all_ratings * 10000) / (total_ratings * 5)`. It is 0 when no
+/// ratings have been submitted.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingDistribution {
+    pub one_star: u32,
+    pub two_star: u32,
+    pub three_star: u32,
+    pub four_star: u32,
+    pub five_star: u32,
+    pub total_ratings: u32,
+    pub average_bps: u32,
+}
