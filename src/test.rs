@@ -6841,3 +6841,75 @@ fn test_check_and_release_no_price_condition_reverts() {
     let result = f.vault.try_check_and_release(&f.alice);
     assert_eq!(result, Err(Ok(VaultExtError::NotInitialized)));
 }
+
+// ── Issue #250: get_optimal_claim_frequency ─────────────────────────────────────
+
+#[test]
+fn test_optimal_claim_frequency_no_position_returns_zero() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    assert_eq!(advice.recommended_interval_ledgers, 0);
+    assert_eq!(advice.recommended_interval_days, 0);
+    assert_eq!(advice.annual_compounding_gain, 0);
+    assert_eq!(advice.break_even_reward_per_claim, 0);
+}
+
+#[test]
+fn test_optimal_claim_frequency_zero_rate_returns_zero() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &1_000_000);
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    assert_eq!(advice.recommended_interval_ledgers, 0);
+    assert_eq!(advice.recommended_interval_days, 0);
+    assert_eq!(advice.annual_compounding_gain, 0);
+    assert_eq!(advice.break_even_reward_per_claim, 0);
+}
+
+#[test]
+fn test_optimal_claim_frequency_break_even_echoes_tx_cost() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &12_345_i128);
+    assert_eq!(advice.break_even_reward_per_claim, 12_345);
+}
+
+#[test]
+fn test_optimal_claim_frequency_higher_cost_gives_longer_interval() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let low_cost = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    let high_cost = f.vault.get_optimal_claim_frequency(&f.alice, &10_000_i128);
+
+    assert!(low_cost.recommended_interval_ledgers < high_cost.recommended_interval_ledgers);
+    assert!(low_cost.recommended_interval_days <= high_cost.recommended_interval_days);
+}
+
+#[test]
+fn test_optimal_claim_frequency_zero_tx_cost_recommends_claiming_now() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &0_i128);
+    assert_eq!(advice.recommended_interval_ledgers, 0);
+    assert_eq!(advice.recommended_interval_days, 0);
+    assert_eq!(advice.break_even_reward_per_claim, 0);
+}
+
+#[test]
+fn test_optimal_claim_frequency_compounding_gain_is_positive() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&1000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // A small tx cost relative to the position recommends a short interval
+    // well under a year, so compounding at that interval should beat simple
+    // annual accrual.
+    let advice = f.vault.get_optimal_claim_frequency(&f.alice, &1_000_i128);
+    assert!(advice.recommended_interval_ledgers < STELLAR_LEDGERS_PER_YEAR);
+    assert!(advice.annual_compounding_gain > 0);
+}

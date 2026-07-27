@@ -13,13 +13,14 @@ use crate::{
         CapacityAuction, ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey,
         DayBucket, DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, GovernanceProposal,
         HalvingConfig, InterfaceId, LeaderboardEntry, LotteryConfig, MerkleRoot, MigrationExport,
-        Milestone, MilestoneCondition, MultisigConfig, PauseInfo, PauseReason, PendingAction,
-        PoolComparison, PoolConfig, PoolHealthReport, PoolStats, PriceCondition, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
-        RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction,
-        StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
-        StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        Milestone, MilestoneCondition, MultisigConfig, OptimalClaimAdvice, PauseInfo, PauseReason,
+        PendingAction, PoolComparison, PoolConfig, PoolHealthReport, PoolStats, PriceCondition,
+        ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode,
+        ReputationScore, RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule,
+        SmoothingStatus, StakeAction, StakeHistoryEntry, StakePosition, StakeStreak,
+        StakingCertificate, StakingEfficiencyScore, StorageUsageReport, TaxReport, Tournament,
+        TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
+        VestingEntry,
     },
 };
 
@@ -4218,6 +4219,97 @@ impl VaultContract {
             .and_then(|v| v.checked_div(BOOST_BPS_BASE as i128))
             .unwrap_or(0);
         Self::normalize_to_reward_decimals(&env, raw).unwrap_or(raw)
+    }
+
+    /// Read-only advisory: the mathematically optimal claim frequency for
+    /// `user`'s position at the CURRENT reward rate, balancing
+    /// `tx_cost_in_reward_token` against the benefit of compounding claimed
+    /// rewards back into new shares (issue #250).
+    ///
+    /// `tx_cost_in_reward_token` is caller-supplied — the contract cannot
+    /// know actual network fees. `break_even_reward_per_claim` is that same
+    /// value echoed back: claiming is only worth it once accrued reward
+    /// exceeds it. `recommended_interval_ledgers` is how long, from now, it
+    /// takes to accrue that much (reusing the same math as
+    /// `ledgers_to_target`, so it counts any reward already pending toward
+    /// the threshold). `annual_compounding_gain` compares a
+    /// year of claiming+restaking every `recommended_interval_ledgers`
+    /// against a year of simple (non-compounding) accrual, both computed via
+    /// `simulate_compound` so the two figures stay in the same unit space as
+    /// real claims. All figures are approximations at the current reward
+    /// rate/boost tier/campaign multiplier only — they do not account for
+    /// any of these changing over the period estimated.
+    ///
+    /// Returns an all-zero `OptimalClaimAdvice` if `user` has no position or
+    /// the reward rate is 0. No auth required, no state changes.
+    pub fn get_optimal_claim_frequency(
+        env: Env,
+        user: Address,
+        tx_cost_in_reward_token: i128,
+    ) -> OptimalClaimAdvice {
+        let zero = OptimalClaimAdvice {
+            recommended_interval_ledgers: 0,
+            recommended_interval_days: 0,
+            annual_compounding_gain: 0,
+            break_even_reward_per_claim: 0,
+        };
+
+        if balance::get_shares(&env, &user) == 0 {
+            return zero;
+        }
+        if balance::get_reward_rate_bps(&env) == 0 {
+            return zero;
+        }
+
+        let position_amount = match Self::build_position(&env, &user) {
+            Ok(Some(position)) => position.amount,
+            _ => return zero,
+        };
+
+        let break_even_reward_per_claim = tx_cost_in_reward_token;
+
+        let recommended_interval_ledgers =
+            match Self::ledgers_to_target(env.clone(), user.clone(), break_even_reward_per_claim) {
+                Ok(ledgers) if ledgers != u32::MAX => ledgers,
+                _ => {
+                    return OptimalClaimAdvice {
+                        break_even_reward_per_claim,
+                        ..zero
+                    }
+                }
+            };
+
+        let recommended_interval_days = ((recommended_interval_ledgers as u64) * 5)
+            .div_ceil(86400)
+            .min(u32::MAX as u64) as u32;
+
+        // Compounding periods of 0 are meaningless to simulate_compound (it
+        // treats claim_interval 0 as "nothing accrues"); a 0 recommendation
+        // just means "claim now", so simulate at the smallest real interval
+        // instead while still reporting the literal 0 above.
+        let compounding_interval = recommended_interval_ledgers.max(1);
+        let compounded = Self::simulate_compound(
+            env.clone(),
+            position_amount,
+            STELLAR_LEDGERS_PER_YEAR,
+            compounding_interval,
+        )
+        .unwrap_or(0);
+        let simple = Self::simulate_compound(
+            env,
+            position_amount,
+            STELLAR_LEDGERS_PER_YEAR,
+            STELLAR_LEDGERS_PER_YEAR,
+        )
+        .unwrap_or(0);
+        let annual_compounding_gain = compounded.saturating_sub(simple).max(0);
+
+        OptimalClaimAdvice {
+            recommended_interval_ledgers,
+            recommended_interval_days,
+            annual_compounding_gain,
+            break_even_reward_per_claim,
+        }
     }
 
     // --- Boost campaign (#48) ---

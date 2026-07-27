@@ -884,3 +884,22 @@ pub struct PriceCondition {
     pub asset_id: String,
     pub direction: TriggerDirection,
 }
+
+// ── Issue #250: optimal claim frequency advisory ───────────────────────────────
+
+/// Advisory result from `get_optimal_claim_frequency()` (issue #250). Every
+/// field is an approximation at the current reward rate/boost/campaign — see
+/// that function's doc comment for the exact assumptions.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptimalClaimAdvice {
+    pub recommended_interval_ledgers: u32,
+    pub recommended_interval_days: u32,
+    /// Estimated annual reward gain from compounding at
+    /// `recommended_interval_ledgers` vs. simple (non-compounding) accrual.
+    /// Named `annual_compounding_gain` rather than the longer
+    /// `estimated_annual_gain_from_compounding` — Soroban's contracttype
+    /// struct field names are capped at 30 characters.
+    pub annual_compounding_gain: i128,
+    pub break_even_reward_per_claim: i128,
+}
