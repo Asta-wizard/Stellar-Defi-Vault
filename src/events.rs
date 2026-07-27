@@ -887,3 +887,48 @@ pub fn proposal_vetoed(
     env.events()
         .publish(topics, (proposal_id, user_stake_bps, ledger));
 }
+
+// ── Issue #242: stake matching program ────────────────────────────────────────
+
+pub fn stake_matched(
+    env: &Env,
+    user: &Address,
+    stake_amount: i128,
+    match_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("stk_mtch"), user);
+    env.events()
+        .publish(topics, (stake_amount, match_amount, ledger));
+}
+
+// ── Issue #243: unstake insurance policy ──────────────────────────────────────
+
+pub fn insurance_purchased(
+    env: &Env,
+    user: &Address,
+    premium_paid: i128,
+    position_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("ins_purc"), user);
+    env.events()
+        .publish(topics, (premium_paid, position_amount, ledger));
+}
+
+// ── Issue #244: multi-currency claim ──────────────────────────────────────────
+
+pub fn reward_claimed_in_token(
+    env: &Env,
+    user: &Address,
+    reward_amount: i128,
+    output_token: &Address,
+    output_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("clm_tok"), user);
+    env.events().publish(
+        topics,
+        (reward_amount, output_token.clone(), output_amount, ledger),
+    );
+}
