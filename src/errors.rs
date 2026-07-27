@@ -188,7 +188,8 @@ pub enum VaultExtError {
     /// exported (issue #203).
     TooManyPositions = 7,
     /// Returned by `set_fee_recipients()` when `recipients.len() > 5`
-    /// (issue #197).
+    /// (issue #197), and by `add_output_token()` when the output-token
+    /// whitelist is already full (issue #244).
     TooManyRecipients = 8,
     /// Returned by `set_fee_recipients()` when the recipients' `share_bps`
     /// values don't sum to exactly 10 000 (issue #197).
@@ -227,7 +228,9 @@ pub enum VaultExtError {
     SlippageExceeded = 19,
     /// Returned by `swap_and_stake()` when `input_token` is not registered
     /// with a DEX router capable of swapping it to the stake token, or when
-    /// no DEX router has been configured at all (issue #205).
+    /// no DEX router has been configured at all (issue #205). Also returned
+    /// by `claim_in_token()` for an `output_token` that is not on the
+    /// admin-managed whitelist (issue #244).
     UnsupportedInputToken = 20,
     /// Returned by `position_split()` when `split_amount` is not strictly
     /// between 0 and the caller's current position amount (issue #209).
@@ -311,7 +314,10 @@ pub enum VaultExtError {
     /// #241).
     AlreadyVetoed = 49,
     /// Returned by `set_veto_threshold_bps()` when `bps` exceeds 10 000
-    /// (100%) (issue #241).
+    /// (100%) (issue #241). Both error enums are at Soroban's 50-variant cap,
+    /// so this doubles as the generic "basis-points value out of range" code —
+    /// `start_matching_program()` also returns it for a `match_rate_bps` above
+    /// 10 000 (issue #242).
     InvalidVetoThreshold = 50,
 }
 
