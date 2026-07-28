@@ -937,3 +937,37 @@ pub fn priority_bid_placed(
     env.events()
         .publish(topics, (bid_amount, previous_position, ledger));
 }
+
+// ── Message Board (Staker Messages) ─────────────────────────────────────────
+
+pub fn message_posted(
+    env: &Env,
+    author: &Address,
+    content_hash: soroban_sdk::BytesN<32>,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("msg_post"), author);
+    env.events().publish(topics, (content_hash, ledger));
+}
+
+// ── Tier Rebalancing ─────────────────────────────────────────────────────────
+
+pub fn tier_changed(
+    env: &Env,
+    user: &Address,
+    old_tier: crate::storage::StakeTier,
+    new_tier: crate::storage::StakeTier,
+    pool_share_bps: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("tier_chg"), user);
+    env.events()
+        .publish(topics, (old_tier, new_tier, pool_share_bps, ledger));
+}
+
+// ── Configurable Precision ──────────────────────────────────────────────────
+
+pub fn precision_changed(env: &Env, admin: &Address, old_precision: u32, new_precision: u32, ledger: u32) {
+    let topics = (symbol_short!("prec_chg"), admin);
+    env.events().publish(topics, (old_precision, new_precision, ledger));
+}

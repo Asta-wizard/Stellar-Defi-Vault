@@ -5072,7 +5072,9 @@ impl VaultContract {
             return Ok(0);
         }
         let multiplier = BOOST_BPS_BASE;
-        Self::reward_for_ledgers(amount, rate_bps, multiplier, BOOST_BPS_BASE, ledgers)
+        let precision = storage::Storage::get_reward_precision(&env);
+        let reward = Self::reward_for_ledgers(amount, rate_bps, multiplier, BOOST_BPS_BASE, ledgers, precision)?;
+        Ok(reward / (precision as i128))
     }
 
     /// Simulate compounded rewards by claiming every `claim_interval` ledgers
@@ -5092,6 +5094,7 @@ impl VaultContract {
         }
 
         let multiplier = BOOST_BPS_BASE;
+        let precision = storage::Storage::get_reward_precision(&env);
         let mut total_reward: i128 = 0;
         let mut remaining = ledgers;
         let mut current_amount = amount;
@@ -5102,13 +5105,15 @@ impl VaultContract {
             } else {
                 claim_interval
             };
-            let reward = Self::reward_for_ledgers(
+            let raw_reward = Self::reward_for_ledgers(
                 current_amount,
                 rate_bps,
                 multiplier,
                 BOOST_BPS_BASE,
                 interval,
+                precision,
             )?;
+            let reward = raw_reward / (precision as i128);
             total_reward = total_reward
                 .checked_add(reward)
                 .ok_or(VaultError::ArithmeticError)?;
@@ -5390,6 +5395,14 @@ impl VaultContract {
         // Issue #242: credit the admin-funded stake match, if a program is live.
         Self::apply_stake_match(env, staker, amount)?;
 
+        // Tier rebalancing for caller and top 20 stakers
+        let _ = Self::rebalance_tier(env.clone(), staker.clone());
+        if let Ok(leaderboard) = Self::get_leaderboard(env.clone()) {
+            for entry in leaderboard.iter() {
+                let _ = Self::rebalance_tier(env.clone(), entry.staker.clone());
+            }
+        }
+
         Ok(shares)
     }
 
@@ -5592,6 +5605,14 @@ impl VaultContract {
         // one fewer active member when the position is fully closed.
         Self::cohort_record_unstake(env, staker, amount, new_user_shares == 0);
 
+        // Tier rebalancing for caller and top 20 stakers
+        let _ = Self::rebalance_tier(env.clone(), staker.clone());
+        if let Ok(leaderboard) = Self::get_leaderboard(env.clone()) {
+            for entry in leaderboard.iter() {
+                let _ = Self::rebalance_tier(env.clone(), entry.staker.clone());
+            }
+        }
+
         Ok(amount_returned)
     }
 
@@ -5682,6 +5703,7 @@ impl VaultContract {
         let checkpoint =
             balance::get_reward_checkpoint_ledger(env, user).unwrap_or(env.ledger().sequence());
 
+        let precision_factor = storage::Storage::get_reward_precision(env);
         let pending_since_checkpoint = Self::reward_between_ledgers(
             env,
             user,
@@ -5689,10 +5711,18 @@ impl VaultContract {
             checkpoint,
             env.ledger().sequence(),
             false,
+            precision_factor,
         )?;
 
-        accrued
+        let current_dust = storage::Storage::get_accumulated_dust(env, user);
+        let total_dust = current_dust
             .checked_add(pending_since_checkpoint)
+            .ok_or(VaultError::ArithmeticError)?;
+        
+        let whole_units = total_dust / (precision_factor as i128);
+
+        accrued
+            .checked_add(whole_units)
             .ok_or(VaultError::ArithmeticError)
     }
 
@@ -5708,6 +5738,7 @@ impl VaultContract {
             return Ok(());
         }
         let checkpoint = balance::get_reward_checkpoint_ledger(env, user).unwrap_or(current_ledger);
+        let precision_factor = storage::Storage::get_reward_precision(env);
         let additional_reward = Self::reward_between_ledgers(
             env,
             user,
@@ -5715,14 +5746,27 @@ impl VaultContract {
             checkpoint,
             current_ledger,
             true,
+            precision_factor,
         )?;
 
         if additional_reward > 0 {
-            let accrued = balance::get_accrued_reward(env, user);
-            let updated_accrued = accrued
+            let current_dust = storage::Storage::get_accumulated_dust(env, user);
+            let total_dust = current_dust
                 .checked_add(additional_reward)
                 .ok_or(VaultError::ArithmeticError)?;
-            balance::set_accrued_reward(env, user, updated_accrued);
+                
+            let whole_units = total_dust / (precision_factor as i128);
+            let new_dust = total_dust % (precision_factor as i128);
+
+            storage::Storage::set_accumulated_dust(env, user, new_dust);
+
+            if whole_units > 0 {
+                let accrued = balance::get_accrued_reward(env, user);
+                let updated_accrued = accrued
+                    .checked_add(whole_units)
+                    .ok_or(VaultError::ArithmeticError)?;
+                balance::set_accrued_reward(env, user, updated_accrued);
+            }
         }
 
         balance::set_reward_checkpoint_ledger(env, user, current_ledger);
@@ -5788,6 +5832,7 @@ impl VaultContract {
         start_ledger: u32,
         end_ledger: u32,
         persist: bool,
+        precision_factor: u32,
     ) -> Result<i128, VaultError> {
         if current_shares == 0 || end_ledger <= start_ledger {
             return Ok(0);
@@ -5896,6 +5941,7 @@ impl VaultContract {
                         current_multiplier,
                         campaign_mult,
                         seg_end - cursor,
+                        precision_factor,
                     )?)
                     .ok_or(VaultError::ArithmeticError)?;
             }
@@ -5939,7 +5985,11 @@ impl VaultContract {
             .checked_add(current_remainder)
             .ok_or(VaultError::ArithmeticError)?;
 
-        let reward = total_dust_with_remainder
+        let total_dust_scaled = total_dust_with_remainder
+            .checked_mul(precision_factor as i128)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        let reward = total_dust_scaled
             .checked_div(divisor)
             .ok_or(VaultError::ArithmeticError)?;
 
@@ -5991,6 +6041,7 @@ impl VaultContract {
         multiplier_bps: u32,
         campaign_multiplier_bps: u32,
         elapsed_ledgers: u32,
+        precision_factor: u32,
     ) -> Result<i128, VaultError> {
         if elapsed_ledgers == 0 || amount == 0 {
             return Ok(0);
@@ -6014,6 +6065,8 @@ impl VaultContract {
             .checked_mul(boosted_rate_bps)
             .ok_or(VaultError::ArithmeticError)?
             .checked_mul(elapsed_ledgers as i128)
+            .ok_or(VaultError::ArithmeticError)?
+            .checked_mul(precision_factor as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?
@@ -10152,4 +10205,231 @@ impl VaultContract {
         stats.total_rewards_claimed = stats.total_rewards_claimed.saturating_add(reward);
         Self::cohort_save(env, stats);
     }
+
+    // ── Message Board (Staker Messages) ─────────────────────────────────────────
+
+    pub fn set_min_stake_to_post(env: Env, admin: Address, amount: i128) -> Result<(), VaultError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env)?;
+        if admin != stored_admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if amount < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        storage::Storage::set_min_stake_to_post(&env, amount);
+        Ok(())
+    }
+
+    pub fn post_message(env: Env, user: Address, content: String) -> Result<(), VaultError> {
+        user.require_auth();
+
+        let len = content.len();
+        if len > 280 {
+            return Err(VaultError::MessageTooLong);
+        }
+
+        if !storage::Storage::has_position(&env, &user) {
+            return Err(VaultError::PositionNotFound);
+        }
+
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let current_stake = balance::shares_to_amount(total_shares, total_deposited, user_shares).unwrap_or(0);
+
+        if let Some(min_stake) = storage::Storage::get_min_stake_to_post(&env) {
+            if current_stake < min_stake {
+                return Err(VaultError::BelowMinimumStake);
+            }
+        }
+
+        let mut messages = storage::Storage::get_messages(&env);
+        let posted_at = env.ledger().sequence();
+        let message = storage::Message {
+            author: user.clone(),
+            content: content.clone(),
+            posted_at,
+            stake_amount_at_post: current_stake,
+        };
+
+        messages.push_back(message);
+
+        if messages.len() > 50 {
+            messages.pop_front();
+        }
+
+        storage::Storage::set_messages(&env, &messages);
+
+        let mut raw = [0u8; 280];
+        let slice = &mut raw[..len as usize];
+        content.copy_into_slice(slice);
+        let mut buf = Bytes::new(&env);
+        buf.extend_from_slice(slice);
+        let content_hash: soroban_sdk::BytesN<32> = env.crypto().sha256(&buf).into();
+
+        events::message_posted(&env, &user, content_hash, posted_at);
+        Ok(())
+    }
+
+    pub fn get_messages(env: Env) -> soroban_sdk::Vec<storage::Message> {
+        let mut messages = storage::Storage::get_messages(&env);
+        let mut reversed = soroban_sdk::Vec::new(&env);
+        while let Some(msg) = messages.pop_back() {
+            reversed.push_back(msg);
+        }
+        reversed
+    }
+
+    pub fn delete_message(env: Env, admin: Address, index: u32) -> Result<(), VaultError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env)?;
+        if admin != stored_admin {
+            return Err(VaultError::Unauthorized);
+        }
+        let mut messages = storage::Storage::get_messages(&env);
+        if index >= messages.len() {
+            return Err(VaultError::ArithmeticError);
+        }
+        messages.remove(index);
+        storage::Storage::set_messages(&env, &messages);
+        Ok(())
+    }
+
+    // ── Tier Rebalancing ─────────────────────────────────────────────────────────
+
+    pub fn get_user_tier(env: Env, user: Address) -> storage::StakeTier {
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        
+        let pool_share_bps = if total_shares > 0 {
+            ((user_shares as i128) * 10000 / (total_shares as i128)) as u32
+        } else {
+            0
+        };
+
+        if pool_share_bps >= 3000 {
+            storage::StakeTier::Platinum
+        } else if pool_share_bps >= 1500 {
+            storage::StakeTier::Gold
+        } else if pool_share_bps >= 500 {
+            storage::StakeTier::Silver
+        } else {
+            storage::StakeTier::Bronze
+        }
+    }
+
+    pub fn get_tier_benefits(env: Env, tier: storage::StakeTier) -> storage::TierBenefits {
+        match tier {
+            storage::StakeTier::Bronze => storage::TierBenefits { boost_multiplier_bps: 0, fee_discount_bps: 0 },
+            storage::StakeTier::Silver => storage::TierBenefits { boost_multiplier_bps: 1000, fee_discount_bps: 1000 },
+            storage::StakeTier::Gold => storage::TierBenefits { boost_multiplier_bps: 2000, fee_discount_bps: 2000 },
+            storage::StakeTier::Platinum => storage::TierBenefits { boost_multiplier_bps: 5000, fee_discount_bps: 5000 },
+        }
+    }
+
+    pub fn rebalance_tier(env: Env, user: Address) -> Result<(), VaultError> {
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        
+        let pool_share_bps = if total_shares > 0 {
+            ((user_shares as i128) * 10000 / (total_shares as i128)) as u32
+        } else {
+            0
+        };
+
+        let new_tier = if pool_share_bps >= 3000 {
+            storage::StakeTier::Platinum
+        } else if pool_share_bps >= 1500 {
+            storage::StakeTier::Gold
+        } else if pool_share_bps >= 500 {
+            storage::StakeTier::Silver
+        } else {
+            storage::StakeTier::Bronze
+        };
+
+        let old_tier = storage::Storage::get_user_tier(&env, &user).unwrap_or(storage::StakeTier::Bronze);
+        
+        if old_tier != new_tier {
+            storage::Storage::set_user_tier(&env, &user, &new_tier);
+            events::tier_changed(&env, &user, old_tier, new_tier, pool_share_bps, env.ledger().sequence());
+        }
+        
+        Ok(())
+    }
+
+    // ── Pool Performance Benchmark ──────────────────────────────────────────
+
+    pub fn pool_performance_benchmark(env: Env, since_ledger: u32) -> PoolPerformanceBenchmark {
+        let current_ledger = env.ledger().sequence();
+        let ledgers_elapsed = current_ledger.saturating_sub(since_ledger);
+
+        let total_staked = balance::get_total_deposited(&env);
+        let reward_rate_bps = balance::get_reward_rate_bps(&env) as i128;
+        
+        let actual_rewards_paid = Self::get_total_ever_claimed(env.clone());
+
+        let denom: i128 = (BOOST_BPS_BASE as i128) * (STELLAR_LEDGERS_PER_YEAR as i128);
+        let x: i128 = reward_rate_bps.saturating_mul(ledgers_elapsed as i128);
+
+        let term1 = total_staked.saturating_mul(x) / denom;
+        let term2 = term1.saturating_mul(x) / (2 * denom);
+        
+        let theoretical_max_rewards = term1.saturating_add(term2);
+        
+        let efficiency_bps = if theoretical_max_rewards == 0 {
+            if actual_rewards_paid == 0 { 0 } else { 10000 }
+        } else {
+            let eff = (actual_rewards_paid.saturating_mul(10000)) / theoretical_max_rewards;
+            if eff > 10000 { 10000 } else { eff as u32 }
+        };
+
+        PoolPerformanceBenchmark {
+            theoretical_max_rewards,
+            actual_rewards_paid,
+            efficiency_bps,
+            measurement_period_ledgers: ledgers_elapsed,
+        }
+    }
+
+    // ── Configurable Precision ────────────────────────────────────────────────
+    
+    pub fn set_reward_precision(env: Env, admin: Address, precision_factor: u32) -> Result<(), VaultExtError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env).map_err(|_| VaultExtError::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(VaultExtError::Unauthorized);
+        }
+
+        let mut n = precision_factor;
+        while n > 1 && n % 10 == 0 {
+            n /= 10;
+        }
+        if n != 1 {
+            return Err(VaultExtError::InvalidPrecision);
+        }
+
+        let old_precision = storage::Storage::get_reward_precision(&env);
+        storage::Storage::set_reward_precision(&env, precision_factor);
+        events::precision_changed(&env, &admin, old_precision, precision_factor, env.ledger().sequence());
+
+        Ok(())
+    }
+
+    pub fn get_reward_precision(env: Env) -> u32 {
+        storage::Storage::get_reward_precision(&env)
+    }
+
+    pub fn get_accumulated_dust(env: Env, user: Address) -> i128 {
+        storage::Storage::get_accumulated_dust(&env, &user)
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolPerformanceBenchmark {
+    pub theoretical_max_rewards: i128,
+    pub actual_rewards_paid: i128,
+    pub efficiency_bps: u32,
+    pub measurement_period_ledgers: u32,
 }
