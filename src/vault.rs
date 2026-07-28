@@ -21,7 +21,7 @@ use crate::{
         StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
         StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
         UnstakeCheckResult, UserStats, UserSummary, VestingEntry, PriceFloorConfig, HaltedInterval,
-        ExitQueueConfig, ExitRequest, ProgressiveTaxTier,
+        ExitQueueConfig, ExitRequest, ProgressiveTaxTier, StakeProof,
     },
 };
 
@@ -10764,6 +10764,102 @@ impl VaultContract {
             }
         }
         applicable_fee
+    }
+
+    // ── Stake Proof Attestation ───────────────────────────────────────────────
+
+    /// Generate a verifiable off-chain attestation of the caller's staking position.
+    /// The nonce is monotonically incremented per user to prevent replay.
+    pub fn generate_stake_proof(
+        env: Env,
+        user: Address,
+        valid_for_ledgers: u32,
+    ) -> Result<StakeProof, VaultError> {
+        user.require_auth();
+
+        let shares = balance::get_shares(&env, &user);
+        if shares == 0 {
+            return Err(VaultError::PositionNotFound);
+        }
+
+        let staked_since: u32 = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let staked_amount = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        let proof_issued_at = env.ledger().sequence();
+        let expires_at = proof_issued_at.saturating_add(valid_for_ledgers);
+
+        // Monotonically increment nonce to prevent replay
+        let nonce = storage::Storage::get_proof_nonce(&env, &user)
+            .checked_add(1)
+            .ok_or(VaultError::ArithmeticError)?;
+        storage::Storage::set_proof_nonce(&env, &user, nonce);
+
+        Ok(StakeProof {
+            holder: user,
+            pool_contract: env.current_contract_address(),
+            staked_amount,
+            staked_since,
+            proof_issued_at,
+            expires_at,
+            nonce,
+        })
+    }
+
+    /// Read-only query: return the latest nonce issued to `user`.
+    pub fn get_proof_nonce(env: Env, user: Address) -> u64 {
+        storage::Storage::get_proof_nonce(&env, &user)
+    }
+
+    /// Verify a StakeProof against current on-chain state.
+    /// Returns false if: expired, pool_contract mismatch, user has no position,
+    /// or the staked_amount / staked_since fields don't match live state.
+    pub fn verify_stake_proof(env: Env, proof: StakeProof) -> bool {
+        // 1. Pool contract must match this contract
+        if proof.pool_contract != env.current_contract_address() {
+            return false;
+        }
+
+        // 2. Must not be expired
+        let current_ledger = env.ledger().sequence();
+        if current_ledger > proof.expires_at {
+            return false;
+        }
+
+        // 3. Holder must still have an active position
+        let shares = balance::get_shares(&env, &proof.holder);
+        if shares == 0 {
+            return false;
+        }
+
+        // 4. Staked-since ledger must match recorded value
+        let staked_since: u32 = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::StakedAtLedger(proof.holder.clone()))
+            .unwrap_or(0);
+        if staked_since != proof.staked_since {
+            return false;
+        }
+
+        // 5. Staked amount must match current redemption value (at proof issuance amount ≤ current is ok;
+        //    we check that the proof amount doesn't exceed current value to guard against inflated proofs)
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let current_amount =
+            balance::shares_to_amount(total_shares, total_deposited, shares).unwrap_or(0);
+        if proof.staked_amount > current_amount {
+            return false;
+        }
+
+        true
     }
 }
 

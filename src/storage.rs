@@ -1186,3 +1186,31 @@ impl Storage {
         env.storage().instance().set(PROG_TAX, tiers);
     }
 }
+
+// ── Stake Proof Attestation ───────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StakeProof {
+    pub holder: Address,
+    pub pool_contract: Address,
+    pub staked_amount: i128,
+    pub staked_since: u32,
+    pub proof_issued_at: u32,
+    pub expires_at: u32,
+    pub nonce: u64,
+}
+
+const PROOF_NONCE: &Symbol = &symbol_short!("pr_nonce");
+
+impl Storage {
+    pub fn get_proof_nonce(env: &Env, user: &Address) -> u64 {
+        let key = (PROOF_NONCE, user.clone());
+        env.storage().persistent().get::<_, u64>(&key).unwrap_or(0)
+    }
+
+    pub fn set_proof_nonce(env: &Env, user: &Address, nonce: u64) {
+        let key = (PROOF_NONCE, user.clone());
+        env.storage().persistent().set(&key, &nonce);
+    }
+}
