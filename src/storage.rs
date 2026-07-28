@@ -864,6 +864,19 @@ pub struct Milestone {
     pub threshold: i128,
 }
 
+/// A single entry in the achievement leaderboard (issue #173 extension).
+///
+/// - `user`: the staker's address.
+/// - `milestone_count`: number of milestones achieved by this staker.
+/// - `latest_achievement_ledger`: most recent ledger when a milestone was achieved.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AchievementLeaderboardEntry {
+    pub user: Address,
+    pub milestone_count: u32,
+    pub latest_achievement_ledger: u32,
+}
+
 // ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
 
 /// Direction the oracle price must move relative to `trigger_price` to

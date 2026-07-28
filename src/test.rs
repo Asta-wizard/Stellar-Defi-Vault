@@ -6569,6 +6569,199 @@ fn test_add_milestone_max_cap_enforced() {
     assert_eq!(result, Err(Ok(VaultExtError::TooManyMilestones)));
 }
 
+// ── Achievement leaderboard tests ─────────────────────────────────────────────
+
+#[test]
+fn test_achievement_leaderboard_more_milestones_ranks_higher() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    
+    // Setup milestones
+    let name1 = soroban_sdk::String::from_str(&f.env, "First Milestone");
+    let id1 = f.vault.add_milestone(
+        &f.admin,
+        &name1,
+        &MilestoneCondition::TotalStakedAmount,
+        &100_i128,
+    );
+    
+    let name2 = soroban_sdk::String::from_str(&f.env, "Second Milestone");
+    let id2 = f.vault.add_milestone(
+        &f.admin,
+        &name2,
+        &MilestoneCondition::TotalStakedAmount,
+        &500_000_i128,
+    );
+    
+    // Alice stakes and achieves both milestones
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.check_milestones(&f.alice);
+    
+    // Bob stakes and achieves only first milestone
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.check_milestones(&f.bob);
+    
+    let leaderboard = f.vault.get_achievement_leaderboard();
+    assert_eq!(leaderboard.len(), 2);
+    
+    // Alice should be first (more milestones)
+    let first = leaderboard.get(0).unwrap();
+    assert_eq!(first.user, f.alice);
+    assert_eq!(first.milestone_count, 2);
+    
+    // Bob should be second
+    let second = leaderboard.get(1).unwrap();
+    assert_eq!(second.user, f.bob);
+    assert_eq!(second.milestone_count, 1);
+}
+
+#[test]
+fn test_achievement_leaderboard_tie_breaker_by_recency() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    
+    // Setup a milestone
+    let name = soroban_sdk::String::from_str(&f.env, "Staker");
+    let id = f.vault.add_milestone(
+        &f.admin,
+        &name,
+        &MilestoneCondition::TotalStakedAmount,
+        &100_i128,
+    );
+    
+    // Alice stakes and achieves milestone at ledger 1
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.check_milestones(&f.alice);
+    
+    // Bob stakes and achieves milestone at ledger 100 (more recent)
+    set_ledger(&f.env, 100);
+    f.vault.stake(&f.bob, &1_000_000);
+    f.vault.check_milestones(&f.bob);
+    
+    let leaderboard = f.vault.get_achievement_leaderboard();
+    assert_eq!(leaderboard.len(), 2);
+    
+    // Bob should be first (more recent achievement)
+    let first = leaderboard.get(0).unwrap();
+    assert_eq!(first.user, f.bob);
+    assert_eq!(first.milestone_count, 1);
+    
+    // Alice should be second
+    let second = leaderboard.get(1).unwrap();
+    assert_eq!(second.user, f.alice);
+    assert_eq!(second.milestone_count, 1);
+}
+
+#[test]
+fn test_achievement_leaderboard_user_with_no_milestones_not_ranked() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    
+    // Setup a milestone
+    let name = soroban_sdk::String::from_str(&f.env, "Staker");
+    f.vault.add_milestone(
+        &f.admin,
+        &name,
+        &MilestoneCondition::TotalStakedAmount,
+        &100_i128,
+    );
+    
+    // Alice stakes and achieves milestone
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.check_milestones(&f.alice);
+    
+    // Bob stakes but doesn't achieve milestone (threshold not met)
+    f.vault.stake(&f.bob, &50);
+    f.vault.check_milestones(&f.bob);
+    
+    let leaderboard = f.vault.get_achievement_leaderboard();
+    assert_eq!(leaderboard.len(), 1);
+    
+    // Only Alice should be on leaderboard
+    let first = leaderboard.get(0).unwrap();
+    assert_eq!(first.user, f.alice);
+    
+    // Bob should have no rank
+    let bob_rank = f.vault.get_user_milestone_rank(&f.bob);
+    assert!(bob_rank.is_none());
+}
+
+#[test]
+fn test_achievement_leaderboard_top_20_cap_enforced() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    
+    // Setup a milestone
+    let name = soroban_sdk::String::from_str(&f.env, "Staker");
+    f.vault.add_milestone(
+        &f.admin,
+        &name,
+        &MilestoneCondition::TotalStakedAmount,
+        &100_i128,
+    );
+    
+    // Create 25 stakers who all achieve the milestone
+    let mut stakers = Vec::new(&f.env);
+    for i in 0..25 {
+        let staker = Address::generate(&f.env);
+        f.vault.stake(&staker, &1_000_000);
+        f.vault.check_milestones(&staker);
+        stakers.push_back(staker);
+    }
+    
+    let leaderboard = f.vault.get_achievement_leaderboard();
+    assert_eq!(leaderboard.len(), 20); // Cap at 20
+}
+
+#[test]
+fn test_get_user_milestone_rank_returns_correct_rank() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    
+    // Setup milestones
+    let name1 = soroban_sdk::String::from_str(&f.env, "First");
+    f.vault.add_milestone(
+        &f.admin,
+        &name1,
+        &MilestoneCondition::TotalStakedAmount,
+        &100_i128,
+    );
+    
+    let name2 = soroban_sdk::String::from_str(&f.env, "Second");
+    f.vault.add_milestone(
+        &f.admin,
+        &name2,
+        &MilestoneCondition::TotalStakedAmount,
+        &500_000_i128,
+    );
+    
+    // Alice achieves 2 milestones
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.check_milestones(&f.alice);
+    
+    // Bob achieves 1 milestone
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.check_milestones(&f.bob);
+    
+    let alice_rank = f.vault.get_user_milestone_rank(&f.alice);
+    assert_eq!(alice_rank.unwrap(), 1); // Alice is rank 1
+    
+    let bob_rank = f.vault.get_user_milestone_rank(&f.bob);
+    assert!(bob_rank.unwrap() > 1); // Bob is rank 2
+}
+
+#[test]
+fn test_get_user_milestone_rank_none_for_no_milestones() {
+    let f = VaultFixture::new();
+    set_ledger(&f.env, 1);
+    
+    // Alice stakes but doesn't achieve any milestones
+    f.vault.stake(&f.alice, &1_000_000);
+    
+    let rank = f.vault.get_user_milestone_rank(&f.alice);
+    assert!(rank.is_none());
+}
+
 // ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
 
 #[test]
