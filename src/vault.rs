@@ -5522,6 +5522,12 @@ impl VaultContract {
             return Err(VaultError::ZeroAmount);
         }
 
+        // Issue #315: lot size normalization
+        let lot_size = balance::get_lot_size(env);
+        if lot_size > 1 && amount % lot_size != 0 {
+            return Err(VaultError::BelowMinimumStake);
+        }
+
         let token_addr = Self::token_address(env)?;
 
         let total_shares = balance::get_total_shares(env);
@@ -5875,6 +5881,11 @@ impl VaultContract {
         // Issue #245: cohort bookkeeping — the gross position reduction, and
         // one fewer active member when the position is fully closed.
         Self::cohort_record_unstake(env, staker, amount, new_user_shares == 0);
+
+        // Issue #314: mint withdrawal receipt for tax/accounting
+        let penalty_paid = amount - amount_after_penalty;
+        let rewards_claimed = balance::get_accrued_reward(env, staker);
+        Self::mint_withdrawal_receipt(env, staker, amount_returned, rewards_claimed, penalty_paid);
 
         Ok(amount_returned)
     }
@@ -6822,6 +6833,10 @@ impl VaultContract {
         // Issue #235: crank the smoothing schedule before accruing, so this
         // claim picks up everything that has vested up to now.
         Self::settle_smoothing(env);
+
+        // Issue #313: check and pay anniversary bonus before accruing rewards.
+        let _ = Self::do_check_anniversary(env, staker);
+
         let current_shares = balance::get_shares(env, staker);
         Self::accrue_rewards(env, staker, current_shares)?;
 
@@ -11710,5 +11725,229 @@ impl VaultContract {
             env.ledger().sequence(),
         );
         Ok(())
+    }
+
+    // ── Issue #312: gift staking position ────────────────────────────────────
+
+    /// Fund a new staking position for another address as a gift.
+    /// Tokens come from `sender`; the position is credited to `recipient`.
+    /// Reverts if recipient already has an active position.
+    pub fn gift_stake(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        amount: i128,
+    ) -> Result<i128, VaultError> {
+        sender.require_auth();
+        Self::require_not_stopped(&env)?;
+        Self::require_not_shutting_down(&env)?;
+        Self::require_not_sunsetting(&env)?;
+        Self::require_not_paused(&env)?;
+
+        if amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        // Recipient must not already have an active position.
+        let recipient_shares = balance::get_shares(&env, &recipient);
+        if recipient_shares > 0 {
+            return Err(VaultError::RecipientAlreadyStaking);
+        }
+
+        // Transfer tokens from sender to contract.
+        let token_addr = Self::token_address(&env)?;
+        soroban_sdk::token::Client::new(&env, &token_addr).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        // Create position for recipient.
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let shares =
+            balance::amount_to_shares(total_shares, total_deposited, amount)
+                .ok_or(VaultError::ArithmeticError)?;
+
+        balance::set_shares(&env, &recipient, shares);
+        balance::set_staked_at_ledger(&env, &recipient, env.ledger().sequence());
+        balance::set_last_claim_ledger(&env, &recipient, env.ledger().sequence());
+        balance::set_total_shares(&env, total_shares + shares);
+        balance::set_total_deposited(&env, total_deposited + amount);
+
+        // Increment staker count.
+        let total_stakers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalStakers)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalStakers, &(total_stakers + 1));
+
+        events::gift_staked(&env, &sender, &recipient, amount, env.ledger().sequence());
+        events::position_opened(&env, &recipient, amount);
+
+        Ok(shares)
+    }
+
+    // ── Issue #313: anniversary bonus ────────────────────────────────────────
+
+    /// Admin sets the anniversary bonus as basis points of staked amount.
+    /// e.g. 500 = 5%. Set to 0 to disable.
+    pub fn set_anniversary_bonus_bps(env: Env, admin: Address, bps: u32) -> Result<(), VaultError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        balance::set_anniversary_bonus_bps(&env, bps);
+        Ok(())
+    }
+
+    /// Read-only query for the current anniversary bonus bps.
+    pub fn get_anniversary_bonus_bps(env: Env) -> u32 {
+        balance::get_anniversary_bonus_bps(&env)
+    }
+
+    /// Check if a user has an anniversary due and pay the bonus.
+    /// Callable by anyone. Also called automatically inside `claim`.
+    pub fn check_anniversary(env: Env, user: Address) -> Result<i128, VaultFeatureError> {
+        Self::do_check_anniversary(&env, &user)
+    }
+
+    fn do_check_anniversary(env: &Env, user: &Address) -> Result<i128, VaultFeatureError> {
+        let bonus_bps = balance::get_anniversary_bonus_bps(env);
+        if bonus_bps == 0 {
+            return Ok(0);
+        }
+
+        let staked_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        if staked_at == 0 {
+            return Ok(0);
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let elapsed = current_ledger.saturating_sub(staked_at);
+        let anniversary_number = elapsed / STELLAR_LEDGERS_PER_YEAR;
+        if anniversary_number == 0 {
+            return Ok(0);
+        }
+
+        let mut paid = balance::get_anniversaries_paid(env, user);
+        // Check if this anniversary was already paid.
+        for i in 0..paid.len() {
+            if paid.get(i).unwrap() == anniversary_number {
+                return Ok(0);
+            }
+        }
+
+        // Calculate bonus: position_amount * bonus_bps / 10000
+        let shares = balance::get_shares(env, user);
+        let total_shares = balance::get_total_shares(env);
+        let total_deposited = balance::get_total_deposited(env);
+        if shares == 0 || total_shares == 0 {
+            return Ok(0);
+        }
+        let position_amount = (shares * total_deposited) / total_shares;
+        let bonus = (position_amount * bonus_bps as i128) / 10_000;
+        if bonus <= 0 {
+            return Ok(0);
+        }
+
+        // Pay bonus from reward pool.
+        let reward_balance = balance::get_reward_pool_balance(env);
+        if reward_balance < bonus {
+            return Err(VaultFeatureError::InsufficientRewardPool);
+        }
+        balance::set_reward_pool_balance(env, reward_balance - bonus);
+
+        // Add bonus to user's accrued reward.
+        let accrued = balance::get_accrued_reward(env, user);
+        balance::set_accrued_reward(env, user, accrued + bonus);
+
+        // Record this anniversary as paid.
+        paid.push_back(anniversary_number);
+        balance::set_anniversaries_paid(env, user, &paid);
+
+        events::anniversary_bonus_paid(env, user, anniversary_number, bonus, env.ledger().sequence());
+
+        Ok(bonus)
+    }
+
+    // ── Issue #314: withdrawal receipt NFT ───────────────────────────────────
+
+    /// Read-only query: get a withdrawal receipt by ID.
+    pub fn get_withdrawal_receipt(
+        env: Env,
+        receipt_id: u64,
+    ) -> Option<crate::storage::WithdrawalReceipt> {
+        balance::get_withdrawal_receipt(&env, receipt_id)
+    }
+
+    /// Read-only query: get all receipt IDs for a user (max 50).
+    pub fn get_user_withdrawal_receipts(env: Env, user: Address) -> Vec<u64> {
+        balance::get_user_receipt_ids(&env, &user)
+    }
+
+    fn mint_withdrawal_receipt(
+        env: &Env,
+        user: &Address,
+        amount_returned: i128,
+        rewards_claimed: i128,
+        lock_penalty_paid: i128,
+    ) -> u64 {
+        let counter = balance::get_withdrawal_receipt_counter(env);
+        let receipt_id = counter + 1;
+        balance::set_withdrawal_receipt_counter(env, receipt_id);
+
+        let receipt = crate::storage::WithdrawalReceipt {
+            receipt_id,
+            user: user.clone(),
+            amount_returned,
+            rewards_claimed,
+            unstaked_at: env.ledger().sequence(),
+            lock_penalty_paid,
+        };
+        balance::set_withdrawal_receipt(env, &receipt);
+
+        // Append to user's receipt list (cap at 50).
+        let mut user_ids = balance::get_user_receipt_ids(env, user);
+        if user_ids.len() < 50 {
+            user_ids.push_back(receipt_id);
+            balance::set_user_receipt_ids(env, user, &user_ids);
+        }
+
+        events::withdrawal_receipt_minted(env, user, receipt_id, amount_returned, env.ledger().sequence());
+
+        receipt_id
+    }
+
+    // ── Issue #315: lot size normalization ───────────────────────────────────
+
+    /// Admin sets the lot size. 0 or 1 disables normalization.
+    pub fn set_lot_size(env: Env, admin: Address, lot_size: i128) -> Result<(), VaultError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if lot_size < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        balance::set_lot_size(&env, lot_size);
+        Ok(())
+    }
+
+    /// Read-only query for the current lot size.
+    pub fn get_lot_size(env: Env) -> i128 {
+        balance::get_lot_size(&env)
+    }
+
+    /// Helper: round down to nearest valid lot multiple. Read-only, does not modify state.
+    pub fn get_nearest_valid_amount(env: Env, amount: i128) -> i128 {
+        let lot_size = balance::get_lot_size(&env);
+        if lot_size <= 1 || amount <= 0 {
+            return amount;
+        }
+        (amount / lot_size) * lot_size
     }
 }

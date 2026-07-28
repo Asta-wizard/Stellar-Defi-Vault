@@ -2177,5 +2177,86 @@ pub fn remove_user_access_tier(env: &Env, user: &Address) {
     env.storage().persistent().remove(&key);
 }
 
+// ── Issue #313: anniversary bonus ────────────────────────────────────────────
+
+pub fn get_anniversary_bonus_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, "anniv_bps"))
+        .unwrap_or(0)
+}
+
+pub fn set_anniversary_bonus_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "anniv_bps"), &bps);
+}
+
+pub fn get_anniversaries_paid(env: &Env, user: &Address) -> Vec<u32> {
+    let key = (Symbol::new(env, "anniv_pd"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_anniversaries_paid(env: &Env, user: &Address, paid: &Vec<u32>) {
+    let key = (Symbol::new(env, "anniv_pd"), user.clone());
+    env.storage().persistent().set(&key, paid);
+}
+
+// ── Issue #314: withdrawal receipt ───────────────────────────────────────────
+
+pub fn get_withdrawal_receipt_counter(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, "wd_rcpt_n"))
+        .unwrap_or(0)
+}
+
+pub fn set_withdrawal_receipt_counter(env: &Env, counter: u64) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "wd_rcpt_n"), &counter);
+}
+
+pub fn get_withdrawal_receipt(env: &Env, receipt_id: u64) -> Option<crate::storage::WithdrawalReceipt> {
+    let key = (Symbol::new(env, "wd_rcpt"), receipt_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_withdrawal_receipt(env: &Env, receipt: &crate::storage::WithdrawalReceipt) {
+    let key = (Symbol::new(env, "wd_rcpt"), receipt.receipt_id);
+    env.storage().persistent().set(&key, receipt);
+}
+
+pub fn get_user_receipt_ids(env: &Env, user: &Address) -> Vec<u64> {
+    let key = (Symbol::new(env, "wd_u_rcp"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_user_receipt_ids(env: &Env, user: &Address, ids: &Vec<u64>) {
+    let key = (Symbol::new(env, "wd_u_rcp"), user.clone());
+    env.storage().persistent().set(&key, ids);
+}
+
+// ── Issue #315: lot size ────────────────────────────────────────────────────
+
+pub fn get_lot_size(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, "lot_size"))
+        .unwrap_or(0)
+}
+
+pub fn set_lot_size(env: &Env, lot_size: i128) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "lot_size"), &lot_size);
+}
+
 
 
