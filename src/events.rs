@@ -938,60 +938,236 @@ pub fn priority_bid_placed(
         .publish(topics, (bid_amount, previous_position, ledger));
 }
 
-// ── Message Board (Staker Messages) ─────────────────────────────────────────
+// ── Issue #258: pool whitelabel branding ──────────────────────────────────────
 
-pub fn message_posted(
+pub fn branding_updated(
     env: &Env,
-    author: &Address,
-    content_hash: soroban_sdk::BytesN<32>,
+    admin: &Address,
+    display_name: &soroban_sdk::String,
+    website_url: &soroban_sdk::String,
     ledger: u32,
 ) {
-    let topics = (symbol_short!("msg_post"), author);
-    env.events().publish(topics, (content_hash, ledger));
+    let topics = (symbol_short!("brand_upd"), admin);
+    env.events()
+        .publish(topics, (display_name.clone(), website_url.clone(), ledger));
 }
 
-// ── Tier Rebalancing ─────────────────────────────────────────────────────────
+// ── Issue #259: staking insurance ─────────────────────────────────────────────
 
-pub fn tier_changed(
+pub fn insurance_activated(
     env: &Env,
     user: &Address,
-    old_tier: crate::storage::StakeTier,
-    new_tier: crate::storage::StakeTier,
-    pool_share_bps: u32,
+    premium_bps: u32,
+    coverage_amount: i128,
     ledger: u32,
 ) {
-    let topics = (symbol_short!("tier_chg"), user);
+    let topics = (symbol_short!("ins_act"), user);
     env.events()
-        .publish(topics, (old_tier, new_tier, pool_share_bps, ledger));
+        .publish(topics, (premium_bps, coverage_amount, ledger));
 }
 
-// ── Configurable Precision ──────────────────────────────────────────────────
-
-pub fn precision_changed(env: &Env, admin: &Address, old_precision: u32, new_precision: u32, ledger: u32) {
-    let topics = (symbol_short!("prec_chg"), admin);
-    env.events().publish(topics, (old_precision, new_precision, ledger));
+pub fn insurance_cancelled(env: &Env, user: &Address, coverage_amount: i128, ledger: u32) {
+    let topics = (symbol_short!("ins_canc"), user);
+    env.events().publish(topics, (coverage_amount, ledger));
 }
 
-// ── Price Floor Protection ──────────────────────────────────────────────────
-
-pub fn rewards_halted(env: &Env, oracle_price: i128, floor_price: i128, ledger: u32) {
-    let topics = (symbol_short!("pr_halt"),);
-    env.events().publish(topics, (oracle_price, floor_price, ledger));
+pub fn insurance_premium_paid(env: &Env, user: &Address, premium: i128, ledger: u32) {
+    let topics = (symbol_short!("ins_prem"), user);
+    env.events().publish(topics, (premium, ledger));
 }
 
-pub fn rewards_resumed(env: &Env, oracle_price: i128, floor_price: i128, ledger: u32) {
-    let topics = (symbol_short!("pr_resume"),);
-    env.events().publish(topics, (oracle_price, floor_price, ledger));
+pub fn shortfall_paid(env: &Env, user: &Address, payout: i128, ledger: u32) {
+    let topics = (symbol_short!("shortfal"), user);
+    env.events().publish(topics, (payout, ledger));
 }
 
-// ── Exit Queue ──────────────────────────────────────────────────────────────
+// ── Issue #260: flash stake ───────────────────────────────────────────────────
 
-pub fn exit_queued(env: &Env, user: &Address, shares: i128, position_in_queue: u32, ledger: u32) {
-    let topics = (symbol_short!("exit_q"), user);
-    env.events().publish(topics, (shares, position_in_queue, ledger));
+pub fn flash_staked(env: &Env, user: &Address, amount: i128, receipt_id: u64, ledger: u32) {
+    let topics = (symbol_short!("flash_st"), user);
+    env.events().publish(topics, (amount, receipt_id, ledger));
 }
 
-pub fn exit_processed(env: &Env, user: &Address, amount_returned: i128, ledger: u32) {
-    let topics = (symbol_short!("exit_ok"), user);
-    env.events().publish(topics, (amount_returned, ledger));
+// ── Issue #261: stake-backed loans ────────────────────────────────────────────
+
+pub fn loan_opened(env: &Env, user: &Address, amount: i128, total_principal: i128, ledger: u32) {
+    let topics = (symbol_short!("loan_opn"), user);
+    env.events()
+        .publish(topics, (amount, total_principal, ledger));
 }
+
+pub fn loan_repaid(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    remaining_principal: i128,
+    remaining_interest: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("loan_rpy"), user);
+    env.events().publish(
+        topics,
+        (amount, remaining_principal, remaining_interest, ledger),
+    );
+}
+
+pub fn loan_liquidated(
+    env: &Env,
+    user: &Address,
+    debt_covered: i128,
+    shares_slashed: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("loan_liq"), user);
+    env.events()
+        .publish(topics, (debt_covered, shares_slashed, ledger));
+}
+
+// ── Issue #275: reward Gini coefficient ───────────────────────────────────────
+
+pub fn gini_computed(env: &Env, result_bps: u32, staker_count: u32, ledger: u32) {
+    let topics = (symbol_short!("gini_cmp"),);
+    env.events()
+        .publish(topics, (result_bps, staker_count, ledger));
+}
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+/// `starts_at` identifies the season (stable across `remove_season()` calls
+/// on other entries, unlike a Vec index).
+pub fn season_started(
+    env: &Env,
+    starts_at: u32,
+    name: &soroban_sdk::String,
+    multiplier_bps: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("seas_str"),);
+    env.events()
+        .publish(topics, (starts_at, name.clone(), multiplier_bps, ledger));
+}
+
+pub fn season_ended(env: &Env, starts_at: u32, ledger: u32) {
+    let topics = (symbol_short!("seas_end"),);
+    env.events().publish(topics, (starts_at, ledger));
+}
+
+// ── Issue #274: staker bio ────────────────────────────────────────────────────
+
+/// No bio content in the event payload by design — keeps the event lean and
+/// avoids duplicating free-text content on-chain in two places.
+pub fn bio_updated(env: &Env, user: &Address, ledger: u32) {
+    let topics = (symbol_short!("bio_upd"), user);
+    env.events().publish(topics, (ledger,));
+}
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+pub fn sunset_announced(env: &Env, admin: &Address, grace_period_end: u32, ledger: u32) {
+    let topics = (symbol_short!("snst_ann"), admin);
+    env.events().publish(topics, (grace_period_end, ledger));
+}
+
+pub fn sunset_stage_changed(env: &Env, new_state: crate::storage::SunsetState, ledger: u32) {
+    let topics = (symbol_short!("snst_chg"),);
+    env.events().publish(topics, (new_state, ledger));
+}
+
+pub fn force_resolved(
+    env: &Env,
+    user: &Address,
+    principal: i128,
+    accrued_reward: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("frc_res"), user);
+    env.events()
+        .publish(topics, (principal, accrued_reward, ledger));
+}
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+pub fn revenue_distributed(
+    env: &Env,
+    merkle_root: &soroban_sdk::Bytes,
+    total_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rev_dist"),);
+    env.events()
+        .publish(topics, (merkle_root.clone(), total_amount, ledger));
+}
+
+pub fn revenue_share_claimed(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    epoch: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rev_clm"), user);
+    env.events().publish(topics, (amount, epoch, ledger));
+}
+
+// ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+pub fn escrow_released(env: &Env, user: &Address, escrowed_amount: i128, ledger: u32) {
+    let topics = (symbol_short!("esc_rel"), user);
+    env.events()
+        .publish(topics, (user.clone(), escrowed_amount, ledger));
+}
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+pub fn access_token_issued(env: &Env, user: &Address, tier_index: u32, ledger: u32) {
+    let topics = (symbol_short!("acc_iss"), user);
+    env.events().publish(topics, (tier_index, ledger));
+}
+
+pub fn access_token_revoked(
+    env: &Env,
+    user: &Address,
+    tier_index: u32,
+    reason: Symbol,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("acc_rev"), user);
+    env.events().publish(topics, (tier_index, reason, ledger));
+}
+
+// ── Issue #312: gift staking position ────────────────────────────────────────
+
+pub fn gift_staked(env: &Env, sender: &Address, recipient: &Address, amount: i128, ledger: u32) {
+    let topics = (symbol_short!("gift_stk"), sender);
+    env.events()
+        .publish(topics, (recipient.clone(), amount, ledger));
+}
+
+// ── Issue #313: anniversary bonus ────────────────────────────────────────────
+
+pub fn anniversary_bonus_paid(
+    env: &Env,
+    user: &Address,
+    anniversary_number: u32,
+    bonus_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("anniv_bp"), user);
+    env.events()
+        .publish(topics, (anniversary_number, bonus_amount, ledger));
+}
+
+// ── Issue #314: withdrawal receipt NFT ───────────────────────────────────────
+
+pub fn withdrawal_receipt_minted(
+    env: &Env,
+    user: &Address,
+    receipt_id: u64,
+    amount_returned: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("wd_rcpt"), user);
+    env.events()
+        .publish(topics, (receipt_id, amount_returned, ledger));
+}
+

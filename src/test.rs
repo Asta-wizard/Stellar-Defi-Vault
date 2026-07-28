@@ -11,11 +11,12 @@ use soroban_sdk::{
 use soroban_sdk::symbol_short;
 
 use crate::{
-    errors::{VaultError, VaultExtError},
+    errors::{VaultError, VaultExtError, VaultFeatureError},
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{
         AdminAction, ChangelogEntry, FeeRecipient, HalvingConfig, MilestoneCondition, PauseReason,
-        ProposableParam, RoundingPolicy, StakingCertificate, TriggerDirection, UnstakeCheckResult,
+        ProposableParam, RoundingPolicy, StakingCertificate, SunsetState, TriggerDirection,
+        UnstakeCheckResult,
     },
     vault::{
         VaultContract, VaultContractClient, BOOST_BPS_BASE, CONTRACT_DESCRIPTION, CONTRACT_NAME,
@@ -7262,4 +7263,363 @@ fn test_same_ledger_bids_ordered_by_amount_descending() {
         f.vault.get_exit_queue(),
         soroban_sdk::vec![&f.env, charlie.clone(), f.bob.clone(), f.alice.clone()]
     );
+}
+
+// ── Issue #275: reward Gini coefficient ───────────────────────────────────────
+
+#[test]
+fn test_gini_equal_rewards_returns_zero_bps() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.stake(&f.bob, &500_000);
+
+    set_ledger(&f.env, 2_000);
+
+    assert_eq!(f.vault.get_reward_gini_coefficient(), 0);
+}
+
+#[test]
+fn test_gini_one_staker_all_rewards_is_high() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    f.vault.stake(&f.alice, &500_000);
+
+    set_ledger(&f.env, 2_000);
+
+    // Nine more stakers join at the current ledger: their checkpoint is
+    // "now", so they've accrued nothing yet, while alice has 1000 ledgers
+    // of accrual behind her. With n = 10 and only one nonzero reward, the
+    // discrete-population Gini formula gives exactly (n-1)/n * 10000 = 9000
+    // bps — the closest a finite population can get to the theoretical 10
+    // 000 for "one holds everything" (see the doc comment on
+    // `get_reward_gini_coefficient`).
+    for _ in 0..9 {
+        let staker = Address::generate(&f.env);
+        f.token_admin.mint(&staker, &1_000_000);
+        f.vault.stake(&staker, &500_000);
+    }
+
+    let gini = f.vault.get_reward_gini_coefficient();
+    assert!(gini > 8_000, "expected a high Gini coefficient, got {}", gini);
+}
+
+#[test]
+fn test_gini_known_unequal_distribution() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    let charlie = Address::generate(&f.env);
+    f.token_admin.mint(&charlie, &2_000_000);
+
+    // Same ledger, same rate: pending reward ends up exactly proportional
+    // to staked amount, in a 1:2:7 ratio.
+    f.vault.stake(&f.alice, &100_000);
+    f.vault.stake(&f.bob, &200_000);
+    f.vault.stake(&charlie, &700_000);
+
+    set_ledger(&f.env, 50_000);
+
+    // Manually verify against an independent re-implementation of the bps
+    // formula documented on `get_reward_gini_coefficient`.
+    let mut sorted = [
+        f.vault.calc_pending_reward(&f.alice),
+        f.vault.calc_pending_reward(&f.bob),
+        f.vault.calc_pending_reward(&charlie),
+    ];
+    sorted.sort();
+    let n = sorted.len() as i128;
+    let total: i128 = sorted.iter().sum();
+    let rank_weighted: i128 = sorted
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (i as i128 + 1) * *r)
+        .sum();
+    let expected = (20_000i128 * rank_weighted - 10_000i128 * (n + 1) * total) / (n * total);
+
+    assert_eq!(f.vault.get_reward_gini_coefficient() as i128, expected);
+}
+
+#[test]
+#[should_panic]
+fn test_gini_requires_admin_auth() {
+    let f = VaultFixture::with_mock_auths(false);
+    f.vault.get_reward_gini_coefficient();
+}
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+#[test]
+fn test_season_boosts_reward_during_window() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Season starts exactly at the stake ledger and doubles the rate, so
+    // the entire elapsed window is inside it.
+    f.vault.add_season(
+        &f.admin,
+        &soroban_sdk::String::from_str(&f.env, "Launch Week"),
+        &1_000,
+        &2_000,
+        &(BOOST_BPS_BASE * 2),
+    );
+
+    set_ledger(&f.env, 1_500);
+
+    let divisor = 10_000i128 * STELLAR_LEDGERS_PER_YEAR as i128;
+    let expected = (1_000_000i128 * 2_000 * 500) / divisor;
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), expected);
+}
+
+#[test]
+fn test_season_base_rate_outside_window() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Scheduled far in the future — doesn't affect this claim.
+    f.vault.add_season(
+        &f.admin,
+        &soroban_sdk::String::from_str(&f.env, "Future Event"),
+        &10_000,
+        &20_000,
+        &(BOOST_BPS_BASE * 2),
+    );
+
+    set_ledger(&f.env, 1_500);
+
+    let divisor = 10_000i128 * STELLAR_LEDGERS_PER_YEAR as i128;
+    let expected = (1_000_000i128 * 1_000 * 500) / divisor;
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), expected);
+}
+
+#[test]
+fn test_season_time_weighted_claim_across_boundary() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    // Season covers [1_100, 1_300): 100 ledgers before it at the base rate,
+    // 200 ledgers inside it at 2x, then 100 more after it ends.
+    f.vault.add_season(
+        &f.admin,
+        &soroban_sdk::String::from_str(&f.env, "Mid Event"),
+        &1_100,
+        &1_300,
+        &(BOOST_BPS_BASE * 2),
+    );
+
+    set_ledger(&f.env, 1_400);
+
+    let divisor = 10_000i128 * STELLAR_LEDGERS_PER_YEAR as i128;
+    let pre = 1_000_000i128 * 1_000 * 100;
+    let during = 1_000_000i128 * 2_000 * 200;
+    let after = 1_000_000i128 * 1_000 * 100;
+    let expected = (pre + during + after) / divisor;
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), expected);
+}
+
+#[test]
+fn test_add_season_overlap_rejected() {
+    let f = VaultFixture::new();
+
+    f.vault.add_season(
+        &f.admin,
+        &soroban_sdk::String::from_str(&f.env, "A"),
+        &100,
+        &200,
+        &(BOOST_BPS_BASE * 2),
+    );
+
+    let result = f.vault.try_add_season(
+        &f.admin,
+        &soroban_sdk::String::from_str(&f.env, "B"),
+        &150,
+        &250,
+        &(BOOST_BPS_BASE * 2),
+    );
+    assert_eq!(result, Err(Ok(VaultFeatureError::SeasonOverlap)));
+}
+
+#[test]
+fn test_remove_season_and_get_active_season() {
+    let f = VaultFixture::new();
+
+    f.vault.add_season(
+        &f.admin,
+        &soroban_sdk::String::from_str(&f.env, "A"),
+        &100,
+        &200,
+        &(BOOST_BPS_BASE * 2),
+    );
+    assert_eq!(f.vault.get_seasons().len(), 1);
+
+    set_ledger(&f.env, 150);
+    assert!(f.vault.get_active_season().is_some());
+
+    f.vault.remove_season(&f.admin, &0);
+    assert_eq!(f.vault.get_seasons().len(), 0);
+    assert!(f.vault.get_active_season().is_none());
+}
+
+// ── Issue #274: staker bio ────────────────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_staker_bio() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+
+    f.vault
+        .set_staker_bio(&f.alice, &soroban_sdk::String::from_str(&f.env, "gm"));
+
+    assert_eq!(
+        f.vault.get_staker_bio(&f.alice),
+        Some(soroban_sdk::String::from_str(&f.env, "gm"))
+    );
+}
+
+#[test]
+fn test_set_staker_bio_requires_active_position() {
+    let f = VaultFixture::new();
+
+    let result = f
+        .vault
+        .try_set_staker_bio(&f.bob, &soroban_sdk::String::from_str(&f.env, "gm"));
+    assert_eq!(result, Err(Ok(VaultFeatureError::PositionNotFound)));
+}
+
+#[test]
+fn test_staker_bio_length_limit_enforced() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+
+    let too_long = "a".repeat(161);
+    let result = f
+        .vault
+        .try_set_staker_bio(&f.alice, &soroban_sdk::String::from_str(&f.env, &too_long));
+    assert_eq!(result, Err(Ok(VaultFeatureError::BioTooLong)));
+}
+
+#[test]
+fn test_clear_staker_bio_removes_it() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    f.vault
+        .set_staker_bio(&f.alice, &soroban_sdk::String::from_str(&f.env, "gm"));
+
+    f.vault.clear_staker_bio(&f.alice);
+
+    assert_eq!(f.vault.get_staker_bio(&f.alice), None);
+}
+
+#[test]
+fn test_staker_bio_persists_after_unstake() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    f.vault
+        .set_staker_bio(&f.alice, &soroban_sdk::String::from_str(&f.env, "gm"));
+
+    f.vault.unstake_all(&f.alice);
+
+    assert_eq!(
+        f.vault.get_staker_bio(&f.alice),
+        Some(soroban_sdk::String::from_str(&f.env, "gm"))
+    );
+}
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+#[test]
+fn test_full_sunset_workflow_active_to_closed() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    f.vault.stake(&f.alice, &500_000);
+
+    assert_eq!(f.vault.get_sunset_state(), SunsetState::Active);
+
+    f.vault.announce_sunset(&f.admin, &1_000);
+    assert_eq!(f.vault.get_sunset_state(), SunsetState::SunsetAnnounced);
+
+    f.vault.start_grace_period(&f.admin);
+    assert_eq!(f.vault.get_sunset_state(), SunsetState::GracePeriodActive);
+
+    // Staking is blocked once the grace period starts.
+    let stake_result = f.vault.try_stake(&f.bob, &100_000);
+    assert!(stake_result.is_err());
+
+    set_ledger(&f.env, 2_100);
+    f.vault.start_force_resolution(&f.admin);
+    assert_eq!(f.vault.get_sunset_state(), SunsetState::ForceResolutionActive);
+
+    f.vault.force_resolve_position(&f.admin, &f.alice);
+
+    f.vault.close_pool(&f.admin);
+    assert_eq!(f.vault.get_sunset_state(), SunsetState::Closed);
+}
+
+#[test]
+fn test_force_resolve_pays_user_correctly() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    set_ledger(&f.env, 1_000);
+    f.vault.stake(&f.alice, &500_000);
+
+    set_ledger(&f.env, 2_000);
+
+    f.vault.announce_sunset(&f.admin, &0);
+    f.vault.start_grace_period(&f.admin);
+    f.vault.start_force_resolution(&f.admin);
+
+    let expected_reward = f.vault.calc_pending_reward(&f.alice);
+    let balance_before = f.token.balance(&f.alice);
+
+    let payout = f.vault.force_resolve_position(&f.admin, &f.alice);
+
+    assert_eq!(payout, 500_000 + expected_reward);
+    assert_eq!(f.token.balance(&f.alice), balance_before + payout);
+    assert_eq!(f.vault.shares_of(&f.alice), 0);
+}
+
+#[test]
+fn test_close_pool_reverts_with_positions_remaining() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+
+    f.vault.announce_sunset(&f.admin, &0);
+    f.vault.start_grace_period(&f.admin);
+    f.vault.start_force_resolution(&f.admin);
+
+    let result = f.vault.try_close_pool(&f.admin);
+    assert_eq!(result, Err(Ok(VaultFeatureError::PositionsStillActive)));
+}
+
+#[test]
+fn test_queries_work_when_pool_closed() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+
+    f.vault.announce_sunset(&f.admin, &0);
+    f.vault.start_grace_period(&f.admin);
+    f.vault.start_force_resolution(&f.admin);
+    f.vault.force_resolve_position(&f.admin, &f.alice);
+    f.vault.close_pool(&f.admin);
+
+    assert_eq!(f.vault.get_sunset_state(), SunsetState::Closed);
+    assert_eq!(f.vault.total_staked(), 0);
 }

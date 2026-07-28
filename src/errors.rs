@@ -321,6 +321,142 @@ pub enum VaultExtError {
     InvalidVetoThreshold = 50,
 }
 
+/// Third error enum, for the same 50-variant reason `VaultExtError` exists:
+/// both `VaultError` and `VaultExtError` are now at exactly the cap, so the
+/// cases introduced by issues #258 (branding), #259 (staking insurance),
+/// #260 (flash stake), #261 (stake-backed loans), #275 (reward Gini
+/// coefficient), #276 (seasonal reward multiplier), #274 (staker bio), and
+/// #298 (pool sunsetting workflow) live here, plus mirrors of the handful of
+/// `VaultError` cases those functions can also hit (via the `From` impl
+/// below, so `?` still works normally at call sites).
+///
+/// Note on `InvalidBrandingField`: a `#[contracterror]` variant cannot carry a
+/// payload, so the offending field name is encoded in the variant itself —
+/// `InvalidBrandingDisplayName`, `InvalidBrandingLogoHash`,
+/// `InvalidBrandingWebsiteUrl`, `InvalidBrandingTwitterHandle` — rather than
+/// as an inner `String` on a single generic variant.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VaultFeatureError {
+    /// Mirrors `VaultError::Unauthorized`.
+    Unauthorized = 1,
+    /// Mirrors `VaultError::NotInitialized`.
+    NotInitialized = 2,
+    /// Mirrors `VaultError::ZeroAmount`.
+    ZeroAmount = 3,
+    /// Mirrors `VaultError::ArithmeticError`.
+    ArithmeticError = 4,
+    /// Mirrors `VaultError::PositionNotFound`.
+    PositionNotFound = 5,
+    /// Mirrors `VaultError::VaultPaused`.
+    VaultPaused = 6,
+    /// Mirrors `VaultError::InsufficientRewardPool`.
+    InsufficientRewardPool = 7,
+
+    // ── Issue #258: branding ────────────────────────────────────────────────
+    /// `set_branding()`: `display_name` exceeds `MAX_BRANDING_NAME_LEN` (50).
+    InvalidBrandingDisplayName = 8,
+    /// `set_branding()`: `logo_hash` exceeds `MAX_BRANDING_LOGO_LEN` (64).
+    InvalidBrandingLogoHash = 9,
+    /// `set_branding()`: `website_url` exceeds `MAX_BRANDING_URL_LEN` (200).
+    InvalidBrandingWebsiteUrl = 10,
+    /// `set_branding()`: `twitter_handle` exceeds `MAX_BRANDING_TWITTER_LEN` (16).
+    InvalidBrandingTwitterHandle = 11,
+
+    // ── Issue #259: staking insurance ───────────────────────────────────────
+    /// `set_insurance_product()`: `premium_bps` above 10 000, or
+    /// `max_coverage_per_user` is negative.
+    InvalidInsuranceProduct = 12,
+    /// `purchase_insurance()` before any `set_insurance_product()` call.
+    InsuranceProductNotSet = 13,
+    /// `purchase_insurance()` when the caller already holds an active policy.
+    InsuranceAlreadyActive = 14,
+    /// `cancel_insurance()` / `declare_shortfall()` for a user with no policy.
+    InsurancePolicyNotFound = 15,
+    /// `declare_shortfall()` when the insurance fund cannot cover the total
+    /// coverage owed to `affected_users`.
+    InsuranceFundInsufficient = 16,
+    /// `declare_shortfall()` when `affected_users.len()` exceeds
+    /// `MAX_SHORTFALL_USERS` (50) — split the payout across several calls.
+    TooManyAffectedUsers = 23,
+
+    // ── Issue #275: reward Gini coefficient ─────────────────────────────────
+    /// `get_reward_gini_coefficient()`: more than 100 active stakers. Named
+    /// identically to (but distinct from) `VaultError::TooManyStakers`, which
+    /// is already used for an unrelated case (`vote()` double-voting) — both
+    /// `VaultError` and `VaultExtError` are at their 50-variant cap so this
+    /// domain's own error lives here instead.
+    TooManyStakers = 24,
+
+    // ── Issue #276: seasonal reward multiplier ──────────────────────────────
+    /// `add_season()`: `starts_at >= ends_at`, or `multiplier_bps` is zero.
+    InvalidSeasonConfig = 25,
+    /// `add_season()`: 10 seasons are already scheduled.
+    TooManySeasons = 26,
+    /// `add_season()`: the requested range overlaps an already-scheduled
+    /// season — only one season may be active at a time.
+    SeasonOverlap = 27,
+    /// `remove_season()`: no season exists at the given index.
+    SeasonNotFound = 28,
+
+    // ── Issue #274: staker bio ───────────────────────────────────────────────
+    /// `set_staker_bio()`: `bio` exceeds `MAX_BIO_LEN` (160 characters).
+    BioTooLong = 29,
+
+    // ── Issue #298: pool sunsetting workflow ────────────────────────────────
+    /// Returned by every sunset-workflow entrypoint when called from the
+    /// wrong `SunsetState` (transitions are one-way and only valid from a
+    /// specific prior state), and by `start_force_resolution()` when called
+    /// before the grace period configured in `announce_sunset()` has elapsed.
+    InvalidSunsetTransition = 30,
+    /// `close_pool()`: at least one staker still holds an active position —
+    /// every position must be resolved (via `force_resolve_position()` or a
+    /// voluntary `unstake()`) before the pool can close.
+    PositionsStillActive = 31,
+
+    // ── Issue #260: flash stake ─────────────────────────────────────────────
+    /// `set_flash_stake_fee_bps()`: `bps` above 10 000.
+    InvalidFlashStakeFee = 17,
+
+    // ── Issue #261: stake-backed loans ──────────────────────────────────────
+    /// `set_loan_config()`: `max_ltv_bps` or `interest_rate_bps` above 10 000.
+    InvalidLoanConfig = 18,
+    /// `borrow()` before any `set_loan_config()` call.
+    LoanConfigNotSet = 19,
+    /// `repay()` / `liquidate_loan()` / `get_loan()` flows for a user with no
+    /// outstanding loan.
+    LoanNotFound = 20,
+    /// `borrow()` when the requested amount would push total debt above
+    /// `position.amount * max_ltv_bps / 10000`.
+    ExceedsMaxLtv = 21,
+    /// `liquidate_loan()` when the borrower's LTV is still below
+    /// `LIQUIDATION_LTV_BPS` (9 000).
+    LoanNotLiquidatable = 22,
+
+    // ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────
+    /// `set_revenue_sharing()`: `share_bps` above 10 000.
+    InvalidRevenueShareConfig = 32,
+    /// `claim_revenue_share()`: invalid Merkle proof.
+    RevenueShareInvalidProof = 33,
+    /// `claim_revenue_share()`: user already claimed for this epoch.
+    RevenueShareAlreadyClaimed = 34,
+
+    // ── Issue #282: Stake-Gated Access ───────────────────────────────────────
+    /// `set_access_tier()`: 5 access tiers are already configured.
+    TooManyAccessTiers = 35,
+    /// `claim_access_token()`: user does not qualify for any access tier.
+    IneligibleForAccessTier = 36,
+    /// `revoke_access_token()`: user still qualifies for their current tier.
+    UserStillEligible = 37,
+
+    // ── Issue #315: lot size normalization ──────────────────────────────────
+    /// `stake()`: amount is not a multiple of the configured lot size.
+    InvalidLotSize = 38,
+}
+
+
+
 impl From<VaultError> for VaultExtError {
     fn from(err: VaultError) -> Self {
         match err {
@@ -331,6 +467,23 @@ impl From<VaultError> for VaultExtError {
             // Any other VaultError reaching here (shouldn't happen given how
             // these functions are written) maps to the closest generic case.
             _ => VaultExtError::Unauthorized,
+        }
+    }
+}
+
+impl From<VaultError> for VaultFeatureError {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::Unauthorized => VaultFeatureError::Unauthorized,
+            VaultError::NotInitialized => VaultFeatureError::NotInitialized,
+            VaultError::ZeroAmount => VaultFeatureError::ZeroAmount,
+            VaultError::ArithmeticError => VaultFeatureError::ArithmeticError,
+            VaultError::PositionNotFound => VaultFeatureError::PositionNotFound,
+            VaultError::VaultPaused => VaultFeatureError::VaultPaused,
+            VaultError::InsufficientRewardPool => VaultFeatureError::InsufficientRewardPool,
+            // Any other VaultError reaching here (shouldn't happen given how
+            // these functions are written) maps to the closest generic case.
+            _ => VaultFeatureError::Unauthorized,
         }
     }
 }

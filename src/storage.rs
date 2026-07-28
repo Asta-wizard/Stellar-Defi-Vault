@@ -928,289 +928,152 @@ pub struct PriorityBidRecord {
     pub ledger: u32,
 }
 
-// ── Tier Rebalancing ─────────────────────────────────────────────────────────
+// ── Issue #258: pool whitelabel branding ────────────────────────────────────────
 
-#[contracttype]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum StakeTier {
-    Bronze = 1,
-    Silver = 2,
-    Gold = 3,
-    Platinum = 4,
-}
-
+/// Whitelabel identity for the pool, set by the admin via `set_branding()` and
+/// read by frontends via `get_branding()` without any off-chain lookup.
+///
+/// Every field is length-capped (see `MAX_BRANDING_*` in vault.rs); exceeding a
+/// cap reverts with the `VaultBrandError` variant naming that field.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct TierBenefits {
-    pub boost_multiplier_bps: u32,
-    pub fee_discount_bps: u32,
+pub struct BrandingConfig {
+    pub display_name: String,
+    pub logo_hash: String,
+    pub website_url: String,
+    pub twitter_handle: String,
 }
 
-// ── Message Board (Staker Messages) ─────────────────────────────────────────
+// ── Issue #259: staking insurance (principal protection) ────────────────────────
 
+/// Admin-configured insurance product terms (issue #259).
+///
+/// `premium_bps` is the share of every reward claim redirected into the
+/// insurance fund while a policy is active. `max_coverage_per_user` caps the
+/// principal any single policy may cover.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct Message {
-    pub author: Address,
-    pub content: String,
-    pub posted_at: u32,
-    pub stake_amount_at_post: i128,
+pub struct InsuranceProduct {
+    pub premium_bps: u32,
+    pub max_coverage_per_user: i128,
 }
 
-// ── Symbol-keyed storage helpers (DataKey at 50-variant cap) ──────────────
-
-use soroban_sdk::{symbol_short, Env, Symbol};
-
-const MERGER_PREFIX: &Symbol = &symbol_short!("merger");
-const BIO_PREFIX: &Symbol = &symbol_short!("bio");
-const MSG_BOARD: &Symbol = &symbol_short!("messages");
-const MIN_POST: &Symbol = &symbol_short!("min_post");
-const TIER_PREFIX: &Symbol = &symbol_short!("tier");
-const REWARD_PRECISION: &Symbol = &symbol_short!("rw_prec");
-const DUST_PREFIX: &Symbol = &symbol_short!("dust");
-const PR_FLOOR: &Symbol = &symbol_short!("pr_floor");
-const HALTED: &Symbol = &symbol_short!("halted");
-const HALTED_LOG: &Symbol = &symbol_short!("halt_log");
-const EXIT_CFG: &Symbol = &symbol_short!("exit_cfg");
-const EXIT_QUEUE: &Symbol = &symbol_short!("exit_q");
-const LAST_BATCH: &Symbol = &symbol_short!("last_bat");
-
-pub struct Storage;
-
-impl Storage {
-    // Merger proposal storage (#272)
-    pub fn set_merger_proposal(env: &Env, source_pool: &Address, admin: &Address) {
-        let key = (MERGER_PREFIX, source_pool.clone());
-        env.storage().persistent().set(&key, admin);
-    }
-
-    pub fn get_merger_proposal(env: &Env, source_pool: &Address) -> Option<Address> {
-        let key = (MERGER_PREFIX, source_pool.clone());
-        env.storage().persistent().get(&key)
-    }
-
-    pub fn remove_merger_proposal(env: &Env, source_pool: &Address) {
-        let key = (MERGER_PREFIX, source_pool.clone());
-        env.storage().persistent().remove(&key);
-    }
-
-    // Staker bio storage (#273)
-    pub fn set_staker_bio(env: &Env, staker: &Address, bio: &String) {
-        let key = (BIO_PREFIX, staker.clone());
-        env.storage().persistent().set(&key, bio);
-    }
-
-    pub fn get_staker_bio(env: &Env, staker: &Address) -> Option<String> {
-        let key = (BIO_PREFIX, staker.clone());
-        env.storage().persistent().get(&key)
-    }
-
-    // Admin check helper (#272)
-    pub fn get_admin(env: &Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Admin)
-    }
-
-    // Position existence check
-    pub fn has_position(env: &Env, user: &Address) -> bool {
-        env.storage().persistent().has(&DataKey::StakedAtLedger(user.clone()))
-    }
-
-    // Staked-at ledger for age check (#270)
-    pub fn get_staked_at_ledger(env: &Env, user: &Address) -> Option<u32> {
-        env.storage().persistent().get(&DataKey::StakedAtLedger(user.clone()))
-    }
-
-    // Message board storage
-    pub fn get_messages(env: &Env) -> Vec<Message> {
-        env.storage().instance().get(MSG_BOARD).unwrap_or(Vec::new(env))
-    }
-
-    pub fn set_messages(env: &Env, messages: &Vec<Message>) {
-        env.storage().instance().set(MSG_BOARD, messages);
-    }
-
-    pub fn get_min_stake_to_post(env: &Env) -> Option<i128> {
-        env.storage().instance().get(MIN_POST)
-    }
-
-    pub fn set_min_stake_to_post(env: &Env, amount: i128) {
-        env.storage().instance().set(MIN_POST, &amount);
-    }
-
-    // Tier Rebalancing
-    pub fn get_user_tier(env: &Env, user: &Address) -> Option<StakeTier> {
-        let key = (TIER_PREFIX, user.clone());
-        env.storage().persistent().get(&key)
-    }
-
-    pub fn set_user_tier(env: &Env, user: &Address, tier: &StakeTier) {
-        let key = (TIER_PREFIX, user.clone());
-        env.storage().persistent().set(&key, tier);
-    }
-
-    // Reward Precision & Dust
-    pub fn get_reward_precision(env: &Env) -> u32 {
-        env.storage().instance().get(REWARD_PRECISION).unwrap_or(1)
-    }
-
-    pub fn set_reward_precision(env: &Env, precision: u32) {
-        env.storage().instance().set(REWARD_PRECISION, &precision);
-    }
-
-    pub fn get_accumulated_dust(env: &Env, user: &Address) -> i128 {
-        let key = (DUST_PREFIX, user.clone());
-        env.storage().persistent().get(&key).unwrap_or(0)
-    }
-
-    pub fn set_accumulated_dust(env: &Env, user: &Address, amount: i128) {
-        let key = (DUST_PREFIX, user.clone());
-        if amount == 0 {
-            env.storage().persistent().remove(&key);
-        } else {
-            env.storage().persistent().set(&key, &amount);
-        }
-    }
-}
-
-// ── Price Floor Protection ──────────────────────────────────────────────────
-
+/// A user's active principal-protection policy (issue #259).
+///
+/// `coverage_amount` is snapshotted from the position at purchase time and is
+/// what `declare_shortfall()` pays out from the insurance fund (issue #141).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct PriceFloorConfig {
-    pub min_price: i128,
-    pub oracle: Address,
-    pub asset_id: String,
+pub struct InsurancePolicy {
+    pub premium_bps: u32,
+    pub coverage_amount: i128,
+    pub active_since: u32,
+    pub last_premium_at: u32,
 }
 
+// ── Issue #260: flash stake ─────────────────────────────────────────────────────
+
+/// Permanent on-chain proof that `user` held `amount` at ledger `ledger`,
+/// produced by `flash_stake()` (issue #260).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct HaltedInterval {
-    pub start_ledger: u32,
-    pub end_ledger: Option<u32>,
-}
-
-impl Storage {
-    pub fn get_price_floor_config(env: &Env) -> Option<PriceFloorConfig> {
-        env.storage().instance().get(PR_FLOOR)
-    }
-
-    pub fn set_price_floor_config(env: &Env, config: &PriceFloorConfig) {
-        env.storage().instance().set(PR_FLOOR, config);
-    }
-
-    pub fn is_rewards_halted(env: &Env) -> bool {
-        env.storage().instance().get(HALTED).unwrap_or(false)
-    }
-
-    pub fn set_rewards_halted(env: &Env, halted: bool) {
-        env.storage().instance().set(HALTED, &halted);
-    }
-
-    pub fn get_halted_log(env: &Env) -> soroban_sdk::Vec<HaltedInterval> {
-        env.storage().instance().get(HALTED_LOG).unwrap_or_else(|| soroban_sdk::Vec::new(env))
-    }
-
-    pub fn set_halted_log(env: &Env, log: &soroban_sdk::Vec<HaltedInterval>) {
-        env.storage().instance().set(HALTED_LOG, log);
-    }
-}
-
-// ── Exit Queue ───────────────────────────────────────────────────────────
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExitQueueConfig {
-    pub enabled: bool,
-    pub batch_size: u32,
-    pub batch_interval_ledgers: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExitRequest {
+pub struct FlashStakeReceipt {
     pub user: Address,
-    pub shares: i128,
-    pub queued_at: u32,
-    pub position_in_queue: u32,
+    pub amount: i128,
+    pub ledger: u32,
+    pub receipt_id: u64,
 }
 
-impl Storage {
-    pub fn get_exit_queue_config(env: &Env) -> Option<ExitQueueConfig> {
-        env.storage().instance().get(EXIT_CFG)
-    }
+// ── Issue #261: stake-backed loans ──────────────────────────────────────────────
 
-    pub fn set_exit_queue_config(env: &Env, config: &ExitQueueConfig) {
-        env.storage().instance().set(EXIT_CFG, config);
-    }
-
-    pub fn get_exit_queue(env: &Env) -> soroban_sdk::Vec<ExitRequest> {
-        env.storage()
-            .persistent()
-            .get(EXIT_QUEUE)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(env))
-    }
-
-    pub fn set_exit_queue(env: &Env, queue: &soroban_sdk::Vec<ExitRequest>) {
-        env.storage().persistent().set(EXIT_QUEUE, queue);
-    }
-
-    pub fn get_last_batch_ledger(env: &Env) -> u32 {
-        env.storage().instance().get(LAST_BATCH).unwrap_or(0)
-    }
-
-    pub fn set_last_batch_ledger(env: &Env, ledger: u32) {
-        env.storage().instance().set(LAST_BATCH, &ledger);
-    }
+/// Admin-set borrowing terms (issue #261). `max_ltv_bps` bounds the loan
+/// against the borrower's staked principal; `interest_rate_bps` is a simple
+/// (non-compounding) annual rate accrued per ledger.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoanConfig {
+    pub max_ltv_bps: u32,
+    pub interest_rate_bps: u32,
 }
 
-// ── Progressive Stake Tax ────────────────────────────────────────────────────
+/// A user's outstanding loan against their staking position (issue #261).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loan {
+    pub principal: i128,
+    pub interest_accrued: i128,
+    pub opened_at: u32,
+    pub last_interest_at: u32,
+}
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+/// An admin-configured calendar window during which the reward rate is
+/// multiplied by `multiplier_bps` (issue #276). At most one season may be
+/// active at any given ledger — `add_season()` rejects overlapping ranges.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Season {
+    pub name: String,
+    pub starts_at: u32,
+    pub ends_at: u32,
+    pub multiplier_bps: u32,
+}
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+/// Lifecycle stage of a pool being formally deprecated (issue #298).
+/// Transitions are one-way: `Active` -> `SunsetAnnounced` -> `GracePeriodActive`
+/// -> `ForceResolutionActive` -> `Closed`.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SunsetState {
+    Active,
+    SunsetAnnounced,
+    GracePeriodActive,
+    ForceResolutionActive,
+    Closed,
+}
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ProgressiveTaxTier {
-    pub pool_share_threshold_bps: u32,
-    pub fee_bps: u32,
+pub struct RevenueSharingConfig {
+    pub governance_token: Address,
+    pub share_bps: u32,
 }
-
-const PROG_TAX: &Symbol = &symbol_short!("prog_tax");
-
-impl Storage {
-    pub fn get_progressive_tax_tiers(env: &Env) -> soroban_sdk::Vec<ProgressiveTaxTier> {
-        env.storage()
-            .instance()
-            .get(PROG_TAX)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(env))
-    }
-
-    pub fn set_progressive_tax_tiers(env: &Env, tiers: &soroban_sdk::Vec<ProgressiveTaxTier>) {
-        env.storage().instance().set(PROG_TAX, tiers);
-    }
-}
-
-// ── Stake Proof Attestation ───────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct StakeProof {
-    pub holder: Address,
-    pub pool_contract: Address,
-    pub staked_amount: i128,
-    pub staked_since: u32,
-    pub proof_issued_at: u32,
-    pub expires_at: u32,
-    pub nonce: u64,
+pub struct RevenueShareMerkleRoot {
+    pub root: soroban_sdk::Bytes,
+    pub epoch: u32,
+    pub total_amount: i128,
 }
 
-const PROOF_NONCE: &Symbol = &symbol_short!("pr_nonce");
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
 
-impl Storage {
-    pub fn get_proof_nonce(env: &Env, user: &Address) -> u64 {
-        let key = (PROOF_NONCE, user.clone());
-        env.storage().persistent().get::<_, u64>(&key).unwrap_or(0)
-    }
-
-    pub fn set_proof_nonce(env: &Env, user: &Address, nonce: u64) {
-        let key = (PROOF_NONCE, user.clone());
-        env.storage().persistent().set(&key, &nonce);
-    }
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessTier {
+    pub min_stake: i128,
+    pub min_duration_ledgers: u32,
+    pub access_token_contract: Address,
 }
+
+// ── Issue #314: withdrawal receipt ───────────────────────────────────────────
+
+/// Immutable on-chain proof of an unstake operation (issue #314).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithdrawalReceipt {
+    pub receipt_id: u64,
+    pub user: Address,
+    pub amount_returned: i128,
+    pub rewards_claimed: i128,
+    pub unstaked_at: u32,
+    pub lock_penalty_paid: i128,
+}
+
+

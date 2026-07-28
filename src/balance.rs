@@ -1,8 +1,10 @@
 use crate::storage::{
-    AdminProposal, AutoConvertConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket,
-    DynamicFeeConfig, FeeRecipient, GovernanceProposal, LotteryConfig, Milestone, MultisigConfig,
+    AccessTier, AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow,
+    DataKey, DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
+    InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig, Milestone, MultisigConfig,
     PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
-    StakePosition, VestingEntry,
+    RevenueShareMerkleRoot, RevenueSharingConfig, Season, StakePosition, SunsetState,
+    VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1877,3 +1879,384 @@ pub fn set_priority_bids(env: &Env, records: &Vec<PriorityBidRecord>) {
         .instance()
         .set(&symbol_short!("pbidrec"), records);
 }
+
+// ── Issue #258: pool whitelabel branding ──────────────────────────────────────
+
+pub fn get_branding(env: &Env) -> Option<BrandingConfig> {
+    env.storage().instance().get(&symbol_short!("branding"))
+}
+
+pub fn set_branding(env: &Env, config: &BrandingConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("branding"), config);
+}
+
+// ── Issue #259: staking insurance ─────────────────────────────────────────────
+
+pub fn get_insurance_product(env: &Env) -> Option<InsuranceProduct> {
+    env.storage().instance().get(&symbol_short!("ins_prod"))
+}
+
+pub fn set_insurance_product(env: &Env, product: &InsuranceProduct) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("ins_prod"), product);
+}
+
+pub fn get_insurance_policy(env: &Env, user: &Address) -> Option<InsurancePolicy> {
+    let key = (Symbol::new(env, "ins_pol"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_insurance_policy(env: &Env, user: &Address, policy: &InsurancePolicy) {
+    let key = (Symbol::new(env, "ins_pol"), user.clone());
+    env.storage().persistent().set(&key, policy);
+}
+
+pub fn remove_insurance_policy(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "ins_pol"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #260: flash stake ───────────────────────────────────────────────────
+
+pub fn get_flash_stake_fee_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("fs_fee"))
+        .unwrap_or(0)
+}
+
+pub fn set_flash_stake_fee_bps(env: &Env, bps: u32) {
+    env.storage().instance().set(&symbol_short!("fs_fee"), &bps);
+}
+
+/// Monotonic counter backing `FlashStakeReceipt::receipt_id`. Returns the id
+/// to use for the next receipt and advances the counter.
+pub fn next_flash_receipt_id(env: &Env) -> u64 {
+    let key = symbol_short!("fs_seq");
+    let next: u64 = env.storage().instance().get(&key).unwrap_or(0) + 1;
+    env.storage().instance().set(&key, &next);
+    next
+}
+
+/// `FlashStakeReceiptLog(receipt_id)` — permanent proof, never removed.
+pub fn get_flash_receipt(env: &Env, receipt_id: u64) -> Option<FlashStakeReceipt> {
+    let key = (Symbol::new(env, "fs_rcpt"), receipt_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_flash_receipt(env: &Env, receipt_id: u64, receipt: &FlashStakeReceipt) {
+    let key = (Symbol::new(env, "fs_rcpt"), receipt_id);
+    env.storage().persistent().set(&key, receipt);
+}
+
+// ── Issue #261: stake-backed loans ────────────────────────────────────────────
+
+pub fn get_loan_config(env: &Env) -> Option<LoanConfig> {
+    env.storage().instance().get(&symbol_short!("loan_cfg"))
+}
+
+pub fn set_loan_config(env: &Env, config: &LoanConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("loan_cfg"), config);
+}
+
+pub fn get_loan(env: &Env, user: &Address) -> Option<Loan> {
+    let key = (Symbol::new(env, "loan"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_loan(env: &Env, user: &Address, loan: &Loan) {
+    let key = (Symbol::new(env, "loan"), user.clone());
+    env.storage().persistent().set(&key, loan);
+}
+
+pub fn remove_loan(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "loan"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+pub fn get_seasons(env: &Env) -> Vec<Season> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("seasons"))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_seasons(env: &Env, seasons: &Vec<Season>) {
+    env.storage().instance().set(&symbol_short!("seasons"), seasons);
+}
+
+/// `starts_at` of the season `maybe_emit_season_transition()` last observed
+/// as active, so it can detect start/end boundary crossings lazily. Absent
+/// when no season has been observed active yet (or the last observed one
+/// has since ended).
+pub fn get_last_active_season_marker(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("seas_lst"))
+}
+
+pub fn set_last_active_season_marker(env: &Env, marker: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("seas_lst"), &marker);
+}
+
+pub fn clear_last_active_season_marker(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("seas_lst"));
+}
+
+// ── Issue #274: staker bio ────────────────────────────────────────────────────
+
+pub fn get_staker_bio(env: &Env, user: &Address) -> Option<String> {
+    let key = (Symbol::new(env, "bio"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_staker_bio(env: &Env, user: &Address, bio: &String) {
+    let key = (Symbol::new(env, "bio"), user.clone());
+    env.storage().persistent().set(&key, bio);
+}
+
+pub fn remove_staker_bio(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "bio"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+pub fn get_sunset_state(env: &Env) -> SunsetState {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("snst_st"))
+        .unwrap_or(SunsetState::Active)
+}
+
+pub fn set_sunset_state(env: &Env, state: SunsetState) {
+    env.storage().instance().set(&symbol_short!("snst_st"), &state);
+}
+
+pub fn get_grace_period_end(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("snst_gpe"))
+}
+
+pub fn set_grace_period_end(env: &Env, ledger: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("snst_gpe"), &ledger);
+}
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+pub fn get_revenue_sharing_config(env: &Env) -> Option<RevenueSharingConfig> {
+    env.storage().instance().get(&symbol_short!("rev_cfg"))
+}
+
+pub fn set_revenue_sharing_config(env: &Env, config: &RevenueSharingConfig) {
+    env.storage().instance().set(&symbol_short!("rev_cfg"), config);
+}
+
+pub fn get_revenue_share_pool(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rev_pool"))
+        .unwrap_or(0)
+}
+
+pub fn set_revenue_share_pool(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("rev_pool"), &amount);
+}
+
+pub fn get_revenue_share_epoch(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rev_ep"))
+        .unwrap_or(0)
+}
+
+pub fn set_revenue_share_epoch(env: &Env, epoch: u32) {
+    env.storage().instance().set(&symbol_short!("rev_ep"), &epoch);
+}
+
+pub fn get_revenue_share_merkle_root(env: &Env) -> Option<RevenueShareMerkleRoot> {
+    env.storage().instance().get(&symbol_short!("rev_mrk"))
+}
+
+pub fn set_revenue_share_merkle_root(env: &Env, root: &RevenueShareMerkleRoot) {
+    env.storage().instance().set(&symbol_short!("rev_mrk"), root);
+}
+
+pub fn is_revenue_share_claimed(env: &Env, user: &Address, epoch: u32) -> bool {
+    let key = (Symbol::new(env, "rev_clm"), user.clone(), epoch);
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_revenue_share_claimed(env: &Env, user: &Address, epoch: u32) {
+    let key = (Symbol::new(env, "rev_clm"), user.clone(), epoch);
+    env.storage().persistent().set(&key, &true);
+}
+
+// ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+pub fn get_escrow_period(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("esc_prd"))
+        .unwrap_or(0)
+}
+
+pub fn set_escrow_period(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("esc_prd"), &ledgers);
+}
+
+pub fn get_escrow_balance(env: &Env, user: &Address) -> i128 {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_escrow_balance(env: &Env, user: &Address, amount: i128) {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().set(&key, &amount);
+}
+
+pub fn remove_escrow_balance(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+pub fn get_escrow_release_ledger(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_escrow_release_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
+pub fn remove_escrow_release_ledger(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+pub fn get_access_tiers(env: &Env) -> Vec<AccessTier> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("acc_tier"))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_access_tiers(env: &Env, tiers: &Vec<AccessTier>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("acc_tier"), tiers);
+}
+
+pub fn get_user_access_tier(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_user_access_tier(env: &Env, user: &Address, tier_index: u32) {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().set(&key, &tier_index);
+}
+
+pub fn remove_user_access_tier(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #313: anniversary bonus ────────────────────────────────────────────
+
+pub fn get_anniversary_bonus_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, "anniv_bps"))
+        .unwrap_or(0)
+}
+
+pub fn set_anniversary_bonus_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "anniv_bps"), &bps);
+}
+
+pub fn get_anniversaries_paid(env: &Env, user: &Address) -> Vec<u32> {
+    let key = (Symbol::new(env, "anniv_pd"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_anniversaries_paid(env: &Env, user: &Address, paid: &Vec<u32>) {
+    let key = (Symbol::new(env, "anniv_pd"), user.clone());
+    env.storage().persistent().set(&key, paid);
+}
+
+// ── Issue #314: withdrawal receipt ───────────────────────────────────────────
+
+pub fn get_withdrawal_receipt_counter(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, "wd_rcpt_n"))
+        .unwrap_or(0)
+}
+
+pub fn set_withdrawal_receipt_counter(env: &Env, counter: u64) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "wd_rcpt_n"), &counter);
+}
+
+pub fn get_withdrawal_receipt(env: &Env, receipt_id: u64) -> Option<crate::storage::WithdrawalReceipt> {
+    let key = (Symbol::new(env, "wd_rcpt"), receipt_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_withdrawal_receipt(env: &Env, receipt: &crate::storage::WithdrawalReceipt) {
+    let key = (Symbol::new(env, "wd_rcpt"), receipt.receipt_id);
+    env.storage().persistent().set(&key, receipt);
+}
+
+pub fn get_user_receipt_ids(env: &Env, user: &Address) -> Vec<u64> {
+    let key = (Symbol::new(env, "wd_u_rcp"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_user_receipt_ids(env: &Env, user: &Address, ids: &Vec<u64>) {
+    let key = (Symbol::new(env, "wd_u_rcp"), user.clone());
+    env.storage().persistent().set(&key, ids);
+}
+
+// ── Issue #315: lot size ────────────────────────────────────────────────────
+
+pub fn get_lot_size(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, "lot_size"))
+        .unwrap_or(0)
+}
+
+pub fn set_lot_size(env: &Env, lot_size: i128) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "lot_size"), &lot_size);
+}
+
+
+
