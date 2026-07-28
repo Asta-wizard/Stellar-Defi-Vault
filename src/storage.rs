@@ -927,3 +927,56 @@ pub struct PriorityBidRecord {
     pub previous_position: u32,
     pub ledger: u32,
 }
+
+// ── Symbol-keyed storage helpers (DataKey at 50-variant cap) ──────────────
+
+use soroban_sdk::{symbol_short, Env, Symbol};
+
+const MERGER_PREFIX: &Symbol = &symbol_short!("merger");
+const BIO_PREFIX: &Symbol = &symbol_short!("bio");
+
+pub struct Storage;
+
+impl Storage {
+    // Merger proposal storage (#272)
+    pub fn set_merger_proposal(env: &Env, source_pool: &Address, admin: &Address) {
+        let key = (MERGER_PREFIX, source_pool.clone());
+        env.storage().persistent().set(&key, admin);
+    }
+
+    pub fn get_merger_proposal(env: &Env, source_pool: &Address) -> Option<Address> {
+        let key = (MERGER_PREFIX, source_pool.clone());
+        env.storage().persistent().get(&key)
+    }
+
+    pub fn remove_merger_proposal(env: &Env, source_pool: &Address) {
+        let key = (MERGER_PREFIX, source_pool.clone());
+        env.storage().persistent().remove(&key);
+    }
+
+    // Staker bio storage (#273)
+    pub fn set_staker_bio(env: &Env, staker: &Address, bio: &String) {
+        let key = (BIO_PREFIX, staker.clone());
+        env.storage().persistent().set(&key, bio);
+    }
+
+    pub fn get_staker_bio(env: &Env, staker: &Address) -> Option<String> {
+        let key = (BIO_PREFIX, staker.clone());
+        env.storage().persistent().get(&key)
+    }
+
+    // Admin check helper (#272)
+    pub fn get_admin(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    // Position existence check
+    pub fn has_position(env: &Env, user: &Address) -> bool {
+        env.storage().persistent().has(&DataKey::StakedAtLedger(user.clone()))
+    }
+
+    // Staked-at ledger for age check (#270)
+    pub fn get_staked_at_ledger(env: &Env, user: &Address) -> Option<u32> {
+        env.storage().persistent().get(&DataKey::StakedAtLedger(user.clone()))
+    }
+}
