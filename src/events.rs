@@ -1084,3 +1084,83 @@ pub fn force_resolved(
     env.events()
         .publish(topics, (principal, accrued_reward, ledger));
 }
+
+// ── Issue #286: debt NFT collateral ─────────────────────────────────────────
+
+pub fn debt_nft_minted(
+    env: &Env,
+    issuer: &Address,
+    nft_id: u32,
+    face_value: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("dbt_mnt"), issuer);
+    env.events()
+        .publish(topics, (nft_id, face_value, ledger));
+}
+
+pub fn debt_nft_burned(
+    env: &Env,
+    holder: &Address,
+    nft_id: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("dbt_brn"), holder);
+    env.events()
+        .publish(topics, (nft_id, ledger));
+}
+
+pub fn debt_nft_transferred(
+    env: &Env,
+    from: &Address,
+    to: &Address,
+    nft_id: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("dbt_trn"), from);
+    env.events()
+        .publish(topics, (to, nft_id, ledger));
+}
+
+// ── Issue #283: position AMM ─────────────────────────────────────────────────
+
+pub fn swap_executed(
+    env: &Env,
+    offerer: &Address,
+    counterparty: &Address,
+    offerer_amount: i128,
+    counterparty_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("swap_exe"), offerer);
+    env.events()
+        .publish(topics, (counterparty, offerer_amount, counterparty_amount, ledger));
+}
+
+// ── Issue #284: reward prediction market ─────────────────────────────────────
+
+pub fn market_resolved(
+    env: &Env,
+    outcome: bool,
+    winning_side_total: i128,
+    losing_side_total: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("mkt_rsl"),);
+    env.events()
+        .publish(topics, (outcome, winning_side_total, losing_side_total, ledger));
+}
+
+// ── Issue #285: cross-pool yield detector ────────────────────────────────────
+
+pub fn higher_yield_detected(
+    env: &Env,
+    competitor: &Address,
+    their_rate: i128,
+    our_rate: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("hi_yld"), competitor);
+    env.events()
+        .publish(topics, (their_rate, our_rate, ledger));
+}

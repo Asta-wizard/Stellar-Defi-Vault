@@ -433,6 +433,52 @@ pub enum VaultFeatureError {
     /// `liquidate_loan()` when the borrower's LTV is still below
     /// `LIQUIDATION_LTV_BPS` (9 000).
     LoanNotLiquidatable = 22,
+
+    // ── Issue #286: debt NFT collateral ──────────────────────────────────
+    /// `mint_debt_nft()`: user already has an outstanding debt NFT.
+    PositionCollateralized = 32,
+    /// `mint_debt_nft()`: face_value exceeds the user's staking position.
+    FaceValueExceedsPosition = 33,
+    /// `burn_debt_nft()` / `transfer_debt_nft()` / `get_debt_nft()`: NFT not found.
+    DebtNftNotFound = 34,
+    /// `transfer_debt_nft()`: caller is not the current holder.
+    NotNftHolder = 35,
+
+    // ── Issue #285: cross-pool yield detector ────────────────────────────
+    /// `set_competitor_pools()`: more than 10 competitor addresses.
+    TooManyCompetitors = 36,
+
+    // ── Issue #283: position AMM ──────────────────────────────────────────
+    /// `create_swap_offer()`: caller already has 5 open offers.
+    TooManyOpenOffers = 37,
+    /// `accept_swap_offer()` / `cancel_swap_offer()`: offer id not found.
+    OfferNotFound = 38,
+    /// `accept_swap_offer()`: offer has expired.
+    OfferExpired = 39,
+    /// `accept_swap_offer()`: caller is not the requested counterparty.
+    NotRequestedCounterparty = 40,
+    /// `create_swap_offer()`: requested swap amount exceeds position size.
+    InsufficientAmount = 41,
+
+    // ── Issue #284: reward prediction market ──────────────────────────────
+    /// `open_prediction_market()`: a market is already open.
+    MarketAlreadyOpen = 42,
+    /// `place_bet()`: no market is currently open.
+    NoMarketOpen = 43,
+    /// `place_bet()`: betting window has closed.
+    BettingClosed = 44,
+    /// `resolve_market()`: target ledger has not been reached yet.
+    MarketNotReady = 45,
+    /// `claim_prediction_winnings()`: market not yet resolved.
+    MarketNotResolved = 46,
+    /// `claim_prediction_winnings()`: user already claimed.
+    AlreadyClaimed = 47,
+    /// `place_bet()`: caller is not an active staker.
+    NotActiveStaker = 48,
+
+    // ── Issue #284: used by open_prediction_market validation ──────────────
+    /// `open_prediction_market()`: target_ledger in the past or closes_at >= target_ledger.
+    InvalidRate = 49,
 }
 
 impl From<VaultError> for VaultExtError {

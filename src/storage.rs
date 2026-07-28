@@ -1034,3 +1034,54 @@ pub enum SunsetState {
     ForceResolutionActive,
     Closed,
 }
+
+// ── Issue #286: debt NFT collateral ─────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DebtNFT {
+    pub id: u32,
+    pub issuer: Address,
+    pub holder: Address,
+    pub face_value: i128,
+    pub expires_at: u32,
+    pub minted_at: u32,
+}
+
+// ── Issue #283: position AMM (atomic position swaps) ─────────────────────────
+
+/// A peer-to-peer swap offer between two stakers (issue #283).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwapOffer {
+    pub offerer: Address,
+    pub offered_amount: i128,
+    pub requested_address: Address,
+    pub requested_amount: i128,
+    pub expires_at: u32,
+}
+
+// ── Issue #284: reward prediction market ────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PredictionMarket {
+    pub closes_at: u32,
+    pub target_ledger: u32,
+    pub current_rate_bps: i128,
+    pub bets_higher: i128,
+    pub bets_lower: i128,
+    pub resolved: bool,
+    pub outcome: Option<bool>,
+}
+
+// ── Issue #285: cross-pool yield detector ────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct YieldComparison {
+    pub pool: Address,
+    pub rate_bps: i128,
+    pub reachable: bool,
+    pub is_higher: bool,
+}

@@ -8,13 +8,11 @@ use soroban_sdk::{
     token, Address, Bytes, Env, Symbol, TryFromVal, Vec,
 };
 
-use soroban_sdk::symbol_short;
-
 use crate::{
     errors::{VaultError, VaultExtError, VaultFeatureError},
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{
-        AdminAction, ChangelogEntry, FeeRecipient, HalvingConfig, MilestoneCondition, PauseReason,
+        AdminAction, ChangelogEntry, DebtNFT, FeeRecipient, HalvingConfig, MilestoneCondition, PauseReason,
         ProposableParam, RoundingPolicy, StakingCertificate, SunsetState, TriggerDirection,
         UnstakeCheckResult,
     },
@@ -7622,4 +7620,307 @@ fn test_queries_work_when_pool_closed() {
 
     assert_eq!(f.vault.get_sunset_state(), SunsetState::Closed);
     assert_eq!(f.vault.total_staked(), 0);
+}
+
+// ── Issue #286: debt NFT collateral tests ──────────────────────────────────
+
+#[test]
+fn test_mint_debt_nft_creates_nft() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+
+    let nft_id = f.vault.mint_debt_nft(&f.alice, &100_000, &100_000);
+    assert_eq!(nft_id, 1);
+
+    let nft: DebtNFT = f.vault.get_debt_nft(&1).unwrap();
+    assert_eq!(nft.id, 1);
+    assert_eq!(nft.issuer, f.alice);
+    assert_eq!(nft.holder, f.alice);
+    assert_eq!(nft.face_value, 100_000);
+}
+
+#[test]
+fn test_mint_debt_nft_requires_position() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_mint_debt_nft(&f.alice, &100_000, &100_000);
+    assert_eq!(result, Err(Ok(VaultFeatureError::PositionNotFound)));
+}
+
+#[test]
+fn test_mint_debt_nft_face_value_exceeds_position() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+
+    let result = f.vault.try_mint_debt_nft(&f.alice, &600_000, &100_000);
+    assert_eq!(result, Err(Ok(VaultFeatureError::FaceValueExceedsPosition)));
+}
+
+#[test]
+fn test_unstake_blocked_with_debt_nft() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.mint_debt_nft(&f.alice, &100_000, &100_000);
+
+    let result = f.vault.try_unstake(&f.alice, &500_000);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_unstake_all_blocked_with_debt_nft() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.mint_debt_nft(&f.alice, &100_000, &100_000);
+
+    let result = f.vault.try_unstake_all(&f.alice);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_transfer_debt_nft_changes_holder() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.mint_debt_nft(&f.alice, &100_000, &100_000);
+
+    f.vault.transfer_debt_nft(&f.alice, &f.bob, &1);
+
+    let nft: DebtNFT = f.vault.get_debt_nft(&1).unwrap();
+    assert_eq!(nft.holder, f.bob);
+}
+
+#[test]
+fn test_burn_debt_nft_pays_holder() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.mint_debt_nft(&f.alice, &100_000, &100_000);
+    f.vault.transfer_debt_nft(&f.alice, &f.bob, &1);
+
+    let bob_balance_before = f.token.balance(&f.bob);
+    f.vault.burn_debt_nft(&f.bob, &1);
+    let bob_balance_after = f.token.balance(&f.bob);
+
+    assert_eq!(bob_balance_after, bob_balance_before + 100_000);
+}
+
+#[test]
+fn test_burn_debt_nft_reverts_for_wrong_holder() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &500_000);
+    f.vault.mint_debt_nft(&f.alice, &100_000, &100_000);
+
+    let result = f.vault.try_burn_debt_nft(&f.bob, &1);
+    assert_eq!(result, Err(Ok(VaultFeatureError::NotNftHolder)));
+}
+
+// ── Issue #285: cross-pool yield detector tests ───────────────────────────
+
+#[test]
+fn test_set_and_get_competitor_pools() {
+    let f = VaultFixture::new();
+    let pool1 = Address::generate(&f.env);
+    let pool2 = Address::generate(&f.env);
+    let pools = Vec::from_array(&f.env, [pool1.clone(), pool2.clone()]);
+
+    f.vault.set_competitor_pools(&f.admin, &pools);
+    let stored = f.vault.get_competitor_pools();
+
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.get(0).unwrap(), pool1);
+    assert_eq!(stored.get(1).unwrap(), pool2);
+}
+
+#[test]
+fn test_max_ten_competitor_pools() {
+    let f = VaultFixture::new();
+    let mut pools = Vec::new(&f.env);
+    for _ in 0..11 {
+        pools.push_back(Address::generate(&f.env));
+    }
+
+    let result = f.vault.try_set_competitor_pools(&f.admin, &pools);
+    assert_eq!(result, Err(Ok(VaultFeatureError::TooManyCompetitors)));
+}
+
+#[test]
+fn test_detect_higher_yield_no_competitors() {
+    let f = VaultFixture::new();
+    let results = f.vault.detect_higher_yield();
+    assert_eq!(results.len(), 0);
+}
+
+// ── Issue #283: position AMM tests ─────────────────────────────────────────
+
+#[test]
+fn test_create_and_accept_swap_offer() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &10_000);
+    f.token_admin.mint(&f.bob, &10_000);
+    f.vault.stake(&f.alice, &5_000);
+    f.vault.stake(&f.bob, &5_000);
+
+    let offer_id = f.vault.create_swap_offer(&f.alice, &f.bob, &2_000, &3_000, &100);
+    assert!(offer_id > 0);
+
+    f.vault.accept_swap_offer(&f.bob, &offer_id);
+
+    assert_ne!(f.vault.shares_of(&f.alice), 0);
+    assert_ne!(f.vault.shares_of(&f.bob), 0);
+}
+
+#[test]
+fn test_expired_swap_offer_rejected() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &10_000);
+    f.token_admin.mint(&f.bob, &10_000);
+    f.vault.stake(&f.alice, &5_000);
+    f.vault.stake(&f.bob, &5_000);
+
+    let offer_id = f.vault.create_swap_offer(&f.alice, &f.bob, &2_000, &3_000, &50);
+    set_ledger(&f.env, 1000);
+
+    let result = f.vault.try_accept_swap_offer(&f.bob, &offer_id);
+    assert_eq!(result, Err(Ok(VaultFeatureError::OfferExpired)));
+}
+
+#[test]
+fn test_cancel_swap_offer() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &10_000);
+    f.token_admin.mint(&f.bob, &10_000);
+    f.vault.stake(&f.alice, &5_000);
+    f.vault.stake(&f.bob, &5_000);
+
+    let offer_id = f.vault.create_swap_offer(&f.alice, &f.bob, &2_000, &3_000, &100);
+    f.vault.cancel_swap_offer(&f.alice, &offer_id);
+
+    let result = f.vault.try_accept_swap_offer(&f.bob, &offer_id);
+    assert_eq!(result, Err(Ok(VaultFeatureError::OfferNotFound)));
+}
+
+#[test]
+fn test_max_five_open_offers() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &100_000);
+    f.token_admin.mint(&f.bob, &100_000);
+    let charlie = Address::generate(&f.env);
+    f.token_admin.mint(&charlie, &100_000);
+    f.vault.stake(&f.alice, &50_000);
+    f.vault.stake(&f.bob, &50_000);
+    f.vault.stake(&charlie, &50_000);
+
+    for _ in 0..5 {
+        let dummy = Address::generate(&f.env);
+        f.token_admin.mint(&dummy, &100_000);
+        f.vault.stake(&dummy, &5_000);
+        f.vault.create_swap_offer(&f.alice, &dummy, &1_000, &1_000, &100);
+    }
+
+    let result = f.vault.try_create_swap_offer(&f.alice, &charlie, &1_000, &1_000, &100);
+    assert_eq!(result, Err(Ok(VaultFeatureError::TooManyOpenOffers)));
+}
+
+#[test]
+fn test_swap_settles_pending_rewards() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &10_000);
+    f.token_admin.mint(&f.bob, &10_000);
+    f.vault.stake(&f.alice, &5_000);
+    f.vault.stake(&f.bob, &5_000);
+
+    set_ledger(&f.env, 1000);
+
+    let alice_pending = f.vault.calc_pending_reward(&f.alice);
+    let bob_pending = f.vault.calc_pending_reward(&f.bob);
+    assert!(alice_pending > 0);
+    assert!(bob_pending > 0);
+
+    let offer_id = f.vault.create_swap_offer(&f.alice, &f.bob, &2_000, &3_000, &100);
+    f.vault.accept_swap_offer(&f.bob, &offer_id);
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 0);
+    assert_eq!(f.vault.calc_pending_reward(&f.bob), 0);
+}
+
+#[test]
+fn test_swap_positions_updated_correctly() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &10_000);
+    f.token_admin.mint(&f.bob, &10_000);
+    f.vault.stake(&f.alice, &3_000);
+    f.vault.stake(&f.bob, &7_000);
+
+    let alice_before = f.vault.shares_of(&f.alice);
+    let bob_before = f.vault.shares_of(&f.bob);
+
+    let offer_id = f.vault.create_swap_offer(&f.alice, &f.bob, &1_000, &2_000, &100);
+    f.vault.accept_swap_offer(&f.bob, &offer_id);
+
+    assert_ne!(f.vault.shares_of(&f.alice), alice_before);
+    assert_ne!(f.vault.shares_of(&f.bob), bob_before);
+}
+
+// ── Issue #284: reward prediction market tests ─────────────────────────────
+
+#[test]
+fn test_open_and_resolve_market_higher() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &100_000);
+    f.vault.stake(&f.alice, &50_000);
+
+    set_ledger(&f.env, 50);
+    f.vault.open_prediction_market(&f.admin, &100, &200);
+
+    f.vault.place_bet(&f.alice, &true, &1_000);
+
+    set_ledger(&f.env, 250);
+    f.vault.set_reward_rate_bps(&1000u32);
+
+    f.vault.resolve_market(&f.admin);
+
+    let winnings = f.vault.claim_prediction_winnings(&f.alice);
+    assert!(winnings > 1_000);
+}
+
+#[test]
+fn test_market_lower_rate_wins() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &100_000);
+    f.token_admin.mint(&f.bob, &100_000);
+    f.vault.stake(&f.alice, &50_000);
+    f.vault.stake(&f.bob, &50_000);
+
+    f.vault.set_reward_rate_bps(&1000u32);
+    set_ledger(&f.env, 50);
+    f.vault.open_prediction_market(&f.admin, &100, &200);
+
+    f.vault.place_bet(&f.alice, &false, &1_000);
+    f.vault.place_bet(&f.bob, &false, &2_000);
+
+    set_ledger(&f.env, 250);
+    f.vault.set_reward_rate_bps(&500u32);
+
+    f.vault.resolve_market(&f.admin);
+
+    let alice_win = f.vault.claim_prediction_winnings(&f.alice);
+    let bob_win = f.vault.claim_prediction_winnings(&f.bob);
+
+    assert!(alice_win > 1_000);
+    assert!(bob_win > 2_000);
+}
+
+#[test]
+fn test_rate_unchanged_refunds_all() {
+    let f = VaultFixture::new();
+    f.token_admin.mint(&f.alice, &100_000);
+    f.vault.stake(&f.alice, &50_000);
+
+    set_ledger(&f.env, 50);
+    f.vault.open_prediction_market(&f.admin, &100, &200);
+
+    f.vault.place_bet(&f.alice, &true, &1_000);
+
+    set_ledger(&f.env, 250);
+    f.vault.resolve_market(&f.admin);
+
+    let winnings = f.vault.claim_prediction_winnings(&f.alice);
+    assert_eq!(winnings, 1_000);
 }

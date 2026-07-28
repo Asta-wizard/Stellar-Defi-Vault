@@ -11,18 +11,18 @@ use crate::{
     storage::{
         AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
         BootstrapConfig, BrandingConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
-        ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig,
+        ContractAddresses, ContractMetadata, DataKey, DayBucket, DebtNFT, DelegationChain, DynamicFeeConfig,
         EpochState, FeeRecipient, FlashStakeReceipt, GovernanceProposal, HalvingConfig,
         InsurancePolicy, InsuranceProduct, InterfaceId, LeaderboardEntry, Loan, LoanConfig,
         LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
+        PoolHealthReport, PoolStats, PredictionMarket, PriceCondition, PriorityBidRecord, ProposableParam,
         RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
         RewardMultiplierBreakdown, RoundingPolicy, Season, SmoothingSchedule, SmoothingStatus,
         StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
-        StakingEfficiencyScore, StorageUsageReport, SunsetState, TaxReport, Tournament,
+        StakingEfficiencyScore, StorageUsageReport, SunsetState, SwapOffer, TaxReport, Tournament,
         TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
-        VestingEntry,
+        VestingEntry, YieldComparison,
     },
 };
 
@@ -5656,6 +5656,12 @@ impl VaultContract {
     fn do_unstake(env: &Env, staker: &Address, shares: i128) -> Result<i128, VaultError> {
         Self::maybe_emit_position_expired(env, staker);
         staker.require_auth();
+
+        // Reject unstake if user has an outstanding debt NFT.
+        if Self::has_debt_nft(env, staker) {
+            panic_with_error!(env, VaultFeatureError::PositionCollateralized);
+        }
+
         Self::require_not_paused(env)?;
         // Issue #235: credit vested smoothing before pricing the exit, so a
         // leaving staker is paid out at a share price that includes it.
@@ -11353,5 +11359,590 @@ impl VaultContract {
         let ledger = env.ledger().sequence();
         events::sunset_stage_changed(&env, SunsetState::Closed, ledger);
         Ok(())
+    }
+
+    // ── Issue #286: debt NFT collateral ──────────────────────────────────────
+
+    fn debt_nft_counter(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("dbt_cnt"))
+            .unwrap_or(0)
+    }
+
+    fn debt_nft_by_id_key(env: &Env, nft_id: u32) -> (Symbol, u32) {
+        (Symbol::new(env, "dnf"), nft_id)
+    }
+
+    fn debt_nft_for_user_key(env: &Env, user: &Address) -> (Symbol, Address) {
+        (Symbol::new(env, "dnfu"), user.clone())
+    }
+
+    pub fn mint_debt_nft(
+        env: Env,
+        user: Address,
+        face_value: i128,
+        expires_at: u32,
+    ) -> Result<u32, VaultFeatureError> {
+        user.require_auth();
+
+        if face_value <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let position_amount = balance::shares_to_amount(
+            balance::get_total_shares(&env),
+            balance::get_total_deposited(&env),
+            balance::get_shares(&env, &user),
+        )
+        .unwrap_or(0);
+        if position_amount == 0 {
+            return Err(VaultFeatureError::PositionNotFound);
+        }
+        if face_value > position_amount {
+            return Err(VaultFeatureError::FaceValueExceedsPosition);
+        }
+
+        let user_key = Self::debt_nft_for_user_key(&env, &user);
+        if env.storage().instance().has(&user_key) {
+            return Err(VaultFeatureError::PositionCollateralized);
+        }
+
+        let next_id = Self::debt_nft_counter(&env) + 1;
+        let nft = DebtNFT {
+            id: next_id,
+            issuer: user.clone(),
+            holder: user.clone(),
+            face_value,
+            expires_at,
+            minted_at: env.ledger().sequence(),
+        };
+
+        let nft_key = Self::debt_nft_by_id_key(&env, next_id);
+        env.storage().instance().set(&nft_key, &nft);
+        env.storage().instance().set(&user_key, &next_id);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("dbt_cnt"), &next_id);
+
+        events::debt_nft_minted(&env, &user, next_id, face_value, env.ledger().sequence());
+        Ok(next_id)
+    }
+
+    pub fn burn_debt_nft(
+        env: Env,
+        holder: Address,
+        nft_id: u32,
+    ) -> Result<(), VaultFeatureError> {
+        holder.require_auth();
+
+        let nft_key = Self::debt_nft_by_id_key(&env, nft_id);
+        let nft: DebtNFT = env
+            .storage()
+            .instance()
+            .get(&nft_key)
+            .ok_or(VaultFeatureError::DebtNftNotFound)?;
+
+        if nft.holder != holder {
+            return Err(VaultFeatureError::NotNftHolder);
+        }
+
+        let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        token::Client::new(&env, &token).transfer(
+            &nft.issuer,
+            &holder,
+            &nft.face_value,
+        );
+
+        let user_key = Self::debt_nft_for_user_key(&env, &nft.issuer);
+        env.storage().instance().remove(&nft_key);
+        env.storage().instance().remove(&user_key);
+
+        events::debt_nft_burned(&env, &holder, nft_id, env.ledger().sequence());
+        Ok(())
+    }
+
+    pub fn transfer_debt_nft(
+        env: Env,
+        from: Address,
+        to: Address,
+        nft_id: u32,
+    ) -> Result<(), VaultFeatureError> {
+        from.require_auth();
+
+        let nft_key = Self::debt_nft_by_id_key(&env, nft_id);
+        let mut nft: DebtNFT = env
+            .storage()
+            .instance()
+            .get(&nft_key)
+            .ok_or(VaultFeatureError::DebtNftNotFound)?;
+
+        if nft.holder != from {
+            return Err(VaultFeatureError::NotNftHolder);
+        }
+
+        nft.holder = to.clone();
+        env.storage().instance().set(&nft_key, &nft);
+
+        events::debt_nft_transferred(&env, &from, &to, nft_id, env.ledger().sequence());
+        Ok(())
+    }
+
+    pub fn get_debt_nft(env: Env, nft_id: u32) -> Option<DebtNFT> {
+        env.storage()
+            .instance()
+            .get(&Self::debt_nft_by_id_key(&env, nft_id))
+    }
+
+    fn has_debt_nft(env: &Env, user: &Address) -> bool {
+        let user_key = Self::debt_nft_for_user_key(env, user);
+        env.storage().instance().has(&user_key)
+    }
+
+    // ── Issue #285: cross-pool yield detector ────────────────────────────────
+
+    pub fn set_competitor_pools(
+        env: Env,
+        admin: Address,
+        pools: Vec<Address>,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if pools.len() > 10 {
+            return Err(VaultFeatureError::TooManyCompetitors);
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("comp_pls"), &pools);
+        Ok(())
+    }
+
+    pub fn get_competitor_pools(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("comp_pls"))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn detect_higher_yield(env: Env) -> Vec<YieldComparison> {
+        let our_rate = balance::get_reward_rate_bps(&env) as i128;
+        let pools: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("comp_pls"))
+            .unwrap_or(Vec::new(&env));
+        let mut results: Vec<YieldComparison> = Vec::new(&env);
+
+        for i in 0..pools.len() {
+            let pool = pools.get(i).unwrap();
+            let (rate, reachable) = Self::try_query_reward_rate(&env, &pool);
+            let is_higher = reachable && rate > our_rate;
+            results.push_back(YieldComparison {
+                pool: pool.clone(),
+                rate_bps: rate,
+                reachable,
+                is_higher,
+            });
+
+            if is_higher {
+                events::higher_yield_detected(
+                    &env,
+                    &pool,
+                    rate,
+                    our_rate,
+                    env.ledger().sequence(),
+                );
+            }
+        }
+
+        results
+    }
+
+    // ── Issue #283: position AMM ─────────────────────────────────────────────
+
+    fn swap_offer_key(env: &Env, offer_id: u32) -> (Symbol, u32) {
+        (Symbol::new(env, "of"), offer_id)
+    }
+
+    fn count_user_open_offers(env: &Env, user: &Address) -> u32 {
+        let count_key = symbol_short!("off_usr");
+        let entries: Vec<u32> = env.storage().instance().get(&count_key).unwrap_or(Vec::new(env));
+        let mut cnt = 0;
+        for i in 0..entries.len() {
+            let oid = entries.get(i).unwrap();
+            let key = Self::swap_offer_key(env, oid);
+            if let Some(offer) = env.storage().instance().get::<_, SwapOffer>(&key) {
+                if offer.offerer == *user && offer.expires_at >= env.ledger().sequence() {
+                    cnt += 1;
+                }
+            }
+        }
+        cnt
+    }
+
+    pub fn create_swap_offer(
+        env: Env,
+        user: Address,
+        counterparty: Address,
+        my_amount: i128,
+        their_amount: i128,
+        duration_ledgers: u32,
+    ) -> Result<u32, VaultFeatureError> {
+        user.require_auth();
+
+        if my_amount <= 0 || their_amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+        if balance::get_shares(&env, &user) == 0 || balance::get_shares(&env, &counterparty) == 0 {
+            return Err(VaultFeatureError::PositionNotFound);
+        }
+
+        let user_pos_amount = balance::shares_to_amount(
+            balance::get_total_shares(&env),
+            balance::get_total_deposited(&env),
+            balance::get_shares(&env, &user),
+        )
+        .unwrap_or(0);
+        if my_amount > user_pos_amount {
+            return Err(VaultFeatureError::InsufficientAmount);
+        }
+
+        let counterparty_pos_amount = balance::shares_to_amount(
+            balance::get_total_shares(&env),
+            balance::get_total_deposited(&env),
+            balance::get_shares(&env, &counterparty),
+        )
+        .unwrap_or(0);
+        if their_amount > counterparty_pos_amount {
+            return Err(VaultFeatureError::InsufficientAmount);
+        }
+
+        if Self::count_user_open_offers(&env, &user) >= 5 {
+            return Err(VaultFeatureError::TooManyOpenOffers);
+        }
+
+        let count_key = symbol_short!("off_cnt");
+        let next_id: u32 = env.storage().instance().get(&count_key).unwrap_or(0) + 1;
+        env.storage().instance().set(&count_key, &next_id);
+
+        let offer = SwapOffer {
+            offerer: user.clone(),
+            offered_amount: my_amount,
+            requested_address: counterparty.clone(),
+            requested_amount: their_amount,
+            expires_at: env.ledger().sequence() + duration_ledgers,
+        };
+        let offer_key = Self::swap_offer_key(&env, next_id);
+        env.storage().instance().set(&offer_key, &offer);
+
+        let mut user_offers: Vec<u32> = env.storage().instance().get(&symbol_short!("off_usr")).unwrap_or(Vec::new(&env));
+        user_offers.push_back(next_id);
+        env.storage().instance().set(&symbol_short!("off_usr"), &user_offers);
+
+        Ok(next_id)
+    }
+
+    pub fn accept_swap_offer(
+        env: Env,
+        counterparty: Address,
+        offer_id: u32,
+    ) -> Result<(), VaultFeatureError> {
+        counterparty.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let offer_key = Self::swap_offer_key(&env, offer_id);
+        let offer: SwapOffer = env
+            .storage()
+            .instance()
+            .get(&offer_key)
+            .ok_or(VaultFeatureError::OfferNotFound)?;
+
+        if counterparty != offer.requested_address {
+            return Err(VaultFeatureError::NotRequestedCounterparty);
+        }
+        if env.ledger().sequence() > offer.expires_at {
+            return Err(VaultFeatureError::OfferExpired);
+        }
+
+        Self::do_claim(&env, &offer.offerer)?;
+        Self::do_claim(&env, &counterparty)?;
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+
+        let offerer_shares = balance::get_shares(&env, &offer.offerer);
+        let counterparty_shares = balance::get_shares(&env, &counterparty);
+
+        let offerer_offer_shares = if total_shares > 0 && total_deposited > 0 {
+            offer.offered_amount * total_shares / total_deposited
+        } else {
+            0
+        };
+        let counterparty_offer_shares = if total_shares > 0 && total_deposited > 0 {
+            offer.requested_amount * total_shares / total_deposited
+        } else {
+            0
+        };
+
+        if offerer_offer_shares == 0 || counterparty_offer_shares == 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let new_offerer_shares = offerer_shares - offerer_offer_shares + counterparty_offer_shares;
+        let new_counterparty_shares = counterparty_shares - counterparty_offer_shares + offerer_offer_shares;
+
+        balance::set_shares(&env, &offer.offerer, new_offerer_shares);
+        balance::set_shares(&env, &counterparty, new_counterparty_shares);
+
+        let ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::StakedAtLedger(offer.offerer.clone()), &ledger);
+        env.storage()
+            .persistent()
+            .set(&DataKey::StakedAtLedger(counterparty.clone()), &ledger);
+        balance::set_last_claim_ledger(&env, &offer.offerer, ledger);
+        balance::set_last_claim_ledger(&env, &counterparty, ledger);
+
+        Self::record_stake_snapshot(&env, &offer.offerer, new_offerer_shares);
+        Self::record_stake_snapshot(&env, &counterparty, new_counterparty_shares);
+        Self::update_leaderboard(&env, &offer.offerer, new_offerer_shares);
+        Self::update_leaderboard(&env, &counterparty, new_counterparty_shares);
+
+        env.storage().instance().remove(&offer_key);
+
+        events::swap_executed(
+            &env,
+            &offer.offerer,
+            &counterparty,
+            offer.offered_amount,
+            offer.requested_amount,
+            ledger,
+        );
+
+        Ok(())
+    }
+
+    pub fn cancel_swap_offer(
+        env: Env,
+        user: Address,
+        offer_id: u32,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+
+        let offer_key = Self::swap_offer_key(&env, offer_id);
+        let offer: SwapOffer = env
+            .storage()
+            .instance()
+            .get(&offer_key)
+            .ok_or(VaultFeatureError::OfferNotFound)?;
+
+        if offer.offerer != user {
+            return Err(VaultFeatureError::Unauthorized);
+        }
+
+        env.storage().instance().remove(&offer_key);
+        Ok(())
+    }
+
+    // ── Issue #284: reward prediction market ─────────────────────────────────
+
+    pub fn open_prediction_market(
+        env: Env,
+        admin: Address,
+        closes_at: u32,
+        target_ledger: u32,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if env.storage().instance().has(&symbol_short!("pred_mk")) {
+            return Err(VaultFeatureError::MarketAlreadyOpen);
+        }
+        if target_ledger <= env.ledger().sequence() {
+            return Err(VaultFeatureError::InvalidRate);
+        }
+        if closes_at >= target_ledger {
+            return Err(VaultFeatureError::InvalidRate);
+        }
+
+        let current_rate: i128 = balance::get_reward_rate_bps(&env).into();
+        let market = PredictionMarket {
+            closes_at,
+            target_ledger,
+            current_rate_bps: current_rate,
+            bets_higher: 0,
+            bets_lower: 0,
+            resolved: false,
+            outcome: None,
+        };
+        env.storage().instance().set(&symbol_short!("pred_mk"), &market);
+        Ok(())
+    }
+
+    pub fn place_bet(
+        env: Env,
+        user: Address,
+        higher: bool,
+        amount: i128,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        if balance::get_shares(&env, &user) == 0 {
+            return Err(VaultFeatureError::NotActiveStaker);
+        }
+
+        let mut market: PredictionMarket = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("pred_mk"))
+            .ok_or(VaultFeatureError::NoMarketOpen)?;
+
+        if env.ledger().sequence() > market.closes_at {
+            return Err(VaultFeatureError::BettingClosed);
+        }
+        if market.resolved {
+            return Err(VaultFeatureError::MarketNotResolved);
+        }
+
+        let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        token::Client::new(&env, &token).transfer(&user, &env.current_contract_address(), &amount);
+
+        if higher {
+            market.bets_higher = market.bets_higher.checked_add(amount).ok_or(VaultFeatureError::ArithmeticError)?;
+        } else {
+            market.bets_lower = market.bets_lower.checked_add(amount).ok_or(VaultFeatureError::ArithmeticError)?;
+        }
+
+        let bet_key = (Symbol::new(&env, "pbet"), user.clone());
+        env.storage().instance().set(&bet_key, &(higher, amount));
+
+        env.storage().instance().set(&symbol_short!("pred_mk"), &market);
+        Ok(())
+    }
+
+    pub fn resolve_market(env: Env, admin: Address) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut market: PredictionMarket = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("pred_mk"))
+            .ok_or(VaultFeatureError::NoMarketOpen)?;
+
+        if env.ledger().sequence() < market.target_ledger {
+            return Err(VaultFeatureError::MarketNotReady);
+        }
+        if market.resolved {
+            return Err(VaultFeatureError::MarketNotResolved);
+        }
+
+        let current_rate: i128 = balance::get_reward_rate_bps(&env).into();
+        let outcome = if current_rate > market.current_rate_bps {
+            Some(true)
+        } else if current_rate < market.current_rate_bps {
+            Some(false)
+        } else {
+            None
+        };
+        market.outcome = outcome;
+        market.resolved = true;
+        env.storage().instance().set(&symbol_short!("pred_mk"), &market);
+
+        let (winning_side, losing_side) = match outcome {
+            Some(true) => (market.bets_higher, market.bets_lower),
+            Some(false) => (market.bets_lower, market.bets_higher),
+            None => (0, 0),
+        };
+
+        events::market_resolved(
+            &env,
+            outcome.unwrap_or(false),
+            winning_side,
+            losing_side,
+            env.ledger().sequence(),
+        );
+
+        Ok(())
+    }
+
+    pub fn claim_prediction_winnings(
+        env: Env,
+        user: Address,
+    ) -> Result<i128, VaultFeatureError> {
+        user.require_auth();
+
+        let market: PredictionMarket = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("pred_mk"))
+            .ok_or(VaultFeatureError::NoMarketOpen)?;
+
+        if !market.resolved {
+            return Err(VaultFeatureError::MarketNotResolved);
+        }
+
+        let bet_key = (Symbol::new(&env, "pbet"), user.clone());
+        let (bet_higher, bet_amount): (bool, i128) = env
+            .storage()
+            .instance()
+            .get(&bet_key)
+            .ok_or(VaultFeatureError::AlreadyClaimed)?;
+
+        env.storage().instance().remove(&bet_key);
+
+        if market.outcome.is_none() {
+            let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+            token::Client::new(&env, &token).transfer(
+                &env.current_contract_address(),
+                &user,
+                &bet_amount,
+            );
+            return Ok(bet_amount);
+        }
+
+        let user_won = market.outcome == Some(bet_higher);
+        if !user_won {
+            return Ok(0);
+        }
+
+        let total_winning = if bet_higher {
+            market.bets_higher
+        } else {
+            market.bets_lower
+        };
+        let total_losing = if bet_higher {
+            market.bets_lower
+        } else {
+            market.bets_higher
+        };
+
+        if total_winning == 0 {
+            return Err(VaultFeatureError::ArithmeticError);
+        }
+
+        // Nobody bet the losing side: there is no pot to split, so the winner
+        // simply gets their own stake back.
+        let winnings = if total_losing == 0 {
+            bet_amount
+        } else {
+            bet_amount + (bet_amount * total_losing / total_winning)
+        };
+
+        let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &user,
+            &winnings,
+        );
+
+        Ok(winnings)
     }
 }
