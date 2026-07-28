@@ -1,6 +1,6 @@
 use crate::storage::{
-    AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow, DataKey,
-    DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
+    AccessTier, AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow,
+    DataKey, DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
     InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig, Milestone, MultisigConfig,
     PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
     RevenueShareMerkleRoot, RevenueSharingConfig, Season, StakePosition, SunsetState,
@@ -2146,5 +2146,36 @@ pub fn remove_escrow_release_ledger(env: &Env, user: &Address) {
     let key = (Symbol::new(env, "esc_rel"), user.clone());
     env.storage().persistent().remove(&key);
 }
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+pub fn get_access_tiers(env: &Env) -> Vec<AccessTier> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("acc_tier"))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_access_tiers(env: &Env, tiers: &Vec<AccessTier>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("acc_tier"), tiers);
+}
+
+pub fn get_user_access_tier(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_user_access_tier(env: &Env, user: &Address, tier_index: u32) {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().set(&key, &tier_index);
+}
+
+pub fn remove_user_access_tier(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
 
 

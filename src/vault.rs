@@ -9,7 +9,7 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
+        AccessTier, AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
         BootstrapConfig, BrandingConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
         ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig,
         EpochState, FeeRecipient, FlashStakeReceipt, GovernanceProposal, HalvingConfig,
@@ -11566,5 +11566,143 @@ impl VaultContract {
 
     pub fn get_escrow_release_ledger(env: Env, user: Address) -> Option<u32> {
         balance::get_escrow_release_ledger(&env, &user)
+    }
+
+    // ── Issue #282: Stake-Gated Access ───────────────────────────────────────
+
+    pub fn set_access_tier(
+        env: Env,
+        admin: Address,
+        tier: AccessTier,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut tiers = balance::get_access_tiers(&env);
+        if tiers.len() >= 5 {
+            return Err(VaultFeatureError::TooManyAccessTiers);
+        }
+        tiers.push_back(tier);
+        balance::set_access_tiers(&env, &tiers);
+        Ok(())
+    }
+
+    pub fn get_access_tiers(env: Env) -> Vec<AccessTier> {
+        balance::get_access_tiers(&env)
+    }
+
+    pub fn check_access_eligibility(env: Env, user: Address) -> Option<u32> {
+        let user_shares = balance::get_shares(&env, &user);
+        if user_shares <= 0 {
+            return None;
+        }
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let user_stake = balance::shares_to_amount(total_shares, total_deposited, user_shares).unwrap_or(0);
+
+        let staked_at_ledger = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        let duration = env.ledger().sequence().saturating_sub(staked_at_ledger);
+
+        let tiers = balance::get_access_tiers(&env);
+        let mut best_tier_index: Option<u32> = None;
+        let mut max_req_stake: i128 = -1;
+
+        for i in 0..tiers.len() {
+            let t = tiers.get(i).unwrap();
+            if user_stake >= t.min_stake && duration >= t.min_duration_ledgers {
+                if t.min_stake > max_req_stake {
+                    max_req_stake = t.min_stake;
+                    best_tier_index = Some(i as u32);
+                } else if best_tier_index.is_none() {
+                    best_tier_index = Some(i as u32);
+                }
+            }
+        }
+        best_tier_index
+    }
+
+    pub fn claim_access_token(env: Env, user: Address) -> Result<u32, VaultFeatureError> {
+        user.require_auth();
+
+        let eligible_index = Self::check_access_eligibility(env.clone(), user.clone())
+            .ok_or(VaultFeatureError::IneligibleForAccessTier)?;
+
+        let tiers = balance::get_access_tiers(&env);
+        let eligible_tier = tiers.get(eligible_index).unwrap();
+
+        if let Some(current_index) = balance::get_user_access_tier(&env, &user) {
+            if current_index == eligible_index {
+                return Ok(eligible_index);
+            }
+            // User upgrading or changing tier: revoke old token first
+            if let Some(old_tier) = tiers.get(current_index) {
+                let old_nft_client = StakeReceiptNFTClient::new(&env, &old_tier.access_token_contract);
+                old_nft_client.burn(&user);
+                events::access_token_revoked(
+                    &env,
+                    &user,
+                    current_index,
+                    Symbol::new(&env, "upgrade"),
+                    env.ledger().sequence(),
+                );
+            }
+        }
+
+        // Mint new access token
+        let nft_client = StakeReceiptNFTClient::new(&env, &eligible_tier.access_token_contract);
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let user_stake = balance::shares_to_amount(total_shares, total_deposited, user_shares).unwrap_or(0);
+
+        let staked_at_ledger = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+
+        nft_client.mint(
+            &user,
+            &env.current_contract_address(),
+            &user_stake,
+            &staked_at_ledger,
+        );
+
+        balance::set_user_access_tier(&env, &user, eligible_index);
+        events::access_token_issued(&env, &user, eligible_index, env.ledger().sequence());
+        Ok(eligible_index)
+    }
+
+    pub fn revoke_access_token(env: Env, user: Address) -> Result<(), VaultFeatureError> {
+        let current_index = balance::get_user_access_tier(&env, &user)
+            .ok_or(VaultFeatureError::IneligibleForAccessTier)?;
+
+        let eligible_index = Self::check_access_eligibility(env.clone(), user.clone());
+        if let Some(elig) = eligible_index {
+            if elig >= current_index {
+                return Err(VaultFeatureError::UserStillEligible);
+            }
+        }
+
+        let tiers = balance::get_access_tiers(&env);
+        if let Some(current_tier) = tiers.get(current_index) {
+            let nft_client = StakeReceiptNFTClient::new(&env, &current_tier.access_token_contract);
+            nft_client.burn(&user);
+        }
+
+        balance::remove_user_access_tier(&env, &user);
+        events::access_token_revoked(
+            &env,
+            &user,
+            current_index,
+            Symbol::new(&env, "ineligible"),
+            env.ledger().sequence(),
+        );
+        Ok(())
     }
 }

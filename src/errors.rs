@@ -441,7 +441,16 @@ pub enum VaultFeatureError {
     RevenueShareInvalidProof = 33,
     /// `claim_revenue_share()`: user already claimed for this epoch.
     RevenueShareAlreadyClaimed = 34,
+
+    // ── Issue #282: Stake-Gated Access ───────────────────────────────────────
+    /// `set_access_tier()`: 5 access tiers are already configured.
+    TooManyAccessTiers = 35,
+    /// `claim_access_token()`: user does not qualify for any access tier.
+    IneligibleForAccessTier = 36,
+    /// `revoke_access_token()`: user still qualifies for their current tier.
+    UserStillEligible = 37,
 }
+
 
 
 impl From<VaultError> for VaultExtError {

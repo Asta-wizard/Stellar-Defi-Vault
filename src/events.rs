@@ -1117,4 +1117,23 @@ pub fn escrow_released(env: &Env, user: &Address, escrowed_amount: i128, ledger:
         .publish(topics, (user.clone(), escrowed_amount, ledger));
 }
 
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+pub fn access_token_issued(env: &Env, user: &Address, tier_index: u32, ledger: u32) {
+    let topics = (symbol_short!("acc_iss"), user);
+    env.events().publish(topics, (tier_index, ledger));
+}
+
+pub fn access_token_revoked(
+    env: &Env,
+    user: &Address,
+    tier_index: u32,
+    reason: Symbol,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("acc_rev"), user);
+    env.events().publish(topics, (tier_index, reason, ledger));
+}
+
+
 

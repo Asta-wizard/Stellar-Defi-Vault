@@ -1370,4 +1370,91 @@ fn test_escrow_period_zero_disables_and_restaker_gets_new_escrow() {
     assert_eq!(vault.get_escrow_release_ledger(&alice), Some(350));
 }
 
+// ── Issue #282: Stake-Gated Access Tests ────────────────────────────────────
+
+#[test]
+fn test_stake_gated_access_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 10;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Setup NFT contracts for access token tiers
+    let nft_id_1 = env.register_contract(None, StakeReceiptNFT);
+    let nft_client_1 = StakeReceiptNFTClient::new(&env, &nft_id_1);
+    nft_client_1.initialize(&vault_id);
+
+    let nft_id_2 = env.register_contract(None, StakeReceiptNFT);
+    let nft_client_2 = StakeReceiptNFTClient::new(&env, &nft_id_2);
+    nft_client_2.initialize(&vault_id);
+
+    // Tier 0: min 50_000 stake, min 10 duration ledgers -> nft_id_1
+    let tier_0 = AccessTier {
+        min_stake: 50_000,
+        min_duration_ledgers: 10,
+        access_token_contract: nft_id_1.clone(),
+    };
+    vault.set_access_tier(&admin, &tier_0);
+
+    // Tier 1: min 100_000 stake, min 20 duration ledgers -> nft_id_2
+    let tier_1 = AccessTier {
+        min_stake: 100_000,
+        min_duration_ledgers: 20,
+        access_token_contract: nft_id_2.clone(),
+    };
+    vault.set_access_tier(&admin, &tier_1);
+
+    // 1. Staker with 30_000 (below threshold) -> no eligibility
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &30_000);
+    assert_eq!(vault.check_access_eligibility(&alice), None);
+    assert!(vault.try_claim_access_token(&alice).is_err());
+
+    // 2. Stake up to 60_000, advance ledgers by 10
+    vault.stake(&alice, &30_000); // total 60_000
+    env.ledger().with_mut(|li| li.sequence_number = 25);
+
+    // Qualifies for Tier 0 (index 0)
+    assert_eq!(vault.check_access_eligibility(&alice), Some(0));
+
+    // Claim access token for Tier 0
+    let tier_idx = vault.claim_access_token(&alice);
+    assert_eq!(tier_idx, 0);
+    assert!(nft_client_1.has_receipt(&alice));
+
+    // 3. Stake up to 100_000 and advance ledgers to 35 -> qualifies for Tier 1 (highest tier wins)
+    vault.stake(&alice, &40_000); // total 100_000
+    env.ledger().with_mut(|li| li.sequence_number = 35);
+    assert_eq!(vault.check_access_eligibility(&alice), Some(1));
+
+    // Claim upgrade to Tier 1
+    let upgraded_idx = vault.claim_access_token(&alice);
+    assert_eq!(upgraded_idx, 1);
+    assert!(nft_client_2.has_receipt(&alice));
+    assert!(!nft_client_1.has_receipt(&alice)); // old token burned
+
+    // 4. Revoke fails when user is still eligible
+    let res_rev_early = vault.try_revoke_access_token(&alice);
+    assert!(res_rev_early.is_err());
+
+    // 5. Unstake 60_000 -> stake drops to 40_000 (below Tier 1 min 100_000 and Tier 0 min 50_000)
+    vault.unstake(&alice, &60_000);
+    assert_eq!(vault.check_access_eligibility(&alice), None);
+
+    // Revoke succeeds now that user no longer meets requirements
+    vault.revoke_access_token(&alice);
+    assert!(!nft_client_2.has_receipt(&alice));
+}
+
+
 

@@ -1052,3 +1052,14 @@ pub struct RevenueShareMerkleRoot {
     pub total_amount: i128,
 }
 
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessTier {
+    pub min_stake: i128,
+    pub min_duration_ledgers: u32,
+    pub access_token_contract: Address,
+}
+
+
