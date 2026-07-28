@@ -983,3 +983,15 @@ pub fn rewards_resumed(env: &Env, oracle_price: i128, floor_price: i128, ledger:
     let topics = (symbol_short!("pr_resume"),);
     env.events().publish(topics, (oracle_price, floor_price, ledger));
 }
+
+// ── Exit Queue ──────────────────────────────────────────────────────────────
+
+pub fn exit_queued(env: &Env, user: &Address, shares: i128, position_in_queue: u32, ledger: u32) {
+    let topics = (symbol_short!("exit_q"), user);
+    env.events().publish(topics, (shares, position_in_queue, ledger));
+}
+
+pub fn exit_processed(env: &Env, user: &Address, amount_returned: i128, ledger: u32) {
+    let topics = (symbol_short!("exit_ok"), user);
+    env.events().publish(topics, (amount_returned, ledger));
+}

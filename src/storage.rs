@@ -971,6 +971,9 @@ const DUST_PREFIX: &Symbol = &symbol_short!("dust");
 const PR_FLOOR: &Symbol = &symbol_short!("pr_floor");
 const HALTED: &Symbol = &symbol_short!("halted");
 const HALTED_LOG: &Symbol = &symbol_short!("halt_log");
+const EXIT_CFG: &Symbol = &symbol_short!("exit_cfg");
+const EXIT_QUEUE: &Symbol = &symbol_short!("exit_q");
+const LAST_BATCH: &Symbol = &symbol_short!("last_bat");
 
 pub struct Storage;
 
@@ -1109,5 +1112,53 @@ impl Storage {
 
     pub fn set_halted_log(env: &Env, log: &soroban_sdk::Vec<HaltedInterval>) {
         env.storage().instance().set(HALTED_LOG, log);
+    }
+}
+
+// ── Exit Queue ───────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExitQueueConfig {
+    pub enabled: bool,
+    pub batch_size: u32,
+    pub batch_interval_ledgers: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExitRequest {
+    pub user: Address,
+    pub shares: i128,
+    pub queued_at: u32,
+    pub position_in_queue: u32,
+}
+
+impl Storage {
+    pub fn get_exit_queue_config(env: &Env) -> Option<ExitQueueConfig> {
+        env.storage().instance().get(EXIT_CFG)
+    }
+
+    pub fn set_exit_queue_config(env: &Env, config: &ExitQueueConfig) {
+        env.storage().instance().set(EXIT_CFG, config);
+    }
+
+    pub fn get_exit_queue(env: &Env) -> soroban_sdk::Vec<ExitRequest> {
+        env.storage()
+            .persistent()
+            .get(EXIT_QUEUE)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env))
+    }
+
+    pub fn set_exit_queue(env: &Env, queue: &soroban_sdk::Vec<ExitRequest>) {
+        env.storage().persistent().set(EXIT_QUEUE, queue);
+    }
+
+    pub fn get_last_batch_ledger(env: &Env) -> u32 {
+        env.storage().instance().get(LAST_BATCH).unwrap_or(0)
+    }
+
+    pub fn set_last_batch_ledger(env: &Env, ledger: u32) {
+        env.storage().instance().set(LAST_BATCH, &ledger);
     }
 }

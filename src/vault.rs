@@ -21,6 +21,7 @@ use crate::{
         StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
         StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
         UnstakeCheckResult, UserStats, UserSummary, VestingEntry, PriceFloorConfig, HaltedInterval,
+        ExitQueueConfig, ExitRequest,
     },
 };
 
@@ -313,6 +314,12 @@ impl VaultContract {
 
     /// Unstake by burning `shares`. This is an alias for `withdraw`.
     pub fn unstake(env: Env, staker: Address, shares: i128) -> Result<i128, VaultError> {
+        staker.require_auth();
+        if let Some(cfg) = storage::Storage::get_exit_queue_config(&env) {
+            if cfg.enabled {
+                return Self::queue_exit_request(&env, &staker, shares);
+            }
+        }
         Self::do_unstake(&env, &staker, shares)
     }
 
@@ -10527,6 +10534,149 @@ impl VaultContract {
         }
 
         Ok(())
+    }
+
+    // ── Exit Queue ────────────────────────────────────────────────────────────
+
+    pub fn set_exit_queue_mode(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+        batch_size: u32,
+        batch_interval_ledgers: u32,
+    ) -> Result<(), VaultExtError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env).map_err(|_| VaultExtError::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(VaultExtError::Unauthorized);
+        }
+        let config = ExitQueueConfig {
+            enabled,
+            batch_size,
+            batch_interval_ledgers,
+        };
+        storage::Storage::set_exit_queue_config(&env, &config);
+        Ok(())
+    }
+
+    pub fn get_exit_queue_config(env: Env) -> Option<ExitQueueConfig> {
+        storage::Storage::get_exit_queue_config(&env)
+    }
+
+    pub fn get_exit_queue(env: Env) -> Vec<ExitRequest> {
+        storage::Storage::get_exit_queue(&env)
+    }
+
+    pub fn get_queue_position(env: Env, user: Address) -> Option<u32> {
+        let queue = storage::Storage::get_exit_queue(&env);
+        for i in 0..queue.len() {
+            let req = queue.get(i).unwrap();
+            if req.user == user {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    pub fn cancel_exit_request(env: Env, user: Address) -> Result<(), VaultError> {
+        user.require_auth();
+        let mut queue = storage::Storage::get_exit_queue(&env);
+        let mut found = false;
+        let mut new_queue: Vec<ExitRequest> = Vec::new(&env);
+        let mut new_pos: u32 = 0;
+        for i in 0..queue.len() {
+            let mut req = queue.get(i).unwrap();
+            if req.user == user && !found {
+                found = true;
+                // skip this entry (effectively removing it)
+            } else {
+                req.position_in_queue = new_pos;
+                new_queue.push_back(req);
+                new_pos += 1;
+            }
+        }
+        if !found {
+            return Err(VaultError::PositionNotFound);
+        }
+        storage::Storage::set_exit_queue(&env, &new_queue);
+        Ok(())
+    }
+
+    pub fn process_exit_batch(env: Env, admin: Address) -> Result<u32, VaultError> {
+        admin.require_auth();
+        let cfg = match storage::Storage::get_exit_queue_config(&env) {
+            Some(c) if c.enabled => c,
+            _ => return Err(VaultError::InvalidState),
+        };
+
+        let current_ledger = env.ledger().sequence();
+        let last_batch = storage::Storage::get_last_batch_ledger(&env);
+        if cfg.batch_interval_ledgers > 0
+            && last_batch > 0
+            && current_ledger < last_batch.saturating_add(cfg.batch_interval_ledgers)
+        {
+            return Err(VaultError::TooEarly);
+        }
+
+        let mut queue = storage::Storage::get_exit_queue(&env);
+        let to_process = (cfg.batch_size as usize).min(queue.len() as usize) as u32;
+        let mut processed: u32 = 0;
+
+        for _ in 0..to_process {
+            if queue.is_empty() {
+                break;
+            }
+            let req = queue.get(0).unwrap();
+            // Pop front by rebuilding slice from index 1
+            let mut new_queue: Vec<ExitRequest> = Vec::new(&env);
+            for j in 1..queue.len() {
+                let mut entry = queue.get(j).unwrap();
+                entry.position_in_queue = j - 1;
+                new_queue.push_back(entry);
+            }
+            queue = new_queue;
+
+            // Execute actual unstake — do_unstake handles auth via admin calling on user's behalf,
+            // but we call the internal helper directly (no require_auth needed).
+            let amount = Self::do_unstake(&env, &req.user, req.shares)
+                .unwrap_or(0);
+
+            events::exit_processed(&env, &req.user, amount, current_ledger);
+            processed += 1;
+        }
+
+        storage::Storage::set_exit_queue(&env, &queue);
+        storage::Storage::set_last_batch_ledger(&env, current_ledger);
+
+        Ok(processed)
+    }
+
+    /// Internal helper: validate and push an ExitRequest onto the queue.
+    /// Returns 0 as a placeholder (caller should interpret as "queued, not immediate").
+    fn queue_exit_request(env: &Env, user: &Address, shares: i128) -> Result<i128, VaultError> {
+        if shares <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        let current_shares = balance::get_shares(env, user);
+        if shares > current_shares {
+            return Err(VaultError::InsufficientBalance);
+        }
+
+        let mut queue = storage::Storage::get_exit_queue(env);
+        let position_in_queue = queue.len();
+        let req = ExitRequest {
+            user: user.clone(),
+            shares,
+            queued_at: env.ledger().sequence(),
+            position_in_queue,
+        };
+        queue.push_back(req);
+        storage::Storage::set_exit_queue(env, &queue);
+
+        events::exit_queued(env, user, shares, position_in_queue, env.ledger().sequence());
+
+        // Return 0 — real payout happens when process_exit_batch runs
+        Ok(0)
     }
 }
 
