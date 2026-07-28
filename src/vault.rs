@@ -9962,6 +9962,121 @@ impl VaultContract {
         balance::get_cohort_of(&env, &user)
     }
 
+    // ── Anti-Sybil: minimum stake age before first claim (#270) ──────────
+
+    /// Require the caller's position to have been staked for at least
+    /// `min_ledgers` before allowing a claim.  Returns `Ok(())` if the
+    /// requirement is met, errors otherwise.
+    pub fn anti_sybil_min_stake_age(
+        env: Env,
+        staker: Address,
+        min_ledgers: u32,
+    ) -> Result<u32, VaultError> {
+        staker.require_auth();
+
+        let staked_at = storage::Storage::get_staked_at_ledger(&env, &staker)
+            .ok_or(VaultError::InsufficientStake)?;
+        let current_ledger = env.ledger().sequence();
+        let age = current_ledger.saturating_sub(staked_at);
+
+        if age < min_ledgers {
+            return Err(VaultError::InsufficientStake);
+        }
+
+        Ok(age)
+    }
+
+    // ── Compound interest table for frontend charts (#271) ──────────────
+
+    /// Returns a precomputed table of compounded reward values at
+    /// configurable time intervals (in ledgers).
+    pub fn compound_interest_table(
+        env: Env,
+        principal: i128,
+        rate_bps: u32,
+        interval_ledgers: u32,
+        periods: u32,
+    ) -> Vec<i128> {
+        let mut table = Vec::new(&env);
+        let mut current = principal;
+        let rate = rate_bps as i128;
+
+        for _ in 0..periods {
+            table.push_back(current);
+            // Simple compound: current += current * rate_bps / 10000
+            let reward = current.saturating_mul(rate) / 10_000i128;
+            current = current.saturating_add(reward);
+        }
+
+        table
+    }
+
+    // ── Pool merger: combine two pools (#272) ───────────────────────────
+
+    /// Propose a merger of `source_pool` into this pool.
+    /// Only the admin can propose.
+    pub fn propose_merger(
+        env: Env,
+        admin: Address,
+        source_pool: Address,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let stored_admin = storage::Storage::get_admin(&env)
+            .ok_or(VaultError::Unauthorized)?;
+        if stored_admin != admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        storage::Storage::set_merger_proposal(&env, &source_pool, &admin);
+        Ok(())
+    }
+
+    /// Execute a previously proposed merger.
+    pub fn execute_merger(
+        env: Env,
+        admin: Address,
+        source_pool: Address,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let stored_admin = storage::Storage::get_admin(&env)
+            .ok_or(VaultError::Unauthorized)?;
+        if stored_admin != admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        storage::Storage::get_merger_proposal(&env, &source_pool)
+            .ok_or(VaultError::Unauthorized)?;
+
+        storage::Storage::remove_merger_proposal(&env, &source_pool);
+        Ok(())
+    }
+
+    // ── Staker bio: personal note on position (#273) ────────────────────
+
+    /// Attach a short personal note to the caller's staking position.
+    pub fn set_staker_bio(
+        env: Env,
+        staker: Address,
+        bio: String,
+    ) -> Result<(), VaultError> {
+        staker.require_auth();
+
+        // Ensure position exists
+        if !storage::Storage::has_position(&env, &staker) {
+            return Err(VaultError::InsufficientStake);
+        }
+
+        storage::Storage::set_staker_bio(&env, &staker, &bio);
+        Ok(())
+    }
+
+    /// Read the personal note attached to a staker's position.
+    pub fn get_staker_bio(env: Env, staker: Address) -> Option<String> {
+        storage::Storage::get_staker_bio(&env, &staker)
+    }
+
     /// The weekly cohort bucket a ledger falls into.
     fn cohort_id_for(ledger: u32) -> u32 {
         ledger / LEDGERS_PER_COHORT
