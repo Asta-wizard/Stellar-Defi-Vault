@@ -1,8 +1,8 @@
 use crate::storage::{
     AdminProposal, AutoConvertConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket,
-    DynamicFeeConfig, FeeRecipient, GovernanceProposal, LotteryConfig, Milestone, MultisigConfig,
-    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
-    StakePosition, VestingEntry,
+    DCAConfig, DynamicFeeConfig, FeeRecipient, GovernanceProposal, LotteryConfig, Milestone,
+    MultisigConfig, PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry,
+    ReferralStats, SocialProfile, StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1876,4 +1876,83 @@ pub fn set_priority_bids(env: &Env, records: &Vec<PriorityBidRecord>) {
     env.storage()
         .instance()
         .set(&symbol_short!("pbidrec"), records);
+}
+
+// ── DCA stake scheduler ─────────────────────────────────────────────────────────
+
+pub fn get_dca_config(env: &Env, user: &Address) -> Option<DCAConfig> {
+    let key = (Symbol::new(env, "dca_cfg"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_dca_config(env: &Env, user: &Address, config: &DCAConfig) {
+    let key = (Symbol::new(env, "dca_cfg"), user.clone());
+    env.storage().persistent().set(&key, config);
+}
+
+pub fn remove_dca_config(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "dca_cfg"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Staker social profile ───────────────────────────────────────────────────────
+
+pub fn get_social_profile(env: &Env, user: &Address) -> Option<SocialProfile> {
+    let key = (Symbol::new(env, "soc_prof"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_social_profile(env: &Env, user: &Address, profile: &SocialProfile) {
+    let key = (Symbol::new(env, "soc_prof"), user.clone());
+    env.storage().persistent().set(&key, profile);
+}
+
+pub fn remove_social_profile(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "soc_prof"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Pool rating system ──────────────────────────────────────────────────────────
+
+/// Raw star buckets, index 0 = one star … index 4 = five stars. The derived
+/// `average_bps`/`total_ratings` fields of `RatingDistribution` are computed on
+/// read rather than stored, so they can never drift from the buckets.
+pub fn get_rating_buckets(env: &Env) -> Vec<u32> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rat_bkt"))
+        .unwrap_or_else(|| Vec::from_array(env, [0u32, 0, 0, 0, 0]))
+}
+
+pub fn set_rating_buckets(env: &Env, buckets: &Vec<u32>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("rat_bkt"), buckets);
+}
+
+pub fn get_user_rating(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "usr_rat"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_user_rating(env: &Env, user: &Address, rating: u32) {
+    let key = (Symbol::new(env, "usr_rat"), user.clone());
+    env.storage().persistent().set(&key, &rating);
+}
+
+// ── Reinvest rewards into an external pool ──────────────────────────────────────
+
+pub fn get_reinvestment_target(env: &Env, user: &Address) -> Option<Address> {
+    let key = (Symbol::new(env, "rinv_tgt"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_reinvestment_target(env: &Env, user: &Address, target: &Address) {
+    let key = (Symbol::new(env, "rinv_tgt"), user.clone());
+    env.storage().persistent().set(&key, target);
+}
+
+pub fn remove_reinvestment_target(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "rinv_tgt"), user.clone());
+    env.storage().persistent().remove(&key);
 }

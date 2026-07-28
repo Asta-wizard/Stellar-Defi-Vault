@@ -321,6 +321,73 @@ pub enum VaultExtError {
     InvalidVetoThreshold = 50,
 }
 
+/// Third error enum, added for the same reason `VaultExtError` exists: both
+/// `VaultError` and `VaultExtError` are already at Soroban's hard 50-variant
+/// cap for `#[contracterror]` enums, so the DCA scheduler, social profile,
+/// pool rating, and external-pool reinvestment features need their own enum.
+/// The first few cases mirror the `VaultError` cases these functions can also
+/// hit, so `?` keeps working at call sites via the `From` impl below.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VaultFeatureError {
+    /// Mirrors `VaultError::Unauthorized`.
+    Unauthorized = 1,
+    /// Mirrors `VaultError::NotInitialized`.
+    NotInitialized = 2,
+    /// Mirrors `VaultError::ZeroAmount`.
+    ZeroAmount = 3,
+    /// Mirrors `VaultError::ArithmeticError`.
+    ArithmeticError = 4,
+    /// Mirrors `VaultError::PositionNotFound` — returned by
+    /// `set_social_profile()` and `submit_rating()`, which both require an
+    /// active staking position.
+    PositionNotFound = 5,
+    /// Returned by `set_social_profile()` when `username` exceeds 20 bytes,
+    /// `avatar_hash` exceeds 64 bytes, or `bio` exceeds 160 bytes. Soroban
+    /// contract errors carry no payload, so the offending field name is
+    /// reported in the accompanying `profile_field_rejected` event rather
+    /// than in the error value itself.
+    InvalidProfileField = 6,
+    /// Returned by `submit_rating()` when `rating` is outside 1–5.
+    InvalidRating = 7,
+    /// Returned by `execute_dca()` / `cancel_dca()` when the user has no DCA
+    /// config stored.
+    DcaConfigNotFound = 8,
+    /// Returned by `execute_dca()` before `last_executed_at + interval_ledgers`.
+    DcaIntervalNotElapsed = 9,
+    /// Returned by `execute_dca()` once `executions_done` has reached a
+    /// non-zero `max_executions`.
+    DcaExecutionsExhausted = 10,
+    /// Returned by `set_dca_config()` when `interval_ledgers` is 0 or
+    /// `variance_bps` exceeds 10 000 (100%).
+    InvalidDcaConfig = 11,
+}
+
+impl From<VaultError> for VaultFeatureError {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::Unauthorized => VaultFeatureError::Unauthorized,
+            VaultError::NotInitialized => VaultFeatureError::NotInitialized,
+            VaultError::ZeroAmount => VaultFeatureError::ZeroAmount,
+            VaultError::PositionNotFound => VaultFeatureError::PositionNotFound,
+            VaultError::ArithmeticError => VaultFeatureError::ArithmeticError,
+            _ => VaultFeatureError::Unauthorized,
+        }
+    }
+}
+
+impl From<VaultExtError> for VaultFeatureError {
+    fn from(err: VaultExtError) -> Self {
+        match err {
+            VaultExtError::Unauthorized => VaultFeatureError::Unauthorized,
+            VaultExtError::NotInitialized => VaultFeatureError::NotInitialized,
+            VaultExtError::ZeroAmount => VaultFeatureError::ZeroAmount,
+            _ => VaultFeatureError::ArithmeticError,
+        }
+    }
+}
+
 impl From<VaultError> for VaultExtError {
     fn from(err: VaultError) -> Self {
         match err {

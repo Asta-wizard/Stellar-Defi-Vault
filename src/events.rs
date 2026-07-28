@@ -938,36 +938,88 @@ pub fn priority_bid_placed(
         .publish(topics, (bid_amount, previous_position, ledger));
 }
 
-// ── Message Board (Staker Messages) ─────────────────────────────────────────
+// ── DCA stake scheduler ─────────────────────────────────────────────────────────
 
-pub fn message_posted(
-    env: &Env,
-    author: &Address,
-    content_hash: soroban_sdk::BytesN<32>,
-    ledger: u32,
-) {
-    let topics = (symbol_short!("msg_post"), author);
-    env.events().publish(topics, (content_hash, ledger));
-}
-
-// ── Tier Rebalancing ─────────────────────────────────────────────────────────
-
-pub fn tier_changed(
+pub fn dca_executed(
     env: &Env,
     user: &Address,
-    old_tier: crate::storage::StakeTier,
-    new_tier: crate::storage::StakeTier,
-    pool_share_bps: u32,
+    keeper: &Address,
+    amount_staked: i128,
+    execution_number: u32,
     ledger: u32,
 ) {
-    let topics = (symbol_short!("tier_chg"), user);
-    env.events()
-        .publish(topics, (old_tier, new_tier, pool_share_bps, ledger));
+    let topics = (symbol_short!("dca_exec"), user);
+    env.events().publish(
+        topics,
+        (keeper.clone(), amount_staked, execution_number, ledger),
+    );
 }
 
-// ── Configurable Precision ──────────────────────────────────────────────────
+// ── Staker social profile ───────────────────────────────────────────────────────
 
-pub fn precision_changed(env: &Env, admin: &Address, old_precision: u32, new_precision: u32, ledger: u32) {
-    let topics = (symbol_short!("prec_chg"), admin);
-    env.events().publish(topics, (old_precision, new_precision, ledger));
+pub fn profile_updated(
+    env: &Env,
+    user: &Address,
+    username: &soroban_sdk::String,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("prof_upd"), user);
+    env.events().publish(topics, (username.clone(), ledger));
+}
+
+/// Carries the name of the field that broke its length limit, since
+/// `VaultFeatureError::InvalidProfileField` itself can't hold a payload.
+pub fn profile_field_rejected(
+    env: &Env,
+    user: &Address,
+    field: &soroban_sdk::String,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("prof_rej"), user);
+    env.events().publish(topics, (field.clone(), ledger));
+}
+
+pub fn profile_deleted(env: &Env, user: &Address, ledger: u32) {
+    let topics = (symbol_short!("prof_del"), user);
+    env.events().publish(topics, (ledger,));
+}
+
+// ── Pool rating system ──────────────────────────────────────────────────────────
+
+pub fn rating_submitted(
+    env: &Env,
+    user: &Address,
+    rating: u32,
+    new_average_bps: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rat_sub"), user);
+    env.events()
+        .publish(topics, (rating, new_average_bps, ledger));
+}
+
+// ── Reinvest rewards into an external pool ──────────────────────────────────────
+
+pub fn reward_reinvested(
+    env: &Env,
+    user: &Address,
+    target_pool: &Address,
+    amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rwd_rinv"), user);
+    env.events()
+        .publish(topics, (target_pool.clone(), amount, ledger));
+}
+
+pub fn reinvestment_failed(
+    env: &Env,
+    user: &Address,
+    target_pool: &Address,
+    amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rinv_fail"), user);
+    env.events()
+        .publish(topics, (target_pool.clone(), amount, ledger));
 }

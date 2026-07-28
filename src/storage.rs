@@ -928,140 +928,65 @@ pub struct PriorityBidRecord {
     pub ledger: u32,
 }
 
-// ── Tier Rebalancing ─────────────────────────────────────────────────────────
+// ── DCA stake scheduler ─────────────────────────────────────────────────────────
 
-#[contracttype]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum StakeTier {
-    Bronze = 1,
-    Silver = 2,
-    Gold = 3,
-    Platinum = 4,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct TierBenefits {
-    pub boost_multiplier_bps: u32,
-    pub fee_discount_bps: u32,
-}
-
-// ── Message Board (Staker Messages) ─────────────────────────────────────────
-
+/// A user's dollar-cost-averaging schedule, set via `set_dca_config()` and
+/// executed by any keeper through `execute_dca()`.
+///
+/// - `amount`: nominal stake size per execution, before variance.
+/// - `interval_ledgers`: minimum ledgers between two executions.
+/// - `variance_bps`: ±randomness applied to `amount` on each execution so the
+///   staked size isn't predictable to MEV searchers. 0 disables randomization.
+/// - `max_executions`: total executions allowed; 0 means unlimited.
+/// - `executions_done`: how many executions have run so far.
+/// - `last_executed_at`: ledger of the last execution, seeded with the ledger
+///   the config was created at so the first stake waits a full interval.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct Message {
-    pub author: Address,
-    pub content: String,
-    pub posted_at: u32,
-    pub stake_amount_at_post: i128,
+pub struct DCAConfig {
+    pub amount: i128,
+    pub interval_ledgers: u32,
+    pub variance_bps: u32,
+    pub max_executions: u32,
+    pub executions_done: u32,
+    pub last_executed_at: u32,
 }
 
-// ── Symbol-keyed storage helpers (DataKey at 50-variant cap) ──────────────
+// ── Staker social profile ───────────────────────────────────────────────────────
 
-use soroban_sdk::{symbol_short, Env, Symbol};
+/// Public, self-declared social identity for a staker, set via
+/// `set_social_profile()`.
+///
+/// Usernames are **not** unique: enforcing uniqueness on-chain would require a
+/// reverse username → address index plus a lookup on every write, which costs
+/// more than the feature is worth. Two stakers may hold the same username, so
+/// consumers must treat the address as the only identity and the username as a
+/// display hint only.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SocialProfile {
+    pub username: String,
+    pub avatar_hash: String,
+    pub bio: String,
+    pub updated_at: u32,
+}
 
-const MERGER_PREFIX: &Symbol = &symbol_short!("merger");
-const BIO_PREFIX: &Symbol = &symbol_short!("bio");
-const MSG_BOARD: &Symbol = &symbol_short!("messages");
-const MIN_POST: &Symbol = &symbol_short!("min_post");
-const TIER_PREFIX: &Symbol = &symbol_short!("tier");
-const REWARD_PRECISION: &Symbol = &symbol_short!("rw_prec");
-const DUST_PREFIX: &Symbol = &symbol_short!("dust");
+// ── Pool rating system ──────────────────────────────────────────────────────────
 
-pub struct Storage;
-
-impl Storage {
-    // Merger proposal storage (#272)
-    pub fn set_merger_proposal(env: &Env, source_pool: &Address, admin: &Address) {
-        let key = (MERGER_PREFIX, source_pool.clone());
-        env.storage().persistent().set(&key, admin);
-    }
-
-    pub fn get_merger_proposal(env: &Env, source_pool: &Address) -> Option<Address> {
-        let key = (MERGER_PREFIX, source_pool.clone());
-        env.storage().persistent().get(&key)
-    }
-
-    pub fn remove_merger_proposal(env: &Env, source_pool: &Address) {
-        let key = (MERGER_PREFIX, source_pool.clone());
-        env.storage().persistent().remove(&key);
-    }
-
-    // Staker bio storage (#273)
-    pub fn set_staker_bio(env: &Env, staker: &Address, bio: &String) {
-        let key = (BIO_PREFIX, staker.clone());
-        env.storage().persistent().set(&key, bio);
-    }
-
-    pub fn get_staker_bio(env: &Env, staker: &Address) -> Option<String> {
-        let key = (BIO_PREFIX, staker.clone());
-        env.storage().persistent().get(&key)
-    }
-
-    // Admin check helper (#272)
-    pub fn get_admin(env: &Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Admin)
-    }
-
-    // Position existence check
-    pub fn has_position(env: &Env, user: &Address) -> bool {
-        env.storage().persistent().has(&DataKey::StakedAtLedger(user.clone()))
-    }
-
-    // Staked-at ledger for age check (#270)
-    pub fn get_staked_at_ledger(env: &Env, user: &Address) -> Option<u32> {
-        env.storage().persistent().get(&DataKey::StakedAtLedger(user.clone()))
-    }
-
-    // Message board storage
-    pub fn get_messages(env: &Env) -> Vec<Message> {
-        env.storage().instance().get(MSG_BOARD).unwrap_or(Vec::new(env))
-    }
-
-    pub fn set_messages(env: &Env, messages: &Vec<Message>) {
-        env.storage().instance().set(MSG_BOARD, messages);
-    }
-
-    pub fn get_min_stake_to_post(env: &Env) -> Option<i128> {
-        env.storage().instance().get(MIN_POST)
-    }
-
-    pub fn set_min_stake_to_post(env: &Env, amount: i128) {
-        env.storage().instance().set(MIN_POST, &amount);
-    }
-
-    // Tier Rebalancing
-    pub fn get_user_tier(env: &Env, user: &Address) -> Option<StakeTier> {
-        let key = (TIER_PREFIX, user.clone());
-        env.storage().persistent().get(&key)
-    }
-
-    pub fn set_user_tier(env: &Env, user: &Address, tier: &StakeTier) {
-        let key = (TIER_PREFIX, user.clone());
-        env.storage().persistent().set(&key, tier);
-    }
-
-    // Reward Precision & Dust
-    pub fn get_reward_precision(env: &Env) -> u32 {
-        env.storage().instance().get(REWARD_PRECISION).unwrap_or(1)
-    }
-
-    pub fn set_reward_precision(env: &Env, precision: u32) {
-        env.storage().instance().set(REWARD_PRECISION, &precision);
-    }
-
-    pub fn get_accumulated_dust(env: &Env, user: &Address) -> i128 {
-        let key = (DUST_PREFIX, user.clone());
-        env.storage().persistent().get(&key).unwrap_or(0)
-    }
-
-    pub fn set_accumulated_dust(env: &Env, user: &Address, amount: i128) {
-        let key = (DUST_PREFIX, user.clone());
-        if amount == 0 {
-            env.storage().persistent().remove(&key);
-        } else {
-            env.storage().persistent().set(&key, &amount);
-        }
-    }
+/// Aggregate 1–5 star rating spread for the pool, returned by
+/// `get_rating_distribution()`.
+///
+/// `average_bps` is the mean rating scored out of 10 000:
+/// `(sum_of_all_ratings * 10000) / (total_ratings * 5)`. It is 0 when no
+/// ratings have been submitted.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingDistribution {
+    pub one_star: u32,
+    pub two_star: u32,
+    pub three_star: u32,
+    pub four_star: u32,
+    pub five_star: u32,
+    pub total_ratings: u32,
+    pub average_bps: u32,
 }
