@@ -5072,7 +5072,9 @@ impl VaultContract {
             return Ok(0);
         }
         let multiplier = BOOST_BPS_BASE;
-        Self::reward_for_ledgers(amount, rate_bps, multiplier, BOOST_BPS_BASE, ledgers)
+        let precision = storage::Storage::get_reward_precision(&env);
+        let reward = Self::reward_for_ledgers(amount, rate_bps, multiplier, BOOST_BPS_BASE, ledgers, precision)?;
+        Ok(reward / (precision as i128))
     }
 
     /// Simulate compounded rewards by claiming every `claim_interval` ledgers
@@ -5092,6 +5094,7 @@ impl VaultContract {
         }
 
         let multiplier = BOOST_BPS_BASE;
+        let precision = storage::Storage::get_reward_precision(&env);
         let mut total_reward: i128 = 0;
         let mut remaining = ledgers;
         let mut current_amount = amount;
@@ -5102,13 +5105,15 @@ impl VaultContract {
             } else {
                 claim_interval
             };
-            let reward = Self::reward_for_ledgers(
+            let raw_reward = Self::reward_for_ledgers(
                 current_amount,
                 rate_bps,
                 multiplier,
                 BOOST_BPS_BASE,
                 interval,
+                precision,
             )?;
+            let reward = raw_reward / (precision as i128);
             total_reward = total_reward
                 .checked_add(reward)
                 .ok_or(VaultError::ArithmeticError)?;
@@ -5698,6 +5703,7 @@ impl VaultContract {
         let checkpoint =
             balance::get_reward_checkpoint_ledger(env, user).unwrap_or(env.ledger().sequence());
 
+        let precision_factor = storage::Storage::get_reward_precision(env);
         let pending_since_checkpoint = Self::reward_between_ledgers(
             env,
             user,
@@ -5705,10 +5711,18 @@ impl VaultContract {
             checkpoint,
             env.ledger().sequence(),
             false,
+            precision_factor,
         )?;
 
-        accrued
+        let current_dust = storage::Storage::get_accumulated_dust(env, user);
+        let total_dust = current_dust
             .checked_add(pending_since_checkpoint)
+            .ok_or(VaultError::ArithmeticError)?;
+        
+        let whole_units = total_dust / (precision_factor as i128);
+
+        accrued
+            .checked_add(whole_units)
             .ok_or(VaultError::ArithmeticError)
     }
 
@@ -5724,6 +5738,7 @@ impl VaultContract {
             return Ok(());
         }
         let checkpoint = balance::get_reward_checkpoint_ledger(env, user).unwrap_or(current_ledger);
+        let precision_factor = storage::Storage::get_reward_precision(env);
         let additional_reward = Self::reward_between_ledgers(
             env,
             user,
@@ -5731,14 +5746,27 @@ impl VaultContract {
             checkpoint,
             current_ledger,
             true,
+            precision_factor,
         )?;
 
         if additional_reward > 0 {
-            let accrued = balance::get_accrued_reward(env, user);
-            let updated_accrued = accrued
+            let current_dust = storage::Storage::get_accumulated_dust(env, user);
+            let total_dust = current_dust
                 .checked_add(additional_reward)
                 .ok_or(VaultError::ArithmeticError)?;
-            balance::set_accrued_reward(env, user, updated_accrued);
+                
+            let whole_units = total_dust / (precision_factor as i128);
+            let new_dust = total_dust % (precision_factor as i128);
+
+            storage::Storage::set_accumulated_dust(env, user, new_dust);
+
+            if whole_units > 0 {
+                let accrued = balance::get_accrued_reward(env, user);
+                let updated_accrued = accrued
+                    .checked_add(whole_units)
+                    .ok_or(VaultError::ArithmeticError)?;
+                balance::set_accrued_reward(env, user, updated_accrued);
+            }
         }
 
         balance::set_reward_checkpoint_ledger(env, user, current_ledger);
@@ -5804,6 +5832,7 @@ impl VaultContract {
         start_ledger: u32,
         end_ledger: u32,
         persist: bool,
+        precision_factor: u32,
     ) -> Result<i128, VaultError> {
         if current_shares == 0 || end_ledger <= start_ledger {
             return Ok(0);
@@ -5912,6 +5941,7 @@ impl VaultContract {
                         current_multiplier,
                         campaign_mult,
                         seg_end - cursor,
+                        precision_factor,
                     )?)
                     .ok_or(VaultError::ArithmeticError)?;
             }
@@ -5955,7 +5985,11 @@ impl VaultContract {
             .checked_add(current_remainder)
             .ok_or(VaultError::ArithmeticError)?;
 
-        let reward = total_dust_with_remainder
+        let total_dust_scaled = total_dust_with_remainder
+            .checked_mul(precision_factor as i128)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        let reward = total_dust_scaled
             .checked_div(divisor)
             .ok_or(VaultError::ArithmeticError)?;
 
@@ -6007,6 +6041,7 @@ impl VaultContract {
         multiplier_bps: u32,
         campaign_multiplier_bps: u32,
         elapsed_ledgers: u32,
+        precision_factor: u32,
     ) -> Result<i128, VaultError> {
         if elapsed_ledgers == 0 || amount == 0 {
             return Ok(0);
@@ -6030,6 +6065,8 @@ impl VaultContract {
             .checked_mul(boosted_rate_bps)
             .ok_or(VaultError::ArithmeticError)?
             .checked_mul(elapsed_ledgers as i128)
+            .ok_or(VaultError::ArithmeticError)?
+            .checked_mul(precision_factor as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?
@@ -10353,6 +10390,38 @@ impl VaultContract {
             efficiency_bps,
             measurement_period_ledgers: ledgers_elapsed,
         }
+    }
+
+    // ── Configurable Precision ────────────────────────────────────────────────
+    
+    pub fn set_reward_precision(env: Env, admin: Address, precision_factor: u32) -> Result<(), VaultExtError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env).map_err(|_| VaultExtError::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(VaultExtError::Unauthorized);
+        }
+
+        let mut n = precision_factor;
+        while n > 1 && n % 10 == 0 {
+            n /= 10;
+        }
+        if n != 1 {
+            return Err(VaultExtError::InvalidPrecision);
+        }
+
+        let old_precision = storage::Storage::get_reward_precision(&env);
+        storage::Storage::set_reward_precision(&env, precision_factor);
+        events::precision_changed(&env, &admin, old_precision, precision_factor, env.ledger().sequence());
+
+        Ok(())
+    }
+
+    pub fn get_reward_precision(env: Env) -> u32 {
+        storage::Storage::get_reward_precision(&env)
+    }
+
+    pub fn get_accumulated_dust(env: Env, user: Address) -> i128 {
+        storage::Storage::get_accumulated_dust(&env, &user)
     }
 }
 

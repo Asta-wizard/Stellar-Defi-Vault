@@ -964,3 +964,10 @@ pub fn tier_changed(
     env.events()
         .publish(topics, (old_tier, new_tier, pool_share_bps, ledger));
 }
+
+// ── Configurable Precision ──────────────────────────────────────────────────
+
+pub fn precision_changed(env: &Env, admin: &Address, old_precision: u32, new_precision: u32, ledger: u32) {
+    let topics = (symbol_short!("prec_chg"), admin);
+    env.events().publish(topics, (old_precision, new_precision, ledger));
+}

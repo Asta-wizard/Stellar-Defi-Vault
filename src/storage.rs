@@ -966,6 +966,8 @@ const BIO_PREFIX: &Symbol = &symbol_short!("bio");
 const MSG_BOARD: &Symbol = &symbol_short!("messages");
 const MIN_POST: &Symbol = &symbol_short!("min_post");
 const TIER_PREFIX: &Symbol = &symbol_short!("tier");
+const REWARD_PRECISION: &Symbol = &symbol_short!("rw_prec");
+const DUST_PREFIX: &Symbol = &symbol_short!("dust");
 
 pub struct Storage;
 
@@ -1038,5 +1040,28 @@ impl Storage {
     pub fn set_user_tier(env: &Env, user: &Address, tier: &StakeTier) {
         let key = (TIER_PREFIX, user.clone());
         env.storage().persistent().set(&key, tier);
+    }
+
+    // Reward Precision & Dust
+    pub fn get_reward_precision(env: &Env) -> u32 {
+        env.storage().instance().get(REWARD_PRECISION).unwrap_or(1)
+    }
+
+    pub fn set_reward_precision(env: &Env, precision: u32) {
+        env.storage().instance().set(REWARD_PRECISION, &precision);
+    }
+
+    pub fn get_accumulated_dust(env: &Env, user: &Address) -> i128 {
+        let key = (DUST_PREFIX, user.clone());
+        env.storage().persistent().get(&key).unwrap_or(0)
+    }
+
+    pub fn set_accumulated_dust(env: &Env, user: &Address, amount: i128) {
+        let key = (DUST_PREFIX, user.clone());
+        if amount == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &amount);
+        }
     }
 }
