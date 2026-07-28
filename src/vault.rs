@@ -18,10 +18,11 @@ use crate::{
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
         PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
         RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
-        RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction,
-        StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
-        StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        RewardMultiplierBreakdown, RoundingPolicy, Season, SmoothingSchedule, SmoothingStatus,
+        StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
+        StakingEfficiencyScore, StorageUsageReport, SunsetState, TaxReport, Tournament,
+        TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
+        VestingEntry,
     },
 };
 
@@ -108,6 +109,13 @@ pub(crate) const MAX_SHORTFALL_USERS: u32 = 50;
 /// LTV, in basis points, at or above which `liquidate_loan()` is permitted
 /// (issue #261).
 pub(crate) const LIQUIDATION_LTV_BPS: u32 = 9_000;
+/// Most active stakers `get_reward_gini_coefficient()` will process in one
+/// call before reverting with `TooManyStakers` (issue #275).
+pub(crate) const MAX_GINI_STAKERS: u32 = 100;
+/// Most seasons `add_season()` will keep scheduled at once (issue #276).
+pub(crate) const MAX_SEASONS: u32 = 10;
+/// Longest allowed `set_staker_bio()` bio, in bytes (issue #274).
+pub(crate) const MAX_BIO_LEN: u32 = 160;
 
 #[contract]
 pub struct VaultContract;
@@ -725,6 +733,151 @@ impl VaultContract {
         let _ = admin::get_admin(&env)?;
         let raw = Self::pending_reward(&env, &user)?;
         Self::normalize_to_reward_decimals(&env, raw)
+    }
+
+    /// Gini coefficient of pending-reward distribution across all active
+    /// stakers, in basis points (0 = perfectly equal, 10 000 = maximally
+    /// unequal). Requires admin auth since sorting up to `MAX_GINI_STAKERS`
+    /// stakers is comparatively expensive (issue #275).
+    ///
+    /// Uses the standard discrete-population Gini formula on the ascending-
+    /// sorted `pending_reward` values `x_1..x_n`:
+    ///
+    /// `Gini = (2 * sum(i * x_i)) / (n * sum(x_i)) - (n + 1) / n`
+    ///
+    /// scaled by 10 000 and computed entirely in integer arithmetic (this is
+    /// a bps *approximation* of the exact, real-valued Gini coefficient —
+    /// truncating integer division introduces at most a few bps of error).
+    /// Returns 0 if fewer than 2 active stakers, since a single staker (or
+    /// none) is trivially "equal". Reverts with `TooManyStakers` above
+    /// `MAX_GINI_STAKERS` active stakers.
+    pub fn get_reward_gini_coefficient(env: Env) -> Result<u32, VaultFeatureError> {
+        admin::require_admin(&env)?;
+
+        let all_stakers = balance::get_all_stakers(&env);
+
+        // Insertion sort of pending rewards, ascending, bounded by
+        // MAX_GINI_STAKERS (issue #275's own notes call out insertion sort
+        // over the bounded staker registry).
+        let mut sorted_rewards: Vec<i128> = Vec::new(&env);
+        let mut count: u32 = 0;
+
+        for i in 0..all_stakers.len() {
+            let staker = all_stakers.get(i).unwrap();
+            if balance::get_shares(&env, &staker) == 0 {
+                continue;
+            }
+
+            count += 1;
+            if count > MAX_GINI_STAKERS {
+                return Err(VaultFeatureError::TooManyStakers);
+            }
+
+            let reward = Self::pending_reward(&env, &staker)?;
+
+            let mut ins = sorted_rewards.len();
+            let mut j = 0u32;
+            while j < sorted_rewards.len() {
+                if reward < sorted_rewards.get(j).unwrap() {
+                    ins = j;
+                    break;
+                }
+                j += 1;
+            }
+            let mut rebuilt: Vec<i128> = Vec::new(&env);
+            let mut k = 0u32;
+            while k < ins {
+                rebuilt.push_back(sorted_rewards.get(k).unwrap());
+                k += 1;
+            }
+            rebuilt.push_back(reward);
+            k = ins;
+            while k < sorted_rewards.len() {
+                rebuilt.push_back(sorted_rewards.get(k).unwrap());
+                k += 1;
+            }
+            sorted_rewards = rebuilt;
+        }
+
+        if count < 2 {
+            return Ok(0);
+        }
+
+        let n = count as i128;
+        let mut total: i128 = 0;
+        let mut rank_weighted: i128 = 0;
+        for i in 0..sorted_rewards.len() {
+            let x_i = sorted_rewards.get(i).unwrap();
+            total = total.checked_add(x_i).ok_or(VaultError::ArithmeticError)?;
+            let rank = (i as i128) + 1;
+            let weighted = rank
+                .checked_mul(x_i)
+                .ok_or(VaultError::ArithmeticError)?;
+            rank_weighted = rank_weighted
+                .checked_add(weighted)
+                .ok_or(VaultError::ArithmeticError)?;
+        }
+
+        let gini_bps: u32 = if total == 0 {
+            // All active stakers have zero pending reward: trivially equal.
+            0
+        } else {
+            let numerator = (20_000i128)
+                .checked_mul(rank_weighted)
+                .ok_or(VaultError::ArithmeticError)?
+                .checked_sub(
+                    (10_000i128)
+                        .checked_mul(n + 1)
+                        .ok_or(VaultError::ArithmeticError)?
+                        .checked_mul(total)
+                        .ok_or(VaultError::ArithmeticError)?,
+                )
+                .ok_or(VaultError::ArithmeticError)?;
+            let denominator = n.checked_mul(total).ok_or(VaultError::ArithmeticError)?;
+            (numerator / denominator).clamp(0, 10_000) as u32
+        };
+
+        events::gini_computed(&env, gini_bps, count, env.ledger().sequence());
+        Ok(gini_bps)
+    }
+
+    // ── Issue #274: staker bio ───────────────────────────────────────────────
+
+    /// Attach a short free-text bio to the caller's staking position (issue
+    /// #274). Requires an active position (nonzero shares) — use
+    /// `stake()`/`stake_and_claim()` first. Max `MAX_BIO_LEN` (160) bytes;
+    /// overwrites any previous bio wholesale.
+    pub fn set_staker_bio(env: Env, user: Address, bio: String) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+
+        if balance::get_shares(&env, &user) == 0 {
+            return Err(VaultFeatureError::PositionNotFound);
+        }
+        if bio.len() > MAX_BIO_LEN {
+            return Err(VaultFeatureError::BioTooLong);
+        }
+
+        balance::set_staker_bio(&env, &user, &bio);
+        events::bio_updated(&env, &user, env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Read-only query for a staker's bio (issue #274). Returns `None` if the
+    /// user never set one, or cleared it via `clear_staker_bio()`. Unlike
+    /// `set_staker_bio()`, no active position is required to read one — a
+    /// bio persists after the staker fully unstakes.
+    pub fn get_staker_bio(env: Env, user: Address) -> Option<String> {
+        balance::get_staker_bio(&env, &user)
+    }
+
+    /// Removes the caller's bio, if any (issue #274). Unlike
+    /// `set_staker_bio()`, this does not require an active position — a
+    /// former staker can still clear a bio they set before unstaking.
+    pub fn clear_staker_bio(env: Env, user: Address) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        balance::remove_staker_bio(&env, &user);
+        events::bio_updated(&env, &user, env.ledger().sequence());
+        Ok(())
     }
 
     /// Read-only query for the configured stake token decimal precision.
@@ -4774,6 +4927,84 @@ impl VaultContract {
         Ok(result)
     }
 
+    // ── Issue #276: seasonal reward multiplier ──────────────────────────────
+
+    /// Admin schedules a new season: a `[starts_at, ends_at)` ledger window
+    /// during which the reward rate is multiplied by `multiplier_bps`
+    /// (issue #276). Max `MAX_SEASONS` (10) scheduled at once. Reverts with
+    /// `SeasonOverlap` if the range overlaps any existing season — only one
+    /// season may be active at a time.
+    pub fn add_season(
+        env: Env,
+        admin: Address,
+        name: String,
+        starts_at: u32,
+        ends_at: u32,
+        multiplier_bps: u32,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if starts_at >= ends_at || multiplier_bps == 0 {
+            return Err(VaultFeatureError::InvalidSeasonConfig);
+        }
+
+        let mut seasons = balance::get_seasons(&env);
+        if seasons.len() >= MAX_SEASONS {
+            return Err(VaultFeatureError::TooManySeasons);
+        }
+
+        for i in 0..seasons.len() {
+            let existing = seasons.get(i).unwrap();
+            if starts_at < existing.ends_at && ends_at > existing.starts_at {
+                return Err(VaultFeatureError::SeasonOverlap);
+            }
+        }
+
+        seasons.push_back(Season {
+            name,
+            starts_at,
+            ends_at,
+            multiplier_bps,
+        });
+        balance::set_seasons(&env, &seasons);
+        Ok(())
+    }
+
+    /// Admin removes a scheduled season by its index into `get_seasons()`.
+    pub fn remove_season(env: Env, admin: Address, index: u32) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let seasons = balance::get_seasons(&env);
+        if index >= seasons.len() {
+            return Err(VaultFeatureError::SeasonNotFound);
+        }
+
+        let mut updated: Vec<Season> = Vec::new(&env);
+        for i in 0..seasons.len() {
+            if i != index {
+                updated.push_back(seasons.get(i).unwrap());
+            }
+        }
+        balance::set_seasons(&env, &updated);
+        Ok(())
+    }
+
+    /// Read-only query for every currently scheduled season, past, active,
+    /// or future. No auth required.
+    pub fn get_seasons(env: Env) -> Vec<Season> {
+        balance::get_seasons(&env)
+    }
+
+    /// Read-only query for the season active at the current ledger, if any.
+    /// No auth required.
+    pub fn get_active_season(env: Env) -> Option<Season> {
+        let seasons = balance::get_seasons(&env);
+        let ledger = env.ledger().sequence();
+        Self::find_active_season(&seasons, ledger).map(|(_, s)| s)
+    }
+
     // --- Position transfer (#43) ---
 
     /// Transfer the caller's full staking position to `to`.
@@ -5084,7 +5315,14 @@ impl VaultContract {
             return Ok(0);
         }
         let multiplier = BOOST_BPS_BASE;
-        Self::reward_for_ledgers(amount, rate_bps, multiplier, BOOST_BPS_BASE, ledgers)
+        Self::reward_for_ledgers(
+            amount,
+            rate_bps,
+            multiplier,
+            BOOST_BPS_BASE,
+            BOOST_BPS_BASE,
+            ledgers,
+        )
     }
 
     /// Simulate compounded rewards by claiming every `claim_interval` ledgers
@@ -5119,6 +5357,7 @@ impl VaultContract {
                 rate_bps,
                 multiplier,
                 BOOST_BPS_BASE,
+                BOOST_BPS_BASE,
                 interval,
             )?;
             total_reward = total_reward
@@ -5147,8 +5386,14 @@ impl VaultContract {
             return Ok((0, 0));
         }
 
-        let base_reward =
-            Self::reward_for_ledgers(amount, rate_bps, BOOST_BPS_BASE, BOOST_BPS_BASE, ledgers)?;
+        let base_reward = Self::reward_for_ledgers(
+            amount,
+            rate_bps,
+            BOOST_BPS_BASE,
+            BOOST_BPS_BASE,
+            BOOST_BPS_BASE,
+            ledgers,
+        )?;
 
         let schedule = balance::get_boost_schedule(&env).unwrap_or(Vec::new(&env));
         let mut boosted_reward: i128 = 0;
@@ -5172,6 +5417,7 @@ impl VaultContract {
                 rate_bps,
                 current_multiplier,
                 BOOST_BPS_BASE,
+                BOOST_BPS_BASE,
                 segment,
             )?;
             boosted_reward = boosted_reward
@@ -5187,6 +5433,7 @@ impl VaultContract {
                 amount,
                 rate_bps,
                 current_multiplier,
+                BOOST_BPS_BASE,
                 BOOST_BPS_BASE,
                 ledgers - cursor,
             )?;
@@ -5226,6 +5473,7 @@ impl VaultContract {
         staker.require_auth();
         Self::require_not_stopped(env)?;
         Self::require_not_shutting_down(env)?;
+        Self::require_not_sunsetting(env)?;
         Self::require_not_paused(env)?;
         Self::check_stake_rate_limit(env, staker);
         // Issue #237: while auction mode is on, only auction winners may stake.
@@ -5745,6 +5993,11 @@ impl VaultContract {
         // time-weighted result above.
         Self::maybe_settle_bootstrap(env);
 
+        // Issue #276: same ordering rationale — check for a season
+        // start/end boundary crossing after this call's own time-weighted
+        // reward math already ran against the config that was active then.
+        Self::maybe_emit_season_transition(env);
+
         Ok(())
     }
 
@@ -5838,11 +6091,14 @@ impl VaultContract {
         // Load campaign once so reward_for_ledgers can split at campaign boundaries (#48)
         let campaign: Option<CampaignInfo> = env.storage().instance().get(&DataKey::BoostCampaign);
 
+        // Issue #276: load seasons once so reward_for_ledgers can split at
+        // season boundaries the same way it already does for campaigns.
+        let seasons = balance::get_seasons(env);
+
         // Issue #231: load halving config for halving boundary walking
         let halving_config = balance::get_halving_config(env);
 
         let schedule = balance::get_boost_schedule(env).unwrap_or(Vec::new(env));
-        let mut reward: i128 = 0;
         let mut total_dust: i128 = 0;
         let mut cursor = start_ledger;
         let mut current_multiplier = BOOST_BPS_BASE;
@@ -5882,10 +6138,12 @@ impl VaultContract {
             };
 
             let (campaign_mult, next_campaign_boundary) = Self::campaign_info_at(cursor, &campaign);
+            let (season_mult, next_season_boundary) = Self::season_info_at(&seasons, cursor);
 
             let seg_end = next_halving_boundary
                 .min(next_tier_boundary)
                 .min(next_campaign_boundary)
+                .min(next_season_boundary)
                 .min(end_ledger);
 
             // Compute halving-adjusted rate for this segment
@@ -5900,22 +6158,17 @@ impl VaultContract {
                 base_rate
             };
 
-            if seg_end > cursor {
-                reward = reward
-                    .checked_add(Self::reward_for_ledgers(
-                        current_shares,
-                        seg_rate,
-                        current_multiplier,
-                        campaign_mult,
-                        seg_end - cursor,
-                    )?)
-                    .ok_or(VaultError::ArithmeticError)?;
-            }
-
+            // Issue #276: `reward_dust_for_ledgers` (not `reward_for_ledgers`)
+            // is the actual source of truth for the returned reward below —
+            // it must apply the same tier/campaign/season multiplier stack
+            // as `reward_for_ledgers`, or a season (or campaign) boost would
+            // silently fail to affect real accrual.
             let segment_dust = Self::reward_dust_for_ledgers(
                 current_shares,
                 seg_rate,
                 current_multiplier,
+                campaign_mult,
+                season_mult,
                 seg_end - cursor,
             )?;
             total_dust = total_dust
@@ -5936,6 +6189,8 @@ impl VaultContract {
             current_shares,
             base_rate,
             current_multiplier,
+            BOOST_BPS_BASE,
+            BOOST_BPS_BASE,
             end_ledger - cursor,
         )?;
         total_dust = total_dust
@@ -5967,6 +6222,13 @@ impl VaultContract {
     }
 
     /// Calculate reward dust (numerator before division by BOOST_BPS_BASE * STELLAR_LEDGERS_PER_YEAR).
+    /// This is the actual source of truth for the reward `reward_between_ledgers`
+    /// returns (accumulated as `total_dust` and divided down once at the end
+    /// for precision), so it must apply the exact same tier/campaign/season
+    /// multiplier stack as `reward_for_ledgers` (issue #276) — otherwise a
+    /// boost would compute correctly for `reward_for_ledgers`'s callers
+    /// (the `simulate_*` preview functions) but silently not affect real
+    /// accrual.
     ///
     /// ROUNDING BEHAVIOR WARNING:
     /// In traditional fixed-point math, calculating reward using standard division leads to severe
@@ -5978,6 +6240,8 @@ impl VaultContract {
         amount: i128,
         rate_bps: u32,
         multiplier_bps: u32,
+        campaign_multiplier_bps: u32,
+        season_multiplier_bps: u32,
         elapsed_ledgers: u32,
     ) -> Result<i128, VaultError> {
         if elapsed_ledgers == 0 || amount == 0 {
@@ -5990,18 +6254,36 @@ impl VaultContract {
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
 
+        let boosted_rate_bps = effective_rate_bps
+            .checked_mul(campaign_multiplier_bps as i128)
+            .ok_or(VaultError::ArithmeticError)?
+            .checked_div(BOOST_BPS_BASE as i128)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        let seasoned_rate_bps = boosted_rate_bps
+            .checked_mul(season_multiplier_bps as i128)
+            .ok_or(VaultError::ArithmeticError)?
+            .checked_div(BOOST_BPS_BASE as i128)
+            .ok_or(VaultError::ArithmeticError)?;
+
         amount
-            .checked_mul(effective_rate_bps)
+            .checked_mul(seasoned_rate_bps)
             .ok_or(VaultError::ArithmeticError)?
             .checked_mul(elapsed_ledgers as i128)
             .ok_or(VaultError::ArithmeticError)
     }
 
+    /// Stacking order (issue #276's own notes call out documenting this):
+    /// tier multiplier, then campaign multiplier (#48), then season
+    /// multiplier — each applied multiplicatively on top of the last, so
+    /// `effective_rate = rate_bps * tier_mult / 10000 * campaign_mult / 10000
+    /// * season_mult / 10000`. All three stack simultaneously if active.
     fn reward_for_ledgers(
         amount: i128,
         rate_bps: u32,
         multiplier_bps: u32,
         campaign_multiplier_bps: u32,
+        season_multiplier_bps: u32,
         elapsed_ledgers: u32,
     ) -> Result<i128, VaultError> {
         if elapsed_ledgers == 0 || amount == 0 {
@@ -6022,8 +6304,15 @@ impl VaultContract {
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
 
+        // Issue #276: stack season multiplier on top of tier + campaign.
+        let seasoned_rate_bps = boosted_rate_bps
+            .checked_mul(season_multiplier_bps as i128)
+            .ok_or(VaultError::ArithmeticError)?
+            .checked_div(BOOST_BPS_BASE as i128)
+            .ok_or(VaultError::ArithmeticError)?;
+
         amount
-            .checked_mul(boosted_rate_bps)
+            .checked_mul(seasoned_rate_bps)
             .ok_or(VaultError::ArithmeticError)?
             .checked_mul(elapsed_ledgers as i128)
             .ok_or(VaultError::ArithmeticError)?
@@ -6071,6 +6360,63 @@ impl VaultContract {
             }
             Some(c) if cursor < c.starts_at_ledger => (BOOST_BPS_BASE, c.starts_at_ledger),
             _ => (BOOST_BPS_BASE, u32::MAX),
+        }
+    }
+
+    /// Issue #276: the season active at `ledger`, if any. `add_season()`
+    /// rejects overlapping ranges so at most one match is ever possible.
+    fn find_active_season(seasons: &Vec<Season>, ledger: u32) -> Option<(u32, Season)> {
+        for i in 0..seasons.len() {
+            let s = seasons.get(i).unwrap();
+            if ledger >= s.starts_at && ledger < s.ends_at {
+                return Some((i, s));
+            }
+        }
+        None
+    }
+
+    /// Returns `(season_multiplier_bps, next_boundary_ledger)` for a given
+    /// cursor position, mirroring `campaign_info_at` so `reward_between_ledgers`
+    /// can split segments at season boundaries the same way (issue #276).
+    fn season_info_at(seasons: &Vec<Season>, cursor: u32) -> (u32, u32) {
+        if let Some((_, active)) = Self::find_active_season(seasons, cursor) {
+            return (active.multiplier_bps, active.ends_at);
+        }
+        let mut next_start = u32::MAX;
+        for i in 0..seasons.len() {
+            let s = seasons.get(i).unwrap();
+            if s.starts_at > cursor && s.starts_at < next_start {
+                next_start = s.starts_at;
+            }
+        }
+        (BOOST_BPS_BASE, next_start)
+    }
+
+    /// Lazily emits `season_started`/`season_ended` the first time any
+    /// mutating call notices the active season has changed since the last
+    /// time this ran (issue #276). Called from `accrue_rewards`, after that
+    /// call's own reward math already used the season config that was
+    /// active *before* this potential transition.
+    fn maybe_emit_season_transition(env: &Env) {
+        let seasons = balance::get_seasons(env);
+        let ledger = env.ledger().sequence();
+        let active = Self::find_active_season(&seasons, ledger);
+        let last_marker = balance::get_last_active_season_marker(env);
+
+        match (&active, last_marker) {
+            (Some((_, s)), None) => {
+                events::season_started(env, s.starts_at, &s.name, s.multiplier_bps, ledger);
+                balance::set_last_active_season_marker(env, s.starts_at);
+            }
+            (Some((_, s)), Some(marker)) if marker != s.starts_at => {
+                events::season_started(env, s.starts_at, &s.name, s.multiplier_bps, ledger);
+                balance::set_last_active_season_marker(env, s.starts_at);
+            }
+            (None, Some(marker)) => {
+                events::season_ended(env, marker, ledger);
+                balance::clear_last_active_season_marker(env);
+            }
+            _ => {}
         }
     }
 
@@ -6282,6 +6628,22 @@ impl VaultContract {
             Err(VaultError::PoolShuttingDown)
         } else {
             Ok(())
+        }
+    }
+
+    /// Issue #298: new stakes are blocked from `GracePeriodActive` onward
+    /// (`start_grace_period()` and later stages) — `Active` and
+    /// `SunsetAnnounced` still accept stakes. Reuses `PoolShuttingDown`
+    /// rather than adding a new `VaultError` variant: both `VaultError` and
+    /// `VaultExtError` are already at Soroban's 50-variant cap (see the
+    /// comment on `VaultFeatureError`), and "pool winding down, no new
+    /// stakes" is exactly what this condition also means.
+    fn require_not_sunsetting(env: &Env) -> Result<(), VaultError> {
+        match balance::get_sunset_state(env) {
+            SunsetState::GracePeriodActive
+            | SunsetState::ForceResolutionActive
+            | SunsetState::Closed => Err(VaultError::PoolShuttingDown),
+            SunsetState::Active | SunsetState::SunsetAnnounced => Ok(()),
         }
     }
 
@@ -6570,6 +6932,7 @@ impl VaultContract {
     fn do_stake_inner(env: &Env, staker: &Address, amount: i128) -> Result<i128, VaultError> {
         Self::require_not_stopped(env)?;
         Self::require_not_shutting_down(env)?;
+        Self::require_not_sunsetting(env)?;
         Self::require_not_paused(env)?;
         // Issue #237: while auction mode is on, only auction winners may stake.
         Self::require_pool_spot(env, staker)?;
@@ -10068,30 +10431,6 @@ impl VaultContract {
         Ok(())
     }
 
-    // ── Staker bio: personal note on position (#273) ────────────────────
-
-    /// Attach a short personal note to the caller's staking position.
-    pub fn set_staker_bio(
-        env: Env,
-        staker: Address,
-        bio: String,
-    ) -> Result<(), VaultError> {
-        staker.require_auth();
-
-        // Ensure position exists
-        if !storage::Storage::has_position(&env, &staker) {
-            return Err(VaultError::InsufficientStake);
-        }
-
-        storage::Storage::set_staker_bio(&env, &staker, &bio);
-        Ok(())
-    }
-
-    /// Read the personal note attached to a staker's position.
-    pub fn get_staker_bio(env: Env, staker: Address) -> Option<String> {
-        storage::Storage::get_staker_bio(&env, &staker)
-    }
-
     /// The weekly cohort bucket a ledger falls into.
     fn cohort_id_for(ledger: u32) -> u32 {
         ledger / LEDGERS_PER_COHORT
@@ -10843,5 +11182,176 @@ impl VaultContract {
         let applied = if reward < debt { reward } else { debt };
         Self::settle_loan(env, user, &mut loan, applied);
         Ok((reward - applied, applied))
+    }
+
+    // ── Issue #298: pool sunsetting workflow ────────────────────────────────
+
+    /// Read-only query for the pool's current sunset lifecycle stage (issue
+    /// #298). Defaults to `Active` until `announce_sunset()` is ever called.
+    /// No auth required — this, like every other query, keeps working even
+    /// once the pool reaches `Closed`.
+    pub fn get_sunset_state(env: Env) -> SunsetState {
+        balance::get_sunset_state(&env)
+    }
+
+    /// Admin begins the sunset process: `Active` -> `SunsetAnnounced`.
+    /// Stores `grace_period_ledgers` as an absolute end ledger so
+    /// `start_force_resolution()` can later check it has elapsed.
+    pub fn announce_sunset(
+        env: Env,
+        admin: Address,
+        grace_period_ledgers: u32,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if balance::get_sunset_state(&env) != SunsetState::Active {
+            return Err(VaultFeatureError::InvalidSunsetTransition);
+        }
+
+        let ledger = env.ledger().sequence();
+        let grace_period_end = ledger.saturating_add(grace_period_ledgers);
+        balance::set_sunset_state(&env, SunsetState::SunsetAnnounced);
+        balance::set_grace_period_end(&env, grace_period_end);
+
+        events::sunset_announced(&env, &admin, grace_period_end, ledger);
+        events::sunset_stage_changed(&env, SunsetState::SunsetAnnounced, ledger);
+        Ok(())
+    }
+
+    /// Admin opens the grace period: `SunsetAnnounced` -> `GracePeriodActive`.
+    /// New stakes are blocked from this point on (enforced in `do_stake`);
+    /// `unstake`/`claim` remain open so stakers can exit voluntarily.
+    pub fn start_grace_period(env: Env, admin: Address) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if balance::get_sunset_state(&env) != SunsetState::SunsetAnnounced {
+            return Err(VaultFeatureError::InvalidSunsetTransition);
+        }
+
+        balance::set_sunset_state(&env, SunsetState::GracePeriodActive);
+        let ledger = env.ledger().sequence();
+        events::sunset_stage_changed(&env, SunsetState::GracePeriodActive, ledger);
+        Ok(())
+    }
+
+    /// Admin ends the grace period and opens force-resolution:
+    /// `GracePeriodActive` -> `ForceResolutionActive`. Only callable once the
+    /// grace period configured in `announce_sunset()` has actually elapsed.
+    pub fn start_force_resolution(env: Env, admin: Address) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if balance::get_sunset_state(&env) != SunsetState::GracePeriodActive {
+            return Err(VaultFeatureError::InvalidSunsetTransition);
+        }
+        let grace_period_end = balance::get_grace_period_end(&env).unwrap_or(0);
+        if env.ledger().sequence() < grace_period_end {
+            return Err(VaultFeatureError::InvalidSunsetTransition);
+        }
+
+        balance::set_sunset_state(&env, SunsetState::ForceResolutionActive);
+        let ledger = env.ledger().sequence();
+        events::sunset_stage_changed(&env, SunsetState::ForceResolutionActive, ledger);
+        Ok(())
+    }
+
+    /// Admin force-unstakes `user`'s entire position without their auth,
+    /// paying principal plus any accrued reward and waiving every penalty
+    /// (early-exit, unstake fee) that a voluntary `unstake()` would apply.
+    /// Only callable while `ForceResolutionActive`. Returns the total amount
+    /// paid out (principal + reward).
+    pub fn force_resolve_position(
+        env: Env,
+        admin: Address,
+        user: Address,
+    ) -> Result<i128, VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if balance::get_sunset_state(&env) != SunsetState::ForceResolutionActive {
+            return Err(VaultFeatureError::InvalidSunsetTransition);
+        }
+
+        let shares = balance::get_shares(&env, &user);
+        if shares == 0 {
+            return Err(VaultFeatureError::PositionNotFound);
+        }
+
+        Self::accrue_rewards(&env, &user, shares)?;
+
+        let accrued = balance::get_accrued_reward(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let principal = balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)?;
+
+        if accrued > 0 {
+            let reward_pool = balance::get_reward_pool_balance(&env);
+            if reward_pool < accrued {
+                return Err(VaultError::InsufficientRewardPool.into());
+            }
+            balance::set_reward_pool_balance(&env, reward_pool - accrued);
+            let total_paid = balance::get_total_rewards_paid(&env);
+            balance::set_total_rewards_paid(&env, total_paid + accrued);
+        }
+
+        balance::set_shares(&env, &user, 0);
+        balance::set_total_shares(&env, total_shares - shares);
+        balance::set_total_deposited(&env, total_deposited - principal);
+        balance::set_accrued_reward(&env, &user, 0);
+        let ledger = env.ledger().sequence();
+        balance::set_reward_checkpoint_ledger(&env, &user, ledger);
+        balance::set_last_claim_ledger(&env, &user, ledger);
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StakedAtLedger(user.clone()));
+        let total_stakers = balance::get_total_stakers(&env);
+        if total_stakers > 0 {
+            balance::set_total_stakers(&env, total_stakers - 1);
+        }
+        Self::remove_from_staker_list(&env, &user);
+
+        let payout = principal
+            .checked_add(accrued)
+            .ok_or(VaultError::ArithmeticError)?;
+        if payout > 0 {
+            let token_addr = Self::token_address(&env)?;
+            let token_client = token::Client::new(&env, &token_addr);
+            token_client.transfer(&env.current_contract_address(), &user, &payout);
+        }
+
+        events::position_closed(&env, &user);
+        events::force_resolved(&env, &user, principal, accrued, ledger);
+
+        Ok(payout)
+    }
+
+    /// Admin permanently closes the pool: `ForceResolutionActive` -> `Closed`.
+    /// Reverts with `PositionsStillActive` unless every staker has already
+    /// been resolved (via `force_resolve_position()` or a voluntary
+    /// `unstake()`). Once `Closed`, this transition can never be reversed.
+    pub fn close_pool(env: Env, admin: Address) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if balance::get_sunset_state(&env) != SunsetState::ForceResolutionActive {
+            return Err(VaultFeatureError::InvalidSunsetTransition);
+        }
+
+        let all_stakers = balance::get_all_stakers(&env);
+        for i in 0..all_stakers.len() {
+            let staker = all_stakers.get(i).unwrap();
+            if balance::get_shares(&env, &staker) > 0 {
+                return Err(VaultFeatureError::PositionsStillActive);
+            }
+        }
+
+        balance::set_sunset_state(&env, SunsetState::Closed);
+        let ledger = env.ledger().sequence();
+        events::sunset_stage_changed(&env, SunsetState::Closed, ledger);
+        Ok(())
     }
 }

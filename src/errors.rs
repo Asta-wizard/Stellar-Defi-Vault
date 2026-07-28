@@ -324,9 +324,11 @@ pub enum VaultExtError {
 /// Third error enum, for the same 50-variant reason `VaultExtError` exists:
 /// both `VaultError` and `VaultExtError` are now at exactly the cap, so the
 /// cases introduced by issues #258 (branding), #259 (staking insurance),
-/// #260 (flash stake), and #261 (stake-backed loans) live here, plus mirrors
-/// of the handful of `VaultError` cases those functions can also hit (via the
-/// `From` impl below, so `?` still works normally at call sites).
+/// #260 (flash stake), #261 (stake-backed loans), #275 (reward Gini
+/// coefficient), #276 (seasonal reward multiplier), #274 (staker bio), and
+/// #298 (pool sunsetting workflow) live here, plus mirrors of the handful of
+/// `VaultError` cases those functions can also hit (via the `From` impl
+/// below, so `?` still works normally at call sites).
 ///
 /// Note on `InvalidBrandingField`: a `#[contracterror]` variant cannot carry a
 /// payload, so the offending field name is encoded in the variant itself —
@@ -378,6 +380,40 @@ pub enum VaultFeatureError {
     /// `declare_shortfall()` when `affected_users.len()` exceeds
     /// `MAX_SHORTFALL_USERS` (50) — split the payout across several calls.
     TooManyAffectedUsers = 23,
+
+    // ── Issue #275: reward Gini coefficient ─────────────────────────────────
+    /// `get_reward_gini_coefficient()`: more than 100 active stakers. Named
+    /// identically to (but distinct from) `VaultError::TooManyStakers`, which
+    /// is already used for an unrelated case (`vote()` double-voting) — both
+    /// `VaultError` and `VaultExtError` are at their 50-variant cap so this
+    /// domain's own error lives here instead.
+    TooManyStakers = 24,
+
+    // ── Issue #276: seasonal reward multiplier ──────────────────────────────
+    /// `add_season()`: `starts_at >= ends_at`, or `multiplier_bps` is zero.
+    InvalidSeasonConfig = 25,
+    /// `add_season()`: 10 seasons are already scheduled.
+    TooManySeasons = 26,
+    /// `add_season()`: the requested range overlaps an already-scheduled
+    /// season — only one season may be active at a time.
+    SeasonOverlap = 27,
+    /// `remove_season()`: no season exists at the given index.
+    SeasonNotFound = 28,
+
+    // ── Issue #274: staker bio ───────────────────────────────────────────────
+    /// `set_staker_bio()`: `bio` exceeds `MAX_BIO_LEN` (160 characters).
+    BioTooLong = 29,
+
+    // ── Issue #298: pool sunsetting workflow ────────────────────────────────
+    /// Returned by every sunset-workflow entrypoint when called from the
+    /// wrong `SunsetState` (transitions are one-way and only valid from a
+    /// specific prior state), and by `start_force_resolution()` when called
+    /// before the grace period configured in `announce_sunset()` has elapsed.
+    InvalidSunsetTransition = 30,
+    /// `close_pool()`: at least one staker still holds an active position —
+    /// every position must be resolved (via `force_resolve_position()` or a
+    /// voluntary `unstake()`) before the pool can close.
+    PositionsStillActive = 31,
 
     // ── Issue #260: flash stake ─────────────────────────────────────────────
     /// `set_flash_stake_fee_bps()`: `bps` above 10 000.
