@@ -10320,4 +10320,47 @@ impl VaultContract {
         
         Ok(())
     }
+
+    // ── Pool Performance Benchmark ──────────────────────────────────────────
+
+    pub fn pool_performance_benchmark(env: Env, since_ledger: u32) -> PoolPerformanceBenchmark {
+        let current_ledger = env.ledger().sequence();
+        let ledgers_elapsed = current_ledger.saturating_sub(since_ledger);
+
+        let total_staked = balance::get_total_deposited(&env);
+        let reward_rate_bps = balance::get_reward_rate_bps(&env) as i128;
+        
+        let actual_rewards_paid = Self::get_total_ever_claimed(env.clone());
+
+        let denom: i128 = (BOOST_BPS_BASE as i128) * (STELLAR_LEDGERS_PER_YEAR as i128);
+        let x: i128 = reward_rate_bps.saturating_mul(ledgers_elapsed as i128);
+
+        let term1 = total_staked.saturating_mul(x) / denom;
+        let term2 = term1.saturating_mul(x) / (2 * denom);
+        
+        let theoretical_max_rewards = term1.saturating_add(term2);
+        
+        let efficiency_bps = if theoretical_max_rewards == 0 {
+            if actual_rewards_paid == 0 { 0 } else { 10000 }
+        } else {
+            let eff = (actual_rewards_paid.saturating_mul(10000)) / theoretical_max_rewards;
+            if eff > 10000 { 10000 } else { eff as u32 }
+        };
+
+        PoolPerformanceBenchmark {
+            theoretical_max_rewards,
+            actual_rewards_paid,
+            efficiency_bps,
+            measurement_period_ledgers: ledgers_elapsed,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolPerformanceBenchmark {
+    pub theoretical_max_rewards: i128,
+    pub actual_rewards_paid: i128,
+    pub efficiency_bps: u32,
+    pub measurement_period_ledgers: u32,
 }
