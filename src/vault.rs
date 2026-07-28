@@ -9,17 +9,17 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        AccessTier, AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
-        BootstrapConfig, BrandingConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
-        ContractAddresses, ContractMetadata, DataKey, DayBucket, DelegationChain, DynamicFeeConfig,
-        EpochState, FeeRecipient, FlashStakeReceipt, GovernanceProposal, HalvingConfig,
-        InsurancePolicy, InsuranceProduct, InterfaceId, LeaderboardEntry, Loan, LoanConfig,
-        LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
-        OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
-        RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
-        Season, SmoothingSchedule, SmoothingStatus,
+        AccessTier, AchievementLeaderboardEntry, AdminAction, AdminProposal, AuctionBid,
+        AutoConvertConfig, BoostTierProgress, BootstrapConfig, BrandingConfig, CampaignInfo,
+        CapacityAuction, ChangelogEntry, ClaimWindow, ContractAddresses, ContractMetadata, DataKey,
+        DayBucket, DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, FlashStakeReceipt,
+        GovernanceProposal, HalvingConfig, InsurancePolicy, InsuranceProduct, InterfaceId,
+        LeaderboardEntry, Loan, LoanConfig, LotteryConfig, MerkleRoot, MigrationExport, Milestone,
+        MilestoneCondition, MultisigConfig, OptimalClaimAdvice, PauseInfo, PauseReason,
+        PendingAction, PoolComparison, PoolConfig, PoolHealthReport, PoolStats, PriceCondition,
+        PriorityBidRecord, ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry,
+        ReferralTreeNode, ReputationScore, RewardMultiplierBreakdown, RevenueShareMerkleRoot,
+        RevenueSharingConfig, RoundingPolicy, Season, SmoothingSchedule, SmoothingStatus,
         StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
         StakingEfficiencyScore, StorageUsageReport, SunsetState, TaxReport, Tournament,
         TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
@@ -9900,6 +9900,8 @@ impl VaultContract {
                     &milestone.name,
                     current_ledger,
                 );
+                // Update the latest achievement ledger for this user
+                balance::set_latest_achievement_ledger(env, user, current_ledger);
             }
         }
         balance::set_user_milestones(env, user, &achieved);
@@ -9908,6 +9910,96 @@ impl VaultContract {
     /// Read-only query for the milestone ids a user has already achieved.
     pub fn get_user_milestones(env: Env, user: Address) -> Vec<u32> {
         balance::get_user_milestones(&env, &user)
+    }
+
+    /// Public achievement leaderboard showing top 20 stakers by milestone count.
+    ///
+    /// Returns entries sorted descending by milestone_count, with ties broken by
+    /// latest_achievement_ledger descending (most recent achiever ranks higher).
+    /// Computed dynamically from UserMilestones storage — not cached.
+    /// No auth required.
+    pub fn get_achievement_leaderboard(env: Env) -> Vec<AchievementLeaderboardEntry> {
+        let all_stakers = balance::get_all_stakers(&env);
+        let mut entries = Vec::new(&env);
+
+        for i in 0..all_stakers.len() {
+            let staker = all_stakers.get(i).unwrap();
+            let milestones = balance::get_user_milestones(&env, &staker);
+            let milestone_count = milestones.len();
+            
+            // Only include stakers with at least one milestone
+            if milestone_count > 0 {
+                let latest_ledger = balance::get_latest_achievement_ledger(&env, &staker);
+                let entry = AchievementLeaderboardEntry {
+                    user: staker,
+                    milestone_count,
+                    latest_achievement_ledger: latest_ledger,
+                };
+                entries.push_back(entry);
+            }
+        }
+
+        // Sort by milestone_count descending, then by latest_achievement_ledger descending
+        entries.sort(|a, b| {
+            if a.milestone_count != b.milestone_count {
+                // Higher milestone count comes first
+                b.milestone_count.cmp(&a.milestone_count)
+            } else {
+                // Tie-breaker: more recent achievement comes first
+                b.latest_achievement_ledger.cmp(&a.latest_achievement_ledger)
+            }
+        });
+
+        // Return top 20 entries
+        let top_20 = Vec::new(&env);
+        let limit = if entries.len() > 20 { 20 } else { entries.len() };
+        for i in 0..limit {
+            top_20.push_back(entries.get(i).unwrap());
+        }
+        top_20
+    }
+
+    /// Companion function to get a user's current rank on the achievement leaderboard.
+    ///
+    /// Returns Some(rank) where rank is 1-indexed, or None if the user has no milestones.
+    /// No auth required.
+    pub fn get_user_milestone_rank(env: Env, user: Address) -> Option<u32> {
+        let user_milestones = balance::get_user_milestones(&env, &user);
+        if user_milestones.is_empty() {
+            return None;
+        }
+
+        let user_count = user_milestones.len();
+        let user_latest_ledger = balance::get_latest_achievement_ledger(&env, &user);
+        let all_stakers = balance::get_all_stakers(&env);
+        let mut rank = 1u32;
+
+        for i in 0..all_stakers.len() {
+            let staker = all_stakers.get(i).unwrap();
+            if staker == user {
+                continue;
+            }
+
+            let milestones = balance::get_user_milestones(&env, &staker);
+            let staker_count = milestones.len();
+            
+            if staker_count > 0 {
+                let staker_latest_ledger = balance::get_latest_achievement_ledger(&env, &staker);
+                
+                // Check if this staker ranks higher than the user
+                let staker_ranks_higher = if staker_count != user_count {
+                    staker_count > user_count
+                } else {
+                    staker_latest_ledger > user_latest_ledger
+                };
+
+                if staker_ranks_higher {
+                    rank += 1;
+                }
+            }
+        }
+
+        Some(rank)
     }
 
     // ── Issue #240: oracle-triggered lock-up release ────────────────────────────

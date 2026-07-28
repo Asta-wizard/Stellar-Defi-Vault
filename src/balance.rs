@@ -1721,6 +1721,19 @@ pub fn set_user_milestones(env: &Env, user: &Address, ids: &Vec<u32>) {
     env.storage().persistent().set(&key, ids);
 }
 
+pub fn get_latest_achievement_ledger(env: &Env, user: &Address) -> u32 {
+    let key = (Symbol::new(env, "lat_mstn"), user.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(0)
+}
+
+pub fn set_latest_achievement_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "lat_mstn"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
 // ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
 
 pub fn get_oracle_contract(env: &Env) -> Option<Address> {
