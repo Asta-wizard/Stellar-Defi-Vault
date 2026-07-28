@@ -1,9 +1,10 @@
 use crate::storage::{
-    AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow, DataKey,
-    DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
+    AccessTier, AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow,
+    DataKey, DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
     InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig, Milestone, MultisigConfig,
-    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats, Season,
-    StakePosition, SunsetState, VestingEntry,
+    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
+    RevenueShareMerkleRoot, RevenueSharingConfig, Season, StakePosition, SunsetState,
+    VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -2048,3 +2049,133 @@ pub fn set_grace_period_end(env: &Env, ledger: u32) {
         .instance()
         .set(&symbol_short!("snst_gpe"), &ledger);
 }
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+pub fn get_revenue_sharing_config(env: &Env) -> Option<RevenueSharingConfig> {
+    env.storage().instance().get(&symbol_short!("rev_cfg"))
+}
+
+pub fn set_revenue_sharing_config(env: &Env, config: &RevenueSharingConfig) {
+    env.storage().instance().set(&symbol_short!("rev_cfg"), config);
+}
+
+pub fn get_revenue_share_pool(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rev_pool"))
+        .unwrap_or(0)
+}
+
+pub fn set_revenue_share_pool(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("rev_pool"), &amount);
+}
+
+pub fn get_revenue_share_epoch(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rev_ep"))
+        .unwrap_or(0)
+}
+
+pub fn set_revenue_share_epoch(env: &Env, epoch: u32) {
+    env.storage().instance().set(&symbol_short!("rev_ep"), &epoch);
+}
+
+pub fn get_revenue_share_merkle_root(env: &Env) -> Option<RevenueShareMerkleRoot> {
+    env.storage().instance().get(&symbol_short!("rev_mrk"))
+}
+
+pub fn set_revenue_share_merkle_root(env: &Env, root: &RevenueShareMerkleRoot) {
+    env.storage().instance().set(&symbol_short!("rev_mrk"), root);
+}
+
+pub fn is_revenue_share_claimed(env: &Env, user: &Address, epoch: u32) -> bool {
+    let key = (Symbol::new(env, "rev_clm"), user.clone(), epoch);
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_revenue_share_claimed(env: &Env, user: &Address, epoch: u32) {
+    let key = (Symbol::new(env, "rev_clm"), user.clone(), epoch);
+    env.storage().persistent().set(&key, &true);
+}
+
+// ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+pub fn get_escrow_period(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("esc_prd"))
+        .unwrap_or(0)
+}
+
+pub fn set_escrow_period(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("esc_prd"), &ledgers);
+}
+
+pub fn get_escrow_balance(env: &Env, user: &Address) -> i128 {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_escrow_balance(env: &Env, user: &Address, amount: i128) {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().set(&key, &amount);
+}
+
+pub fn remove_escrow_balance(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+pub fn get_escrow_release_ledger(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_escrow_release_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
+pub fn remove_escrow_release_ledger(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+pub fn get_access_tiers(env: &Env) -> Vec<AccessTier> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("acc_tier"))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_access_tiers(env: &Env, tiers: &Vec<AccessTier>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("acc_tier"), tiers);
+}
+
+pub fn get_user_access_tier(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_user_access_tier(env: &Env, user: &Address, tier_index: u32) {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().set(&key, &tier_index);
+}
+
+pub fn remove_user_access_tier(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "acc_u_tr"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+
+

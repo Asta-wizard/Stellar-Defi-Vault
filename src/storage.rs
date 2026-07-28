@@ -1034,3 +1034,32 @@ pub enum SunsetState {
     ForceResolutionActive,
     Closed,
 }
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevenueSharingConfig {
+    pub governance_token: Address,
+    pub share_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevenueShareMerkleRoot {
+    pub root: soroban_sdk::Bytes,
+    pub epoch: u32,
+    pub total_amount: i128,
+}
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessTier {
+    pub min_stake: i128,
+    pub min_duration_ledgers: u32,
+    pub access_token_contract: Address,
+}
+
+
