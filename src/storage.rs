@@ -1076,4 +1076,37 @@ pub struct WithdrawalReceipt {
     pub lock_penalty_paid: i128,
 }
 
+// ── Issue #309: staker onboarding checklist ───────────────────────────────────
+
+/// Tracks completion of the recommended onboarding steps for a staker (issue
+/// #309). Append-only: flags never reset to false even after the user
+/// unstakes. `completed_at` is set once, to the ledger at which the last
+/// remaining flag first flipped true.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OnboardingChecklist {
+    pub has_staked: bool,
+    pub has_claimed: bool,
+    pub has_set_bio: bool,
+    pub has_enabled_streaming: bool,
+    pub has_set_auto_restake: bool,
+    pub completed_at: Option<u32>,
+}
+
+// ── Issue #310: contract allowance delegation ─────────────────────────────────
+
+/// A smart-contract address approved to call `stake_via_contract()` on a
+/// user's behalf (issue #310), up to `max_stake_per_call` per invocation and
+/// `total_authorized` lifetime. Distinct from the human-wallet delegation in
+/// `approve_delegate()`/`add_delegate_to_chain()` (issues #23/#200), which
+/// target EOA delegates rather than contracts.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractDelegate {
+    pub contract_address: Address,
+    pub max_stake_per_call: i128,
+    pub total_authorized: i128,
+    pub total_used: i128,
+}
+
 

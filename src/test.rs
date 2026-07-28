@@ -7623,3 +7623,405 @@ fn test_queries_work_when_pool_closed() {
     assert_eq!(f.vault.get_sunset_state(), SunsetState::Closed);
     assert_eq!(f.vault.total_staked(), 0);
 }
+
+// ── Issue #308: unstake-fee-funded buyback & burn ─────────────────────────────
+
+#[test]
+fn test_fee_buyback_disabled_by_default_routes_fee_to_treasury() {
+    let f = VaultFixture::new();
+    f.vault.set_unstake_fee_bps(&f.admin, &500); // 5%
+    f.vault.deposit(&f.alice, &600_000);
+
+    assert_eq!(f.vault.is_fee_buyback_enabled(), false);
+
+    f.vault.withdraw(&f.alice, &300_000);
+
+    // 5% of 300_000 = 15_000, routed to the normal reward-pool treasury.
+    assert_eq!(f.vault.get_reward_pool_balance(), 15_000);
+    let (reserve, total_burned) = f.vault.get_fee_buyback_stats();
+    assert_eq!(reserve, 0);
+    assert_eq!(total_burned, 0);
+}
+
+#[test]
+fn test_unstake_fee_routed_to_reserve_when_enabled() {
+    let f = VaultFixture::new();
+    f.vault.set_unstake_fee_bps(&f.admin, &500); // 5%
+    f.vault.set_fee_buyback_enabled(&f.admin, &true);
+    f.vault.deposit(&f.alice, &600_000);
+
+    f.vault.withdraw(&f.alice, &300_000);
+
+    // Fee is diverted to the reserve instead of the treasury.
+    assert_eq!(f.vault.get_reward_pool_balance(), 0);
+    let (reserve, total_burned) = f.vault.get_fee_buyback_stats();
+    assert_eq!(reserve, 15_000);
+    assert_eq!(total_burned, 0);
+}
+
+#[test]
+fn test_set_fee_buyback_enabled_requires_admin_auth() {
+    let f = VaultFixture::new();
+    f.vault.set_fee_buyback_enabled(&f.admin, &true);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+}
+
+#[test]
+fn test_execute_fee_buyback_burns_reserve_directly_for_single_token_vault() {
+    let f = VaultFixture::new();
+    f.vault.set_unstake_fee_bps(&f.admin, &500);
+    f.vault.set_fee_buyback_enabled(&f.admin, &true);
+    f.vault.deposit(&f.alice, &600_000);
+    f.vault.withdraw(&f.alice, &300_000);
+
+    let vault_id = f.vault.address.clone();
+    let contract_balance_before = f.token.balance(&vault_id);
+
+    f.vault.execute_fee_buyback(&f.admin);
+
+    // Single-token vault: reward token == stake token, so the reserve is
+    // burned directly with no DEX swap involved.
+    let (reserve, total_burned) = f.vault.get_fee_buyback_stats();
+    assert_eq!(reserve, 0);
+    assert_eq!(total_burned, 15_000);
+    assert_eq!(f.token.balance(&vault_id), contract_balance_before - 15_000);
+}
+
+#[test]
+fn test_execute_fee_buyback_reverts_when_disabled() {
+    let f = VaultFixture::new();
+    let result = f.vault.try_execute_fee_buyback(&f.admin);
+    assert_eq!(result, Err(Ok(VaultFeatureError::FeeBuybackNotEnabled)));
+}
+
+#[test]
+fn test_execute_fee_buyback_reverts_when_reserve_empty() {
+    let f = VaultFixture::new();
+    f.vault.set_fee_buyback_enabled(&f.admin, &true);
+
+    let result = f.vault.try_execute_fee_buyback(&f.admin);
+    assert_eq!(result, Err(Ok(VaultFeatureError::ZeroAmount)));
+}
+
+#[test]
+fn test_execute_fee_buyback_swaps_via_dex_for_different_reward_token() {
+    let f = VaultFixture::new();
+    f.vault.set_unstake_fee_bps(&f.admin, &500);
+    f.vault.set_fee_buyback_enabled(&f.admin, &true);
+    f.vault.deposit(&f.alice, &600_000);
+    f.vault.withdraw(&f.alice, &300_000); // reserve = 15_000 stake-token units
+
+    let reward_token_addr = f.env.register_stellar_asset_contract(f.admin.clone());
+    let reward_token_client = token::Client::new(&f.env, &reward_token_addr);
+    f.vault.set_reward_token(&reward_token_addr);
+
+    let router_id = f.env.register_contract(None, MockDexRouter);
+    let router_client = MockDexRouterClient::new(&f.env, &router_id);
+    router_client.set_rate_divisor(&1); // 1:1 swap
+    let reward_token_admin = token::StellarAssetClient::new(&f.env, &reward_token_addr);
+    reward_token_admin.mint(&router_id, &15_000); // pre-fund the router's payout
+    f.vault.set_dex_router(&router_id);
+
+    f.vault.execute_fee_buyback(&f.admin);
+
+    let (reserve, total_burned) = f.vault.get_fee_buyback_stats();
+    assert_eq!(reserve, 0);
+    assert_eq!(total_burned, 15_000);
+    // Swapped in then burned — nothing left in the vault's reward-token balance.
+    assert_eq!(reward_token_client.balance(&f.vault.address), 0);
+}
+
+#[test]
+fn test_execute_fee_buyback_reverts_without_router_for_different_reward_token() {
+    let f = VaultFixture::new();
+    f.vault.set_unstake_fee_bps(&f.admin, &500);
+    f.vault.set_fee_buyback_enabled(&f.admin, &true);
+    f.vault.deposit(&f.alice, &600_000);
+    f.vault.withdraw(&f.alice, &300_000);
+
+    let reward_token_addr = f.env.register_stellar_asset_contract(f.admin.clone());
+    f.vault.set_reward_token(&reward_token_addr);
+    // No DEX router configured.
+
+    let result = f.vault.try_execute_fee_buyback(&f.admin);
+    assert_eq!(result, Err(Ok(VaultFeatureError::NoDexRouterConfigured)));
+}
+
+// ── Issue #309: staker onboarding checklist ───────────────────────────────────
+
+#[test]
+fn test_onboarding_checklist_starts_all_false() {
+    let f = VaultFixture::new();
+    let checklist = f.vault.get_onboarding_checklist(&f.alice);
+
+    assert_eq!(checklist.has_staked, false);
+    assert_eq!(checklist.has_claimed, false);
+    assert_eq!(checklist.has_set_bio, false);
+    assert_eq!(checklist.has_enabled_streaming, false);
+    assert_eq!(checklist.has_set_auto_restake, false);
+    assert_eq!(checklist.completed_at, None);
+    assert_eq!(f.vault.is_onboarding_complete(&f.alice), false);
+}
+
+#[test]
+fn test_onboarding_checklist_stake_sets_flag() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+
+    let checklist = f.vault.get_onboarding_checklist(&f.alice);
+    assert_eq!(checklist.has_staked, true);
+    assert_eq!(checklist.has_claimed, false);
+}
+
+#[test]
+fn test_onboarding_checklist_claim_sets_flag() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    f.vault.stake(&f.alice, &1_000_000);
+
+    set_ledger(&f.env, 100);
+    f.vault.claim(&f.alice);
+
+    let checklist = f.vault.get_onboarding_checklist(&f.alice);
+    assert_eq!(checklist.has_claimed, true);
+}
+
+#[test]
+fn test_onboarding_checklist_bio_sets_flag() {
+    let f = VaultFixture::new();
+    f.vault.stake(&f.alice, &100_000);
+    f.vault
+        .set_staker_bio(&f.alice, &soroban_sdk::String::from_str(&f.env, "hello"));
+
+    let checklist = f.vault.get_onboarding_checklist(&f.alice);
+    assert_eq!(checklist.has_set_bio, true);
+}
+
+#[test]
+fn test_onboarding_checklist_streaming_sets_flag() {
+    let f = VaultFixture::new();
+    f.vault.set_streaming_enabled(&f.alice, &true);
+
+    let checklist = f.vault.get_onboarding_checklist(&f.alice);
+    assert_eq!(checklist.has_enabled_streaming, true);
+    assert_eq!(f.vault.is_streaming_enabled(&f.alice), true);
+}
+
+#[test]
+fn test_onboarding_checklist_auto_restake_sets_flag() {
+    let f = VaultFixture::new();
+    f.vault.set_auto_restake(&f.alice, &true);
+
+    let checklist = f.vault.get_onboarding_checklist(&f.alice);
+    assert_eq!(checklist.has_set_auto_restake, true);
+}
+
+#[test]
+fn test_onboarding_checklist_completes_after_all_five_steps() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    assert_eq!(f.vault.is_onboarding_complete(&f.alice), false);
+
+    set_ledger(&f.env, 100);
+    f.vault.claim(&f.alice);
+    f.vault
+        .set_staker_bio(&f.alice, &soroban_sdk::String::from_str(&f.env, "hi"));
+    f.vault.set_streaming_enabled(&f.alice, &true);
+    assert_eq!(f.vault.is_onboarding_complete(&f.alice), false);
+
+    f.vault.set_auto_restake(&f.alice, &true);
+
+    assert_eq!(f.vault.is_onboarding_complete(&f.alice), true);
+    let checklist = f.vault.get_onboarding_checklist(&f.alice);
+    assert!(checklist.completed_at.is_some());
+}
+
+#[test]
+fn test_onboarding_completed_event_fires_once() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+
+    f.vault.stake(&f.alice, &1_000_000);
+    set_ledger(&f.env, 100);
+    f.vault.claim(&f.alice);
+    f.vault
+        .set_staker_bio(&f.alice, &soroban_sdk::String::from_str(&f.env, "hi"));
+    f.vault.set_streaming_enabled(&f.alice, &true);
+    f.vault.set_auto_restake(&f.alice, &true);
+
+    assert_eq!(f.vault.is_onboarding_complete(&f.alice), true);
+
+    // Toggling an already-complete checklist's steps again must not re-fire
+    // the completion event.
+    f.vault.set_auto_restake(&f.alice, &false);
+    f.vault.set_auto_restake(&f.alice, &true);
+
+    let events = f.env.events().all();
+    let completed: std::vec::Vec<_> = events
+        .into_iter()
+        .filter(|(_, topics, _)| topic_matches(&f.env, topics, "onb_done"))
+        .collect();
+    assert_eq!(completed.len(), 1);
+}
+
+// ── Issue #310: contract allowance delegation ─────────────────────────────────
+
+#[test]
+fn test_contract_delegate_defaults_to_none() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_contract_delegate(&f.alice, &f.bob), None);
+}
+
+#[test]
+fn test_approve_contract_delegate_stores_config() {
+    let f = VaultFixture::new();
+    f.vault
+        .approve_contract_delegate(&f.alice, &f.bob, &100_000, &500_000);
+
+    let delegate = f.vault.get_contract_delegate(&f.alice, &f.bob).unwrap();
+    assert_eq!(delegate.contract_address, f.bob);
+    assert_eq!(delegate.max_stake_per_call, 100_000);
+    assert_eq!(delegate.total_authorized, 500_000);
+    assert_eq!(delegate.total_used, 0);
+}
+
+#[test]
+fn test_revoke_contract_delegate_removes_it() {
+    let f = VaultFixture::new();
+    f.vault
+        .approve_contract_delegate(&f.alice, &f.bob, &100_000, &500_000);
+    f.vault.revoke_contract_delegate(&f.alice, &f.bob);
+
+    assert_eq!(f.vault.get_contract_delegate(&f.alice, &f.bob), None);
+}
+
+#[test]
+fn test_stake_via_contract_within_caps_succeeds() {
+    let f = VaultFixture::new();
+    f.vault
+        .approve_contract_delegate(&f.alice, &f.bob, &100_000, &500_000);
+
+    let shares = f.vault.stake_via_contract(&f.bob, &f.alice, &100_000);
+    assert_eq!(shares, 100_000);
+    assert_eq!(f.vault.shares_of(&f.alice), 100_000);
+
+    let delegate = f.vault.get_contract_delegate(&f.alice, &f.bob).unwrap();
+    assert_eq!(delegate.total_used, 100_000);
+}
+
+#[test]
+fn test_stake_via_contract_per_call_limit_enforced() {
+    let f = VaultFixture::new();
+    f.vault
+        .approve_contract_delegate(&f.alice, &f.bob, &50_000, &500_000);
+
+    let result = f.vault.try_stake_via_contract(&f.bob, &f.alice, &60_000);
+    assert_eq!(
+        result,
+        Err(Ok(VaultFeatureError::ContractDelegatePerCallExceeded))
+    );
+}
+
+#[test]
+fn test_stake_via_contract_cap_exceeded_reverts() {
+    let f = VaultFixture::new();
+    f.vault
+        .approve_contract_delegate(&f.alice, &f.bob, &100_000, &150_000);
+
+    f.vault.stake_via_contract(&f.bob, &f.alice, &100_000);
+
+    let result = f.vault.try_stake_via_contract(&f.bob, &f.alice, &100_000);
+    assert_eq!(
+        result,
+        Err(Ok(VaultFeatureError::ContractDelegateCapExceeded))
+    );
+}
+
+#[test]
+fn test_stake_via_contract_revoked_contract_rejected() {
+    let f = VaultFixture::new();
+    f.vault
+        .approve_contract_delegate(&f.alice, &f.bob, &100_000, &500_000);
+    f.vault.revoke_contract_delegate(&f.alice, &f.bob);
+
+    let result = f.vault.try_stake_via_contract(&f.bob, &f.alice, &50_000);
+    assert_eq!(result, Err(Ok(VaultFeatureError::NotAContractDelegate)));
+}
+
+// ── Issue #311: TVL-based reward-rate smoothing ───────────────────────────────
+
+#[test]
+fn test_tvl_smoothing_disabled_by_default() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.is_tvl_smoothing_enabled(), false);
+    assert_eq!(f.vault.get_target_emission_per_ledger(), 0);
+}
+
+#[test]
+fn test_effective_rate_bps_for_tvl_scales_inversely_with_tvl() {
+    let f = VaultFixture::new();
+    f.vault.set_target_emission_per_ledger(&f.admin, &1_000_000);
+
+    let rate_at_1m = f.vault.get_effective_rate_bps_for_tvl(&1_000_000);
+    let rate_at_2m = f.vault.get_effective_rate_bps_for_tvl(&2_000_000);
+    let rate_at_500k = f.vault.get_effective_rate_bps_for_tvl(&500_000);
+
+    assert_eq!(rate_at_2m, rate_at_1m / 2);
+    assert_eq!(rate_at_500k, rate_at_1m * 2);
+}
+
+#[test]
+fn test_effective_rate_bps_for_tvl_zero_when_unconfigured_or_untenanted() {
+    let f = VaultFixture::new();
+    assert_eq!(f.vault.get_effective_rate_bps_for_tvl(&1_000_000), 0);
+
+    f.vault.set_target_emission_per_ledger(&f.admin, &1_000_000);
+    assert_eq!(f.vault.get_effective_rate_bps_for_tvl(&0), 0);
+}
+
+#[test]
+fn test_tvl_smoothing_disabled_uses_fixed_rate() {
+    let f = VaultFixture::new();
+    let annual_stake = STELLAR_LEDGERS_PER_YEAR as i128;
+
+    f.vault.set_reward_rate_bps(&BOOST_BPS_BASE);
+    f.vault.set_target_emission_per_ledger(&f.admin, &1);
+    // TVL smoothing left disabled (the default).
+    f.vault.stake(&f.alice, &annual_stake);
+
+    set_ledger(&f.env, 20);
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 20);
+}
+
+#[test]
+fn test_tvl_smoothing_keeps_total_emission_constant_across_stakers() {
+    let f = VaultFixture::new();
+    f.vault.set_target_emission_per_ledger(&f.admin, &1);
+    f.vault.set_tvl_smoothing_enabled(&f.admin, &true);
+
+    set_ledger(&f.env, 0);
+    let alice_amount = (STELLAR_LEDGERS_PER_YEAR as i128) * 3 / 5;
+    let bob_amount = (STELLAR_LEDGERS_PER_YEAR as i128) * 2 / 5;
+    f.vault.stake(&f.alice, &alice_amount);
+    f.vault.stake(&f.bob, &bob_amount);
+
+    set_ledger(&f.env, 100);
+
+    let alice_pending = f.vault.calc_pending_reward(&f.alice);
+    let bob_pending = f.vault.calc_pending_reward(&f.bob);
+
+    // target_emission_per_ledger (1) * 100 ledgers elapsed = 100 total,
+    // split proportionally to each staker's share of the pool.
+    assert_eq!(alice_pending, 60);
+    assert_eq!(bob_pending, 40);
+    assert_eq!(alice_pending + bob_pending, 100);
+}
+
+#[test]
+fn test_set_tvl_smoothing_enabled_requires_admin_auth() {
+    let f = VaultFixture::new();
+    f.vault.set_tvl_smoothing_enabled(&f.admin, &true);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+}

@@ -453,6 +453,27 @@ pub enum VaultFeatureError {
     // ── Issue #315: lot size normalization ──────────────────────────────────
     /// `stake()`: amount is not a multiple of the configured lot size.
     InvalidLotSize = 38,
+
+    // ── Issue #308: unstake-fee-funded buyback & burn ───────────────────────
+    /// `execute_fee_buyback()`: `set_fee_buyback_enabled()` has not been
+    /// turned on.
+    FeeBuybackNotEnabled = 39,
+    /// `execute_fee_buyback()`: the reward token differs from the stake
+    /// token and no DEX router has been configured via `set_dex_router()`
+    /// (issue #205) to perform the swap.
+    NoDexRouterConfigured = 40,
+
+    // ── Issue #310: contract allowance delegation ───────────────────────────
+    /// `stake_via_contract()`: the calling contract has no active
+    /// `ContractDelegate` approval from `beneficiary` (never approved, or
+    /// revoked via `revoke_contract_delegate()`).
+    NotAContractDelegate = 41,
+    /// `stake_via_contract()`: `total_used + amount` would exceed the
+    /// delegate's `total_authorized` lifetime cap.
+    ContractDelegateCapExceeded = 42,
+    /// `stake_via_contract()`: `amount` exceeds the delegate's
+    /// `max_stake_per_call` limit.
+    ContractDelegatePerCallExceeded = 43,
 }
 
 

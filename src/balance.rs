@@ -1,10 +1,10 @@
 use crate::storage::{
     AccessTier, AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow,
-    DataKey, DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
-    InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig, Milestone, MultisigConfig,
-    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
-    RevenueShareMerkleRoot, RevenueSharingConfig, Season, StakePosition, SunsetState,
-    VestingEntry,
+    ContractDelegate, DataKey, DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt,
+    GovernanceProposal, InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig,
+    Milestone, MultisigConfig, OnboardingChecklist, PendingAction, PriceCondition,
+    PriorityBidRecord, RateHistoryEntry, ReferralStats, RevenueShareMerkleRoot,
+    RevenueSharingConfig, Season, StakePosition, SunsetState, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -2258,5 +2258,153 @@ pub fn set_lot_size(env: &Env, lot_size: i128) {
         .set(&Symbol::new(env, "lot_size"), &lot_size);
 }
 
+// ── Issue #308: unstake-fee-funded buyback & burn ────────────────────────────
 
+pub fn fee_buyback_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("fbb_enb"))
+        .unwrap_or(false)
+}
+
+pub fn set_fee_buyback_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("fbb_enb"), &enabled);
+}
+
+pub fn get_unstake_fee_reserve(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("fbb_rsv"))
+        .unwrap_or(0)
+}
+
+pub fn add_unstake_fee_reserve(env: &Env, amount: i128) {
+    let total = get_unstake_fee_reserve(env) + amount;
+    env.storage()
+        .instance()
+        .set(&symbol_short!("fbb_rsv"), &total);
+}
+
+pub fn set_unstake_fee_reserve(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("fbb_rsv"), &amount);
+}
+
+pub fn get_fees_burned(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("fbb_brn"))
+        .unwrap_or(0)
+}
+
+pub fn add_fees_burned(env: &Env, amount: i128) {
+    let total = get_fees_burned(env) + amount;
+    env.storage()
+        .instance()
+        .set(&symbol_short!("fbb_brn"), &total);
+}
+
+// ── Issue #309: staker onboarding checklist ──────────────────────────────────
+
+pub fn get_onboarding_checklist(env: &Env, user: &Address) -> OnboardingChecklist {
+    env.storage()
+        .persistent()
+        .get(&(Symbol::new(env, "onbchk"), user.clone()))
+        .unwrap_or(OnboardingChecklist {
+            has_staked: false,
+            has_claimed: false,
+            has_set_bio: false,
+            has_enabled_streaming: false,
+            has_set_auto_restake: false,
+            completed_at: None,
+        })
+}
+
+pub fn set_onboarding_checklist(env: &Env, user: &Address, checklist: &OnboardingChecklist) {
+    env.storage()
+        .persistent()
+        .set(&(Symbol::new(env, "onbchk"), user.clone()), checklist);
+}
+
+pub fn get_streaming_enabled(env: &Env, user: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&(Symbol::new(env, "strmenb"), user.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_streaming_enabled(env: &Env, user: &Address, enabled: bool) {
+    env.storage()
+        .persistent()
+        .set(&(Symbol::new(env, "strmenb"), user.clone()), &enabled);
+}
+
+// ── Issue #310: contract allowance delegation ────────────────────────────────
+
+pub fn get_contract_delegate(
+    env: &Env,
+    user: &Address,
+    contract: &Address,
+) -> Option<ContractDelegate> {
+    env.storage().persistent().get(&(
+        Symbol::new(env, "ctrdeleg"),
+        user.clone(),
+        contract.clone(),
+    ))
+}
+
+pub fn set_contract_delegate(
+    env: &Env,
+    user: &Address,
+    contract: &Address,
+    delegate: &ContractDelegate,
+) {
+    env.storage().persistent().set(
+        &(
+            Symbol::new(env, "ctrdeleg"),
+            user.clone(),
+            contract.clone(),
+        ),
+        delegate,
+    );
+}
+
+pub fn remove_contract_delegate(env: &Env, user: &Address, contract: &Address) {
+    env.storage().persistent().remove(&(
+        Symbol::new(env, "ctrdeleg"),
+        user.clone(),
+        contract.clone(),
+    ));
+}
+
+// ── Issue #311: TVL-based reward-rate smoothing ──────────────────────────────
+
+pub fn get_target_emission_per_ledger(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("tgt_emit"))
+        .unwrap_or(0)
+}
+
+pub fn set_target_emission_per_ledger(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("tgt_emit"), &amount);
+}
+
+pub fn is_tvl_smoothing_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("tvl_smth"))
+        .unwrap_or(false)
+}
+
+pub fn set_tvl_smoothing_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("tvl_smth"), &enabled);
+}
 
