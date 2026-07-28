@@ -18,7 +18,8 @@ use crate::{
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
         PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
         RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
-        RewardMultiplierBreakdown, RoundingPolicy, Season, SmoothingSchedule, SmoothingStatus,
+        RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
+        Season, SmoothingSchedule, SmoothingStatus,
         StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
         StakingEfficiencyScore, StorageUsageReport, SunsetState, TaxReport, Tournament,
         TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
@@ -5790,14 +5791,30 @@ impl VaultContract {
         Self::check_activation(env);
 
         if unstake_fee > 0 {
-            // Issue #197: if fee-split recipients are configured, pay them
-            // directly instead of crediting the reward treasury.
-            let recipients = balance::get_fee_recipients(env);
-            if recipients.is_empty() {
-                let reward_pool = balance::get_reward_pool_balance(env);
-                balance::set_reward_pool_balance(env, reward_pool + unstake_fee);
+            let rev_share_portion = if let Some(rev_cfg) = balance::get_revenue_sharing_config(env) {
+                if rev_cfg.share_bps > 0 {
+                    (unstake_fee * rev_cfg.share_bps as i128) / BOOST_BPS_BASE as i128
+                } else {
+                    0
+                }
             } else {
-                Self::distribute_fee(env, &token_addr, unstake_fee, &recipients);
+                0
+            };
+
+            let treasury_fee = unstake_fee - rev_share_portion;
+            if rev_share_portion > 0 {
+                let rev_pool = balance::get_revenue_share_pool(env);
+                balance::set_revenue_share_pool(env, rev_pool + rev_share_portion);
+            }
+
+            if treasury_fee > 0 {
+                let recipients = balance::get_fee_recipients(env);
+                if recipients.is_empty() {
+                    let reward_pool = balance::get_reward_pool_balance(env);
+                    balance::set_reward_pool_balance(env, reward_pool + treasury_fee);
+                } else {
+                    Self::distribute_fee(env, &token_addr, treasury_fee, &recipients);
+                }
             }
             balance::add_protocol_fee_collected(env, unstake_fee);
         }
@@ -10817,11 +10834,27 @@ impl VaultContract {
             .ok_or(VaultFeatureError::ArithmeticError)?
             / BOOST_BPS_BASE as i128;
         if fee > 0 {
-            let treasury = match balance::get_slash_treasury(&env) {
-                Some(treasury) => treasury,
-                None => admin::get_admin(&env)?,
+            let rev_share_portion = if let Some(rev_cfg) = balance::get_revenue_sharing_config(&env) {
+                if rev_cfg.share_bps > 0 {
+                    (fee * rev_cfg.share_bps as i128) / BOOST_BPS_BASE as i128
+                } else {
+                    0
+                }
+            } else {
+                0
             };
-            token_client.transfer(&contract, &treasury, &fee);
+            let treasury_fee = fee - rev_share_portion;
+            if rev_share_portion > 0 {
+                let rev_pool = balance::get_revenue_share_pool(&env);
+                balance::set_revenue_share_pool(&env, rev_pool + rev_share_portion);
+            }
+            if treasury_fee > 0 {
+                let treasury = match balance::get_slash_treasury(&env) {
+                    Some(treasury) => treasury,
+                    None => admin::get_admin(&env)?,
+                };
+                token_client.transfer(&contract, &treasury, &treasury_fee);
+            }
         }
         let returned = amount - fee;
         if returned > 0 {
@@ -11352,6 +11385,105 @@ impl VaultContract {
         balance::set_sunset_state(&env, SunsetState::Closed);
         let ledger = env.ledger().sequence();
         events::sunset_stage_changed(&env, SunsetState::Closed, ledger);
+        Ok(())
+    }
+
+    // ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────
+
+    pub fn set_revenue_sharing(
+        env: Env,
+        admin: Address,
+        governance_token: Address,
+        share_bps: u32,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if share_bps > BOOST_BPS_BASE {
+            return Err(VaultFeatureError::InvalidRevenueShareConfig);
+        }
+
+        let config = RevenueSharingConfig {
+            governance_token,
+            share_bps,
+        };
+        balance::set_revenue_sharing_config(&env, &config);
+        Ok(())
+    }
+
+    pub fn get_revenue_share_pool(env: Env) -> i128 {
+        balance::get_revenue_share_pool(&env)
+    }
+
+    pub fn get_revenue_sharing_config(env: Env) -> Option<RevenueSharingConfig> {
+        balance::get_revenue_sharing_config(&env)
+    }
+
+    pub fn distribute_revenue(
+        env: Env,
+        admin: Address,
+        merkle_root: soroban_sdk::Bytes,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let total_amount = balance::get_revenue_share_pool(&env);
+        if total_amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let epoch = balance::get_revenue_share_epoch(&env) + 1;
+        balance::set_revenue_share_epoch(&env, epoch);
+
+        let mr = RevenueShareMerkleRoot {
+            root: merkle_root.clone(),
+            epoch,
+            total_amount,
+        };
+        balance::set_revenue_share_merkle_root(&env, &mr);
+        events::revenue_distributed(&env, &merkle_root, total_amount, env.ledger().sequence());
+        Ok(())
+    }
+
+    pub fn claim_revenue_share(
+        env: Env,
+        user: Address,
+        amount: i128,
+        proof: Vec<soroban_sdk::BytesN<32>>,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let mr = balance::get_revenue_share_merkle_root(&env)
+            .ok_or(VaultFeatureError::RevenueShareInvalidProof)?;
+
+        if balance::is_revenue_share_claimed(&env, &user, mr.epoch) {
+            return Err(VaultFeatureError::RevenueShareAlreadyClaimed);
+        }
+
+        let leaf = Self::merkle_leaf_hash(&env, &user, amount);
+        let computed_root = Self::compute_merkle_root(&env, leaf, proof);
+        let computed_root_bytes: soroban_sdk::Bytes = computed_root.into();
+        if computed_root_bytes != mr.root {
+            return Err(VaultFeatureError::RevenueShareInvalidProof);
+        }
+
+        let pool = balance::get_revenue_share_pool(&env);
+        if pool < amount {
+            return Err(VaultFeatureError::InsufficientRewardPool);
+        }
+
+        balance::set_revenue_share_claimed(&env, &user, mr.epoch);
+        balance::set_revenue_share_pool(&env, pool - amount);
+
+        let reward_token = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &reward_token);
+        token_client.transfer(&env.current_contract_address(), &user, &amount);
+
+        events::revenue_share_claimed(&env, &user, amount, mr.epoch, env.ledger().sequence());
         Ok(())
     }
 }

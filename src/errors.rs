@@ -433,7 +433,16 @@ pub enum VaultFeatureError {
     /// `liquidate_loan()` when the borrower's LTV is still below
     /// `LIQUIDATION_LTV_BPS` (9 000).
     LoanNotLiquidatable = 22,
+
+    // ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────
+    /// `set_revenue_sharing()`: `share_bps` above 10 000.
+    InvalidRevenueShareConfig = 32,
+    /// `claim_revenue_share()`: invalid Merkle proof.
+    RevenueShareInvalidProof = 33,
+    /// `claim_revenue_share()`: user already claimed for this epoch.
+    RevenueShareAlreadyClaimed = 34,
 }
+
 
 impl From<VaultError> for VaultExtError {
     fn from(err: VaultError) -> Self {

@@ -1034,3 +1034,21 @@ pub enum SunsetState {
     ForceResolutionActive,
     Closed,
 }
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevenueSharingConfig {
+    pub governance_token: Address,
+    pub share_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevenueShareMerkleRoot {
+    pub root: soroban_sdk::Bytes,
+    pub epoch: u32,
+    pub total_amount: i128,
+}
+

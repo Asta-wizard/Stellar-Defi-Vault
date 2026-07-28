@@ -2,8 +2,9 @@ use crate::storage::{
     AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow, DataKey,
     DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
     InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig, Milestone, MultisigConfig,
-    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats, Season,
-    StakePosition, SunsetState, VestingEntry,
+    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
+    RevenueShareMerkleRoot, RevenueSharingConfig, Season, StakePosition, SunsetState,
+    VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -2048,3 +2049,56 @@ pub fn set_grace_period_end(env: &Env, ledger: u32) {
         .instance()
         .set(&symbol_short!("snst_gpe"), &ledger);
 }
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+pub fn get_revenue_sharing_config(env: &Env) -> Option<RevenueSharingConfig> {
+    env.storage().instance().get(&symbol_short!("rev_cfg"))
+}
+
+pub fn set_revenue_sharing_config(env: &Env, config: &RevenueSharingConfig) {
+    env.storage().instance().set(&symbol_short!("rev_cfg"), config);
+}
+
+pub fn get_revenue_share_pool(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rev_pool"))
+        .unwrap_or(0)
+}
+
+pub fn set_revenue_share_pool(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("rev_pool"), &amount);
+}
+
+pub fn get_revenue_share_epoch(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rev_ep"))
+        .unwrap_or(0)
+}
+
+pub fn set_revenue_share_epoch(env: &Env, epoch: u32) {
+    env.storage().instance().set(&symbol_short!("rev_ep"), &epoch);
+}
+
+pub fn get_revenue_share_merkle_root(env: &Env) -> Option<RevenueShareMerkleRoot> {
+    env.storage().instance().get(&symbol_short!("rev_mrk"))
+}
+
+pub fn set_revenue_share_merkle_root(env: &Env, root: &RevenueShareMerkleRoot) {
+    env.storage().instance().set(&symbol_short!("rev_mrk"), root);
+}
+
+pub fn is_revenue_share_claimed(env: &Env, user: &Address, epoch: u32) -> bool {
+    let key = (Symbol::new(env, "rev_clm"), user.clone(), epoch);
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_revenue_share_claimed(env: &Env, user: &Address, epoch: u32) {
+    let key = (Symbol::new(env, "rev_clm"), user.clone(), epoch);
+    env.storage().persistent().set(&key, &true);
+}
+

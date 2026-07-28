@@ -1103,3 +1103,152 @@ fn test_no_rewards_accrued_during_cooldown() {
     let claim_after = vault.claim(&alice);
     assert_eq!(claim_after, pending_before);
 }
+
+// ── Issue #281: Fee Revenue Sharing Tests ───────────────────────────────────
+
+#[test]
+fn test_revenue_sharing_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 1;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let gov_token = Address::generate(&env);
+    let (token_addr, token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Configure revenue sharing: 20% (2000 BPS) of collected fees go to RevenueSharePool
+    vault.set_revenue_sharing(&admin, &gov_token, &2000);
+    assert_eq!(vault.get_revenue_share_pool(), 0);
+
+    // Configure 5% unstake fee (500 BPS)
+    vault.set_unstake_fee_bps(&admin, &500);
+
+    // Stake 100_000 tokens for Alice
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    // Unstake 100_000: Unstake fee is 5% = 5,000.
+    // 20% of 5,000 = 1,000 goes to RevenueSharePool.
+    // 80% of 5,000 = 4,000 goes to reward pool.
+    vault.unstake(&alice, &100_000);
+
+    assert_eq!(vault.get_revenue_share_pool(), 1000);
+
+    fn compute_leaf(env: &Env, user: &Address, amount: i128) -> soroban_sdk::BytesN<32> {
+        let mut buf = soroban_sdk::Bytes::new(env);
+        let addr_str = user.to_string();
+        let len = addr_str.len();
+        let mut raw = [0u8; 56];
+        let slice = &mut raw[..len as usize];
+        addr_str.copy_into_slice(slice);
+        buf.extend_from_slice(slice);
+        buf.extend_from_slice(&amount.to_be_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    let alice_leaf = compute_leaf(&env, &alice, 1000);
+    let root_bytes: soroban_sdk::Bytes = alice_leaf.clone().into();
+
+    // Distribute revenue with Merkle root
+    vault.distribute_revenue(&admin, &root_bytes);
+
+    let alice_bal_before = token.balance(&alice);
+
+    // Alice claims revenue share with empty proof (single leaf tree)
+    let proof = Vec::new(&env);
+    vault.claim_revenue_share(&alice, &1000, &proof);
+
+    assert_eq!(token.balance(&alice), alice_bal_before + 1000);
+    assert_eq!(vault.get_revenue_share_pool(), 0);
+}
+
+#[test]
+fn test_revenue_sharing_invalid_proof_and_double_claim() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 1;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let gov_token = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Invalid config (share_bps > 10000) should fail
+    let res = vault.try_set_revenue_sharing(&admin, &gov_token, &10_001);
+    assert!(res.is_err());
+
+    // Configure 50% revenue sharing
+    vault.set_revenue_sharing(&admin, &gov_token, &5000);
+    vault.set_unstake_fee_bps(&admin, &500);
+
+    token_admin.mint(&alice, &200_000);
+    vault.stake(&alice, &200_000);
+    vault.unstake(&alice, &200_000); // 10,000 fee -> 5,000 to rev pool
+
+    assert_eq!(vault.get_revenue_share_pool(), 5000);
+
+    fn compute_leaf(env: &Env, user: &Address, amount: i128) -> soroban_sdk::BytesN<32> {
+        let mut buf = soroban_sdk::Bytes::new(env);
+        let addr_str = user.to_string();
+        let len = addr_str.len();
+        let mut raw = [0u8; 56];
+        let slice = &mut raw[..len as usize];
+        addr_str.copy_into_slice(slice);
+        buf.extend_from_slice(slice);
+        buf.extend_from_slice(&amount.to_be_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    fn compute_node(env: &Env, a: soroban_sdk::BytesN<32>, b: soroban_sdk::BytesN<32>) -> soroban_sdk::BytesN<32> {
+        let cur_arr: [u8; 32] = a.to_array();
+        let sib_arr: [u8; 32] = b.to_array();
+        let mut combined = soroban_sdk::Bytes::new(env);
+        if cur_arr[0] <= sib_arr[0] {
+            combined.extend_from_slice(&cur_arr);
+            combined.extend_from_slice(&sib_arr);
+        } else {
+            combined.extend_from_slice(&sib_arr);
+            combined.extend_from_slice(&cur_arr);
+        }
+        env.crypto().sha256(&combined).into()
+    }
+
+    let alice_leaf = compute_leaf(&env, &alice, 3000);
+    let bob_leaf = compute_leaf(&env, &bob, 2000);
+    let root_node = compute_node(&env, alice_leaf.clone(), bob_leaf.clone());
+    let root_bytes: soroban_sdk::Bytes = root_node.into();
+
+    vault.distribute_revenue(&admin, &root_bytes);
+
+    // Invalid proof for Alice
+    let mut bad_proof = Vec::new(&env);
+    bad_proof.push_back(alice_leaf.clone()); // wrong sibling
+    let res_bad = vault.try_claim_revenue_share(&alice, &3000, &bad_proof);
+    assert!(res_bad.is_err());
+
+    // Valid proof for Alice
+    let mut alice_proof = Vec::new(&env);
+    alice_proof.push_back(bob_leaf);
+    vault.claim_revenue_share(&alice, &3000, &alice_proof);
+
+    // Double claim should fail
+    let res_double = vault.try_claim_revenue_share(&alice, &3000, &alice_proof);
+    assert!(res_double.is_err());
+}
+

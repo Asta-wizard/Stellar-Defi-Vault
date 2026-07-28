@@ -1084,3 +1084,28 @@ pub fn force_resolved(
     env.events()
         .publish(topics, (principal, accrued_reward, ledger));
 }
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+pub fn revenue_distributed(
+    env: &Env,
+    merkle_root: &soroban_sdk::Bytes,
+    total_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rev_dist"),);
+    env.events()
+        .publish(topics, (merkle_root.clone(), total_amount, ledger));
+}
+
+pub fn revenue_share_claimed(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    epoch: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rev_clm"), user);
+    env.events().publish(topics, (amount, epoch, ledger));
+}
+
