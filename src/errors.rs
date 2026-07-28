@@ -434,52 +434,74 @@ pub enum VaultFeatureError {
     /// `LIQUIDATION_LTV_BPS` (9 000).
     LoanNotLiquidatable = 22,
 
+    // ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────
+    /// `set_revenue_sharing()`: `share_bps` above 10 000.
+    InvalidRevenueShareConfig = 32,
+    /// `claim_revenue_share()`: invalid Merkle proof.
+    RevenueShareInvalidProof = 33,
+    /// `claim_revenue_share()`: user already claimed for this epoch.
+    RevenueShareAlreadyClaimed = 34,
+
+    // ── Issue #282: Stake-Gated Access ───────────────────────────────────────
+    /// `set_access_tier()`: 5 access tiers are already configured.
+    TooManyAccessTiers = 35,
+    /// `claim_access_token()`: user does not qualify for any access tier.
+    IneligibleForAccessTier = 36,
+    /// `revoke_access_token()`: user still qualifies for their current tier.
+    UserStillEligible = 37,
+
+    // ── Issue #315: lot size normalization ──────────────────────────────────
+    /// `stake()`: amount is not a multiple of the configured lot size.
+    InvalidLotSize = 38,
+
     // ── Issue #286: debt NFT collateral ──────────────────────────────────
     /// `mint_debt_nft()`: user already has an outstanding debt NFT.
-    PositionCollateralized = 32,
+    PositionCollateralized = 39,
     /// `mint_debt_nft()`: face_value exceeds the user's staking position.
-    FaceValueExceedsPosition = 33,
+    FaceValueExceedsPosition = 40,
     /// `burn_debt_nft()` / `transfer_debt_nft()` / `get_debt_nft()`: NFT not found.
-    DebtNftNotFound = 34,
+    DebtNftNotFound = 41,
     /// `transfer_debt_nft()`: caller is not the current holder.
-    NotNftHolder = 35,
+    NotNftHolder = 42,
 
     // ── Issue #285: cross-pool yield detector ────────────────────────────
     /// `set_competitor_pools()`: more than 10 competitor addresses.
-    TooManyCompetitors = 36,
+    TooManyCompetitors = 43,
 
     // ── Issue #283: position AMM ──────────────────────────────────────────
     /// `create_swap_offer()`: caller already has 5 open offers.
-    TooManyOpenOffers = 37,
+    TooManyOpenOffers = 44,
     /// `accept_swap_offer()` / `cancel_swap_offer()`: offer id not found.
-    OfferNotFound = 38,
+    OfferNotFound = 45,
     /// `accept_swap_offer()`: offer has expired.
-    OfferExpired = 39,
+    OfferExpired = 46,
     /// `accept_swap_offer()`: caller is not the requested counterparty.
-    NotRequestedCounterparty = 40,
+    NotRequestedCounterparty = 47,
     /// `create_swap_offer()`: requested swap amount exceeds position size.
-    InsufficientAmount = 41,
+    InsufficientAmount = 48,
 
     // ── Issue #284: reward prediction market ──────────────────────────────
     /// `open_prediction_market()`: a market is already open.
-    MarketAlreadyOpen = 42,
+    MarketAlreadyOpen = 49,
     /// `place_bet()`: no market is currently open.
-    NoMarketOpen = 43,
+    NoMarketOpen = 50,
     /// `place_bet()`: betting window has closed.
-    BettingClosed = 44,
+    BettingClosed = 51,
     /// `resolve_market()`: target ledger has not been reached yet.
-    MarketNotReady = 45,
+    MarketNotReady = 52,
     /// `claim_prediction_winnings()`: market not yet resolved.
-    MarketNotResolved = 46,
+    MarketNotResolved = 53,
     /// `claim_prediction_winnings()`: user already claimed.
-    AlreadyClaimed = 47,
+    AlreadyClaimed = 54,
     /// `place_bet()`: caller is not an active staker.
-    NotActiveStaker = 48,
+    NotActiveStaker = 55,
 
     // ── Issue #284: used by open_prediction_market validation ──────────────
     /// `open_prediction_market()`: target_ledger in the past or closes_at >= target_ledger.
-    InvalidRate = 49,
+    InvalidRate = 56,
 }
+
+
 
 impl From<VaultError> for VaultExtError {
     fn from(err: VaultError) -> Self {

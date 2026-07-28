@@ -1103,3 +1103,415 @@ fn test_no_rewards_accrued_during_cooldown() {
     let claim_after = vault.claim(&alice);
     assert_eq!(claim_after, pending_before);
 }
+
+// ── Issue #281: Fee Revenue Sharing Tests ───────────────────────────────────
+
+#[test]
+fn test_revenue_sharing_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 1;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let gov_token = Address::generate(&env);
+    let (token_addr, token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Configure revenue sharing: 20% (2000 BPS) of collected fees go to RevenueSharePool
+    vault.set_revenue_sharing(&admin, &gov_token, &2000);
+    assert_eq!(vault.get_revenue_share_pool(), 0);
+
+    // Configure 5% unstake fee (500 BPS)
+    vault.set_unstake_fee_bps(&admin, &500);
+
+    // Stake 100_000 tokens for Alice
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    // Unstake 100_000: Unstake fee is 5% = 5,000.
+    // 20% of 5,000 = 1,000 goes to RevenueSharePool.
+    // 80% of 5,000 = 4,000 goes to reward pool.
+    vault.unstake(&alice, &100_000);
+
+    assert_eq!(vault.get_revenue_share_pool(), 1000);
+
+    fn compute_leaf(env: &Env, user: &Address, amount: i128) -> soroban_sdk::BytesN<32> {
+        let mut buf = soroban_sdk::Bytes::new(env);
+        let addr_str = user.to_string();
+        let len = addr_str.len();
+        let mut raw = [0u8; 56];
+        let slice = &mut raw[..len as usize];
+        addr_str.copy_into_slice(slice);
+        buf.extend_from_slice(slice);
+        buf.extend_from_slice(&amount.to_be_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    let alice_leaf = compute_leaf(&env, &alice, 1000);
+    let root_bytes: soroban_sdk::Bytes = alice_leaf.clone().into();
+
+    // Distribute revenue with Merkle root
+    vault.distribute_revenue(&admin, &root_bytes);
+
+    let alice_bal_before = token.balance(&alice);
+
+    // Alice claims revenue share with empty proof (single leaf tree)
+    let proof = Vec::new(&env);
+    vault.claim_revenue_share(&alice, &1000, &proof);
+
+    assert_eq!(token.balance(&alice), alice_bal_before + 1000);
+    assert_eq!(vault.get_revenue_share_pool(), 0);
+}
+
+#[test]
+fn test_revenue_sharing_invalid_proof_and_double_claim() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 1;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let gov_token = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Invalid config (share_bps > 10000) should fail
+    let res = vault.try_set_revenue_sharing(&admin, &gov_token, &10_001);
+    assert!(res.is_err());
+
+    // Configure 50% revenue sharing
+    vault.set_revenue_sharing(&admin, &gov_token, &5000);
+    vault.set_unstake_fee_bps(&admin, &500);
+
+    token_admin.mint(&alice, &200_000);
+    vault.stake(&alice, &200_000);
+    vault.unstake(&alice, &200_000); // 10,000 fee -> 5,000 to rev pool
+
+    assert_eq!(vault.get_revenue_share_pool(), 5000);
+
+    fn compute_leaf(env: &Env, user: &Address, amount: i128) -> soroban_sdk::BytesN<32> {
+        let mut buf = soroban_sdk::Bytes::new(env);
+        let addr_str = user.to_string();
+        let len = addr_str.len();
+        let mut raw = [0u8; 56];
+        let slice = &mut raw[..len as usize];
+        addr_str.copy_into_slice(slice);
+        buf.extend_from_slice(slice);
+        buf.extend_from_slice(&amount.to_be_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    fn compute_node(env: &Env, a: soroban_sdk::BytesN<32>, b: soroban_sdk::BytesN<32>) -> soroban_sdk::BytesN<32> {
+        let cur_arr: [u8; 32] = a.to_array();
+        let sib_arr: [u8; 32] = b.to_array();
+        let mut combined = soroban_sdk::Bytes::new(env);
+        if cur_arr[0] <= sib_arr[0] {
+            combined.extend_from_slice(&cur_arr);
+            combined.extend_from_slice(&sib_arr);
+        } else {
+            combined.extend_from_slice(&sib_arr);
+            combined.extend_from_slice(&cur_arr);
+        }
+        env.crypto().sha256(&combined).into()
+    }
+
+    let alice_leaf = compute_leaf(&env, &alice, 3000);
+    let bob_leaf = compute_leaf(&env, &bob, 2000);
+    let root_node = compute_node(&env, alice_leaf.clone(), bob_leaf.clone());
+    let root_bytes: soroban_sdk::Bytes = root_node.into();
+
+    vault.distribute_revenue(&admin, &root_bytes);
+
+    // Invalid proof for Alice
+    let mut bad_proof = Vec::new(&env);
+    bad_proof.push_back(alice_leaf.clone()); // wrong sibling
+    let res_bad = vault.try_claim_revenue_share(&alice, &3000, &bad_proof);
+    assert!(res_bad.is_err());
+
+    // Valid proof for Alice
+    let mut alice_proof = Vec::new(&env);
+    alice_proof.push_back(bob_leaf);
+    vault.claim_revenue_share(&alice, &3000, &alice_proof);
+
+    // Double claim should fail
+    let res_double = vault.try_claim_revenue_share(&alice, &3000, &alice_proof);
+    assert!(res_double.is_err());
+}
+
+// ── Issue #280: New Staker Reward Escrow Tests ──────────────────────────────
+
+#[test]
+fn test_new_staker_reward_escrow_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let (token_addr, token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Fund reward pool
+    token_admin.mint(&admin, &1_000_000);
+    vault.fund_reward_pool(&admin, &1_000_000);
+
+    // Default escrow period is 0 (disabled)
+    assert_eq!(vault.get_escrow_period(), 0);
+
+    // Configure escrow period of 100 ledgers
+    vault.set_escrow_period(&admin, &100);
+    assert_eq!(vault.get_escrow_period(), 100);
+
+    // Alice stakes at ledger 100 -> release ledger should be 200
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    assert_eq!(vault.get_escrow_release_ledger(&alice), Some(200));
+    assert_eq!(vault.get_escrow_balance(&alice), 0);
+
+    // Set reward rate
+    vault.set_reward_rate_bps(&1000);
+
+    // Advance to ledger 150 (during escrow period)
+    env.ledger().with_mut(|li| li.sequence_number = 150);
+
+    // Claim during escrow period -> returns 0, adds accrued rewards to EscrowBalance
+    let claim_during = vault.claim(&alice);
+    assert_eq!(claim_during, 0);
+    let escrow_bal = vault.get_escrow_balance(&alice);
+    assert!(escrow_bal > 0, "expected escrow balance to accumulate");
+
+    // Advance past escrow period to ledger 250
+    env.ledger().with_mut(|li| li.sequence_number = 250);
+
+    let alice_bal_before = token.balance(&alice);
+
+    // Claim after escrow period -> releases full escrow balance + current pending in one payment
+    let claim_after = vault.claim(&alice);
+    assert!(claim_after > escrow_bal, "expected payout to include escrow balance + new pending");
+    assert_eq!(token.balance(&alice), alice_bal_before + claim_after);
+    assert_eq!(vault.get_escrow_balance(&alice), 0);
+    assert_eq!(vault.get_escrow_release_ledger(&alice), None);
+}
+
+#[test]
+fn test_escrow_period_zero_disables_and_restaker_gets_new_escrow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    token_admin.mint(&admin, &1_000_000);
+    vault.fund_reward_pool(&admin, &1_000_000);
+
+    // 1. Escrow period 0 disables escrow for new stakers
+    vault.set_escrow_period(&admin, &0);
+    token_admin.mint(&bob, &50_000);
+    vault.stake(&bob, &50_000);
+    assert_eq!(vault.get_escrow_release_ledger(&bob), None);
+
+    // 2. Configure escrow period = 50 ledgers
+    vault.set_escrow_period(&admin, &50);
+
+    // Alice stakes at ledger 100
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+    assert_eq!(vault.get_escrow_release_ledger(&alice), Some(150));
+
+    vault.set_reward_rate_bps(&1000);
+    env.ledger().with_mut(|li| li.sequence_number = 120);
+
+    // Claim during escrow
+    vault.claim(&alice);
+    assert!(vault.get_escrow_balance(&alice) > 0);
+
+    // Full unstake clears position and escrow state
+    vault.unstake(&alice, &100_000);
+    assert_eq!(vault.get_escrow_balance(&alice), 0);
+    assert_eq!(vault.get_escrow_release_ledger(&alice), None);
+
+    // Re-staker after full exit gets a new escrow period starting at new stake ledger
+    env.ledger().with_mut(|li| li.sequence_number = 300);
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    // New release ledger is 300 + 50 = 350
+    assert_eq!(vault.get_escrow_release_ledger(&alice), Some(350));
+}
+
+// ── Issue #282: Stake-Gated Access Tests ────────────────────────────────────
+
+#[test]
+fn test_stake_gated_access_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 10;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Setup NFT contracts for access token tiers
+    let nft_id_1 = env.register_contract(None, StakeReceiptNFT);
+    let nft_client_1 = StakeReceiptNFTClient::new(&env, &nft_id_1);
+    nft_client_1.initialize(&vault_id);
+
+    let nft_id_2 = env.register_contract(None, StakeReceiptNFT);
+    let nft_client_2 = StakeReceiptNFTClient::new(&env, &nft_id_2);
+    nft_client_2.initialize(&vault_id);
+
+    // Tier 0: min 50_000 stake, min 10 duration ledgers -> nft_id_1
+    let tier_0 = AccessTier {
+        min_stake: 50_000,
+        min_duration_ledgers: 10,
+        access_token_contract: nft_id_1.clone(),
+    };
+    vault.set_access_tier(&admin, &tier_0);
+
+    // Tier 1: min 100_000 stake, min 20 duration ledgers -> nft_id_2
+    let tier_1 = AccessTier {
+        min_stake: 100_000,
+        min_duration_ledgers: 20,
+        access_token_contract: nft_id_2.clone(),
+    };
+    vault.set_access_tier(&admin, &tier_1);
+
+    // 1. Staker with 30_000 (below threshold) -> no eligibility
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &30_000);
+    assert_eq!(vault.check_access_eligibility(&alice), None);
+    assert!(vault.try_claim_access_token(&alice).is_err());
+
+    // 2. Stake up to 60_000, advance ledgers by 10
+    vault.stake(&alice, &30_000); // total 60_000
+    env.ledger().with_mut(|li| li.sequence_number = 25);
+
+    // Qualifies for Tier 0 (index 0)
+    assert_eq!(vault.check_access_eligibility(&alice), Some(0));
+
+    // Claim access token for Tier 0
+    let tier_idx = vault.claim_access_token(&alice);
+    assert_eq!(tier_idx, 0);
+    assert!(nft_client_1.has_receipt(&alice));
+
+    // 3. Stake up to 100_000 and advance ledgers to 35 -> qualifies for Tier 1 (highest tier wins)
+    vault.stake(&alice, &40_000); // total 100_000
+    env.ledger().with_mut(|li| li.sequence_number = 35);
+    assert_eq!(vault.check_access_eligibility(&alice), Some(1));
+
+    // Claim upgrade to Tier 1
+    let upgraded_idx = vault.claim_access_token(&alice);
+    assert_eq!(upgraded_idx, 1);
+    assert!(nft_client_2.has_receipt(&alice));
+    assert!(!nft_client_1.has_receipt(&alice)); // old token burned
+
+    // 4. Revoke fails when user is still eligible
+    let res_rev_early = vault.try_revoke_access_token(&alice);
+    assert!(res_rev_early.is_err());
+
+    // 5. Unstake 60_000 -> stake drops to 40_000 (below Tier 1 min 100_000 and Tier 0 min 50_000)
+    vault.unstake(&alice, &60_000);
+    assert_eq!(vault.check_access_eligibility(&alice), None);
+
+    // Revoke succeeds now that user no longer meets requirements
+    vault.revoke_access_token(&alice);
+    assert!(!nft_client_2.has_receipt(&alice));
+}
+
+// ── Issue #279: Reward Halving Schedule Integration Tests ───────────────────
+
+#[test]
+fn test_reward_halving_schedule_integration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 0;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // 1. Without halving config, base rate is used
+    vault.set_reward_rate_bps(&1000);
+    assert_eq!(vault.get_current_halving_count(), 0);
+    assert_eq!(vault.next_halving_at(), None);
+
+    // 2. Set halving schedule: interval = 100 ledgers, floor_rate_bps = 200
+    vault.set_halving_schedule(&admin, &100, &200);
+
+    let config = vault.get_halving_config().unwrap();
+    assert_eq!(config.interval_ledgers, 100);
+    assert_eq!(config.floor_rate_bps, 200);
+
+    // Next halving boundary is at ledger 100
+    assert_eq!(vault.next_halving_at(), Some(100));
+
+    // Stake at ledger 0
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    // Ledger 50: halving count is 0
+    env.ledger().with_mut(|li| li.sequence_number = 50);
+    assert_eq!(vault.get_current_halving_count(), 0);
+
+    // Ledger 150: 1 halving has occurred (count = 1). Base rate 1000 / 2^1 = 500
+    env.ledger().with_mut(|li| li.sequence_number = 150);
+    assert_eq!(vault.get_current_halving_count(), 1);
+    assert_eq!(vault.next_halving_at(), Some(200));
+
+    // Ledger 250: 2 halvings have occurred (count = 2). Base rate 1000 / 2^2 = 250
+    env.ledger().with_mut(|li| li.sequence_number = 250);
+    assert_eq!(vault.get_current_halving_count(), 2);
+
+    // Ledger 350: 3 halvings occurred. Base rate 1000 / 2^3 = 125, but floored at floor_rate_bps = 200!
+    env.ledger().with_mut(|li| li.sequence_number = 350);
+    assert_eq!(vault.get_current_halving_count(), 3);
+}
+
+
+
+

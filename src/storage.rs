@@ -1085,3 +1085,45 @@ pub struct YieldComparison {
     pub reachable: bool,
     pub is_higher: bool,
 }
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevenueSharingConfig {
+    pub governance_token: Address,
+    pub share_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevenueShareMerkleRoot {
+    pub root: soroban_sdk::Bytes,
+    pub epoch: u32,
+    pub total_amount: i128,
+}
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessTier {
+    pub min_stake: i128,
+    pub min_duration_ledgers: u32,
+    pub access_token_contract: Address,
+}
+
+// ── Issue #314: withdrawal receipt ───────────────────────────────────────────
+
+/// Immutable on-chain proof of an unstake operation (issue #314).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithdrawalReceipt {
+    pub receipt_id: u64,
+    pub user: Address,
+    pub amount_returned: i128,
+    pub rewards_claimed: i128,
+    pub unstaked_at: u32,
+    pub lock_penalty_paid: i128,
+}
+
+

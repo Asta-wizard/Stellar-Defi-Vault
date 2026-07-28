@@ -9,7 +9,7 @@ use crate::{
     events,
     nft::StakeReceiptNFTClient,
     storage::{
-        AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
+        AccessTier, AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
         BootstrapConfig, BrandingConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
         ContractAddresses, ContractMetadata, DataKey, DayBucket, DebtNFT, DelegationChain, DynamicFeeConfig,
         EpochState, FeeRecipient, FlashStakeReceipt, GovernanceProposal, HalvingConfig,
@@ -18,7 +18,8 @@ use crate::{
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
         PoolHealthReport, PoolStats, PredictionMarket, PriceCondition, PriorityBidRecord, ProposableParam,
         RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
-        RewardMultiplierBreakdown, RoundingPolicy, Season, SmoothingSchedule, SmoothingStatus,
+        RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
+        Season, SmoothingSchedule, SmoothingStatus,
         StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
         StakingEfficiencyScore, StorageUsageReport, SunsetState, SwapOffer, TaxReport, Tournament,
         TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
@@ -5521,6 +5522,12 @@ impl VaultContract {
             return Err(VaultError::ZeroAmount);
         }
 
+        // Issue #315: lot size normalization
+        let lot_size = balance::get_lot_size(env);
+        if lot_size > 1 && amount % lot_size != 0 {
+            return Err(VaultError::BelowMinimumStake);
+        }
+
         let token_addr = Self::token_address(env)?;
 
         let total_shares = balance::get_total_shares(env);
@@ -5586,6 +5593,11 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::StakedAtLedger(staker.clone()), &current_ledger);
+            let escrow_period = balance::get_escrow_period(env);
+            if escrow_period > 0 {
+                let release_ledger = current_ledger.saturating_add(escrow_period);
+                balance::set_escrow_release_ledger(env, staker, release_ledger);
+            }
             // Write-once: record the very first time this address ever staked.
             if !env
                 .storage()
@@ -5796,14 +5808,30 @@ impl VaultContract {
         Self::check_activation(env);
 
         if unstake_fee > 0 {
-            // Issue #197: if fee-split recipients are configured, pay them
-            // directly instead of crediting the reward treasury.
-            let recipients = balance::get_fee_recipients(env);
-            if recipients.is_empty() {
-                let reward_pool = balance::get_reward_pool_balance(env);
-                balance::set_reward_pool_balance(env, reward_pool + unstake_fee);
+            let rev_share_portion = if let Some(rev_cfg) = balance::get_revenue_sharing_config(env) {
+                if rev_cfg.share_bps > 0 {
+                    (unstake_fee * rev_cfg.share_bps as i128) / BOOST_BPS_BASE as i128
+                } else {
+                    0
+                }
             } else {
-                Self::distribute_fee(env, &token_addr, unstake_fee, &recipients);
+                0
+            };
+
+            let treasury_fee = unstake_fee - rev_share_portion;
+            if rev_share_portion > 0 {
+                let rev_pool = balance::get_revenue_share_pool(env);
+                balance::set_revenue_share_pool(env, rev_pool + rev_share_portion);
+            }
+
+            if treasury_fee > 0 {
+                let recipients = balance::get_fee_recipients(env);
+                if recipients.is_empty() {
+                    let reward_pool = balance::get_reward_pool_balance(env);
+                    balance::set_reward_pool_balance(env, reward_pool + treasury_fee);
+                } else {
+                    Self::distribute_fee(env, &token_addr, treasury_fee, &recipients);
+                }
             }
             balance::add_protocol_fee_collected(env, unstake_fee);
         }
@@ -5812,6 +5840,8 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .remove(&DataKey::StakedAtLedger(staker.clone()));
+            balance::remove_escrow_release_ledger(env, staker);
+            balance::remove_escrow_balance(env, staker);
             // Issue #41: record the ledger of this full unstake and clear restaked flag
             balance::set_last_unstake_ledger(env, staker, current_ledger);
             balance::remove_restaked(env, staker);
@@ -5857,6 +5887,11 @@ impl VaultContract {
         // Issue #245: cohort bookkeeping — the gross position reduction, and
         // one fewer active member when the position is fully closed.
         Self::cohort_record_unstake(env, staker, amount, new_user_shares == 0);
+
+        // Issue #314: mint withdrawal receipt for tax/accounting
+        let penalty_paid = amount - amount_after_penalty;
+        let rewards_claimed = balance::get_accrued_reward(env, staker);
+        Self::mint_withdrawal_receipt(env, staker, amount_returned, rewards_claimed, penalty_paid);
 
         Ok(amount_returned)
     }
@@ -6180,6 +6215,12 @@ impl VaultContract {
             total_dust = total_dust
                 .checked_add(segment_dust)
                 .ok_or(VaultError::ArithmeticError)?;
+
+            if seg_end == next_halving_boundary && next_halving_boundary < end_ledger {
+                let h_count = balance::halving_count_at(env, seg_end);
+                let eff_rate = balance::halving_adjusted_rate(env, base_rate, seg_end);
+                events::halving_occurred(env, h_count, eff_rate, seg_end);
+            }
 
             // Advance tier multiplier when we land exactly on a tier boundary
             if seg_end == next_tier_boundary && tier_index < schedule.len() {
@@ -6798,6 +6839,10 @@ impl VaultContract {
         // Issue #235: crank the smoothing schedule before accruing, so this
         // claim picks up everything that has vested up to now.
         Self::settle_smoothing(env);
+
+        // Issue #313: check and pay anniversary bonus before accruing rewards.
+        let _ = Self::do_check_anniversary(env, staker);
+
         let current_shares = balance::get_shares(env, staker);
         Self::accrue_rewards(env, staker, current_shares)?;
 
@@ -6844,6 +6889,58 @@ impl VaultContract {
         // pool below.
         let (user_reward, loan_repayment) = Self::apply_reward_to_loan(env, staker, user_reward)?;
 
+        let current_ledger = env.ledger().sequence();
+        let in_escrow = if let Some(release_ledger) = balance::get_escrow_release_ledger(env, staker) {
+            current_ledger < release_ledger
+        } else {
+            false
+        };
+
+        if in_escrow {
+            let current_escrow = balance::get_escrow_balance(env, staker);
+            balance::set_escrow_balance(env, staker, current_escrow + user_reward);
+
+            balance::set_reward_pool_balance(env, reward_pool - reward + loan_repayment);
+            let total_ever_claimed: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalEverClaimed)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalEverClaimed, &(total_ever_claimed + reward));
+            let remaining_accrued = accrued
+                .checked_sub(reward)
+                .ok_or(VaultError::ArithmeticError)?;
+            balance::set_accrued_reward(env, staker, remaining_accrued);
+            balance::set_last_claim_ledger(env, staker, current_ledger);
+
+            let paid = balance::get_total_rewards_paid(env);
+            balance::set_total_rewards_paid(env, paid + reward);
+            balance::increment_user_claim_count(env, staker);
+            balance::add_user_total_claimed(env, staker, reward);
+
+            let mut claim_history = balance::get_claim_history(env, staker);
+            if claim_history.len() >= balance::MAX_CLAIM_HISTORY {
+                claim_history.pop_front();
+            }
+            claim_history.push_back((current_ledger, reward));
+            balance::set_claim_history(env, staker, &claim_history);
+
+            events::claimed(env, staker, reward, current_ledger);
+            return Ok(0);
+        }
+
+        let escrowed_amount = balance::get_escrow_balance(env, staker);
+        let payout = user_reward + escrowed_amount;
+        if escrowed_amount > 0 {
+            balance::set_escrow_balance(env, staker, 0);
+            events::escrow_released(env, staker, escrowed_amount, current_ledger);
+        }
+        if balance::get_escrow_release_ledger(env, staker).is_some() {
+            balance::remove_escrow_release_ledger(env, staker);
+        }
+
         let token_addr = Self::token_address(env)?;
 
         let vesting_period: u32 = env
@@ -6861,19 +6958,19 @@ impl VaultContract {
             if entries.len() >= 10 {
                 return Err(VaultError::VestingQueueFull);
             }
-            let claimable_at_ledger = env.ledger().sequence().saturating_add(vesting_period);
+            let claimable_at_ledger = current_ledger.saturating_add(vesting_period);
             entries.push_back(VestingEntry {
-                amount: user_reward,
+                amount: payout,
                 claimable_at_ledger,
             });
             env.storage()
                 .persistent()
                 .set(&DataKey::VestingEntries(staker.clone()), &entries);
-        } else if !Self::try_reinvest_reward(env, staker, &token_addr, user_reward)?
-            && !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)?
+        } else if !Self::try_reinvest_reward(env, staker, &token_addr, payout)?
+            && !Self::try_auto_convert_reward(env, staker, &token_addr, payout)?
         {
             let token_client = token::Client::new(env, &token_addr);
-            token_client.transfer(&env.current_contract_address(), staker, &user_reward);
+            token_client.transfer(&env.current_contract_address(), staker, &payout);
         }
 
         balance::set_reward_pool_balance(env, reward_pool - reward + loan_repayment);
@@ -10823,11 +10920,27 @@ impl VaultContract {
             .ok_or(VaultFeatureError::ArithmeticError)?
             / BOOST_BPS_BASE as i128;
         if fee > 0 {
-            let treasury = match balance::get_slash_treasury(&env) {
-                Some(treasury) => treasury,
-                None => admin::get_admin(&env)?,
+            let rev_share_portion = if let Some(rev_cfg) = balance::get_revenue_sharing_config(&env) {
+                if rev_cfg.share_bps > 0 {
+                    (fee * rev_cfg.share_bps as i128) / BOOST_BPS_BASE as i128
+                } else {
+                    0
+                }
+            } else {
+                0
             };
-            token_client.transfer(&contract, &treasury, &fee);
+            let treasury_fee = fee - rev_share_portion;
+            if rev_share_portion > 0 {
+                let rev_pool = balance::get_revenue_share_pool(&env);
+                balance::set_revenue_share_pool(&env, rev_pool + rev_share_portion);
+            }
+            if treasury_fee > 0 {
+                let treasury = match balance::get_slash_treasury(&env) {
+                    Some(treasury) => treasury,
+                    None => admin::get_admin(&env)?,
+                };
+                token_client.transfer(&contract, &treasury, &treasury_fee);
+            }
         }
         let returned = amount - fee;
         if returned > 0 {
@@ -11359,6 +11472,489 @@ impl VaultContract {
         let ledger = env.ledger().sequence();
         events::sunset_stage_changed(&env, SunsetState::Closed, ledger);
         Ok(())
+    }
+
+    // ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────
+
+    pub fn set_revenue_sharing(
+        env: Env,
+        admin: Address,
+        governance_token: Address,
+        share_bps: u32,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if share_bps > BOOST_BPS_BASE {
+            return Err(VaultFeatureError::InvalidRevenueShareConfig);
+        }
+
+        let config = RevenueSharingConfig {
+            governance_token,
+            share_bps,
+        };
+        balance::set_revenue_sharing_config(&env, &config);
+        Ok(())
+    }
+
+    pub fn get_revenue_share_pool(env: Env) -> i128 {
+        balance::get_revenue_share_pool(&env)
+    }
+
+    pub fn get_revenue_sharing_config(env: Env) -> Option<RevenueSharingConfig> {
+        balance::get_revenue_sharing_config(&env)
+    }
+
+    pub fn distribute_revenue(
+        env: Env,
+        admin: Address,
+        merkle_root: soroban_sdk::Bytes,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let total_amount = balance::get_revenue_share_pool(&env);
+        if total_amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let epoch = balance::get_revenue_share_epoch(&env) + 1;
+        balance::set_revenue_share_epoch(&env, epoch);
+
+        let mr = RevenueShareMerkleRoot {
+            root: merkle_root.clone(),
+            epoch,
+            total_amount,
+        };
+        balance::set_revenue_share_merkle_root(&env, &mr);
+        events::revenue_distributed(&env, &merkle_root, total_amount, env.ledger().sequence());
+        Ok(())
+    }
+
+    pub fn claim_revenue_share(
+        env: Env,
+        user: Address,
+        amount: i128,
+        proof: Vec<soroban_sdk::BytesN<32>>,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let mr = balance::get_revenue_share_merkle_root(&env)
+            .ok_or(VaultFeatureError::RevenueShareInvalidProof)?;
+
+        if balance::is_revenue_share_claimed(&env, &user, mr.epoch) {
+            return Err(VaultFeatureError::RevenueShareAlreadyClaimed);
+        }
+
+        let leaf = Self::merkle_leaf_hash(&env, &user, amount);
+        let computed_root = Self::compute_merkle_root(&env, leaf, proof);
+        let computed_root_bytes: soroban_sdk::Bytes = computed_root.into();
+        if computed_root_bytes != mr.root {
+            return Err(VaultFeatureError::RevenueShareInvalidProof);
+        }
+
+        let pool = balance::get_revenue_share_pool(&env);
+        if pool < amount {
+            return Err(VaultFeatureError::InsufficientRewardPool);
+        }
+
+        balance::set_revenue_share_claimed(&env, &user, mr.epoch);
+        balance::set_revenue_share_pool(&env, pool - amount);
+
+        let reward_token = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &reward_token);
+        token_client.transfer(&env.current_contract_address(), &user, &amount);
+
+        events::revenue_share_claimed(&env, &user, amount, mr.epoch, env.ledger().sequence());
+        Ok(())
+    }
+
+    // ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+    pub fn set_escrow_period(env: Env, admin: Address, ledgers: u32) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        balance::set_escrow_period(&env, ledgers);
+        Ok(())
+    }
+
+    pub fn get_escrow_period(env: Env) -> u32 {
+        balance::get_escrow_period(&env)
+    }
+
+    pub fn get_escrow_balance(env: Env, user: Address) -> i128 {
+        balance::get_escrow_balance(&env, &user)
+    }
+
+    pub fn get_escrow_release_ledger(env: Env, user: Address) -> Option<u32> {
+        balance::get_escrow_release_ledger(&env, &user)
+    }
+
+    // ── Issue #282: Stake-Gated Access ───────────────────────────────────────
+
+    pub fn set_access_tier(
+        env: Env,
+        admin: Address,
+        tier: AccessTier,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        let mut tiers = balance::get_access_tiers(&env);
+        if tiers.len() >= 5 {
+            return Err(VaultFeatureError::TooManyAccessTiers);
+        }
+        tiers.push_back(tier);
+        balance::set_access_tiers(&env, &tiers);
+        Ok(())
+    }
+
+    pub fn get_access_tiers(env: Env) -> Vec<AccessTier> {
+        balance::get_access_tiers(&env)
+    }
+
+    pub fn check_access_eligibility(env: Env, user: Address) -> Option<u32> {
+        let user_shares = balance::get_shares(&env, &user);
+        if user_shares <= 0 {
+            return None;
+        }
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let user_stake = balance::shares_to_amount(total_shares, total_deposited, user_shares).unwrap_or(0);
+
+        let staked_at_ledger = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        let duration = env.ledger().sequence().saturating_sub(staked_at_ledger);
+
+        let tiers = balance::get_access_tiers(&env);
+        let mut best_tier_index: Option<u32> = None;
+        let mut max_req_stake: i128 = -1;
+
+        for i in 0..tiers.len() {
+            let t = tiers.get(i).unwrap();
+            if user_stake >= t.min_stake && duration >= t.min_duration_ledgers {
+                if t.min_stake > max_req_stake {
+                    max_req_stake = t.min_stake;
+                    best_tier_index = Some(i as u32);
+                } else if best_tier_index.is_none() {
+                    best_tier_index = Some(i as u32);
+                }
+            }
+        }
+        best_tier_index
+    }
+
+    pub fn claim_access_token(env: Env, user: Address) -> Result<u32, VaultFeatureError> {
+        user.require_auth();
+
+        let eligible_index = Self::check_access_eligibility(env.clone(), user.clone())
+            .ok_or(VaultFeatureError::IneligibleForAccessTier)?;
+
+        let tiers = balance::get_access_tiers(&env);
+        let eligible_tier = tiers.get(eligible_index).unwrap();
+
+        if let Some(current_index) = balance::get_user_access_tier(&env, &user) {
+            if current_index == eligible_index {
+                return Ok(eligible_index);
+            }
+            // User upgrading or changing tier: revoke old token first
+            if let Some(old_tier) = tiers.get(current_index) {
+                let old_nft_client = StakeReceiptNFTClient::new(&env, &old_tier.access_token_contract);
+                old_nft_client.burn(&user);
+                events::access_token_revoked(
+                    &env,
+                    &user,
+                    current_index,
+                    Symbol::new(&env, "upgrade"),
+                    env.ledger().sequence(),
+                );
+            }
+        }
+
+        // Mint new access token
+        let nft_client = StakeReceiptNFTClient::new(&env, &eligible_tier.access_token_contract);
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let user_stake = balance::shares_to_amount(total_shares, total_deposited, user_shares).unwrap_or(0);
+
+        let staked_at_ledger = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+
+        nft_client.mint(
+            &user,
+            &env.current_contract_address(),
+            &user_stake,
+            &staked_at_ledger,
+        );
+
+        balance::set_user_access_tier(&env, &user, eligible_index);
+        events::access_token_issued(&env, &user, eligible_index, env.ledger().sequence());
+        Ok(eligible_index)
+    }
+
+    pub fn revoke_access_token(env: Env, user: Address) -> Result<(), VaultFeatureError> {
+        let current_index = balance::get_user_access_tier(&env, &user)
+            .ok_or(VaultFeatureError::IneligibleForAccessTier)?;
+
+        let eligible_index = Self::check_access_eligibility(env.clone(), user.clone());
+        if let Some(elig) = eligible_index {
+            if elig >= current_index {
+                return Err(VaultFeatureError::UserStillEligible);
+            }
+        }
+
+        let tiers = balance::get_access_tiers(&env);
+        if let Some(current_tier) = tiers.get(current_index) {
+            let nft_client = StakeReceiptNFTClient::new(&env, &current_tier.access_token_contract);
+            nft_client.burn(&user);
+        }
+
+        balance::remove_user_access_tier(&env, &user);
+        events::access_token_revoked(
+            &env,
+            &user,
+            current_index,
+            Symbol::new(&env, "ineligible"),
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
+    // ── Issue #312: gift staking position ────────────────────────────────────
+
+    /// Fund a new staking position for another address as a gift.
+    /// Tokens come from `sender`; the position is credited to `recipient`.
+    /// Reverts if recipient already has an active position.
+    pub fn gift_stake(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        amount: i128,
+    ) -> Result<i128, VaultError> {
+        sender.require_auth();
+        Self::require_not_stopped(&env)?;
+        Self::require_not_shutting_down(&env)?;
+        Self::require_not_sunsetting(&env)?;
+        Self::require_not_paused(&env)?;
+
+        if amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        // Recipient must not already have an active position.
+        let recipient_shares = balance::get_shares(&env, &recipient);
+        if recipient_shares > 0 {
+            return Err(VaultError::RecipientAlreadyStaking);
+        }
+
+        // Transfer tokens from sender to contract.
+        let token_addr = Self::token_address(&env)?;
+        soroban_sdk::token::Client::new(&env, &token_addr).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        // Create position for recipient.
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let shares =
+            balance::amount_to_shares(total_shares, total_deposited, amount)
+                .ok_or(VaultError::ArithmeticError)?;
+
+        balance::set_shares(&env, &recipient, shares);
+        balance::set_staked_at_ledger(&env, &recipient, env.ledger().sequence());
+        balance::set_last_claim_ledger(&env, &recipient, env.ledger().sequence());
+        balance::set_total_shares(&env, total_shares + shares);
+        balance::set_total_deposited(&env, total_deposited + amount);
+
+        // Increment staker count.
+        let total_stakers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalStakers)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalStakers, &(total_stakers + 1));
+
+        events::gift_staked(&env, &sender, &recipient, amount, env.ledger().sequence());
+        events::position_opened(&env, &recipient, amount);
+
+        Ok(shares)
+    }
+
+    // ── Issue #313: anniversary bonus ────────────────────────────────────────
+
+    /// Admin sets the anniversary bonus as basis points of staked amount.
+    /// e.g. 500 = 5%. Set to 0 to disable.
+    pub fn set_anniversary_bonus_bps(env: Env, admin: Address, bps: u32) -> Result<(), VaultError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        balance::set_anniversary_bonus_bps(&env, bps);
+        Ok(())
+    }
+
+    /// Read-only query for the current anniversary bonus bps.
+    pub fn get_anniversary_bonus_bps(env: Env) -> u32 {
+        balance::get_anniversary_bonus_bps(&env)
+    }
+
+    /// Check if a user has an anniversary due and pay the bonus.
+    /// Callable by anyone. Also called automatically inside `claim`.
+    pub fn check_anniversary(env: Env, user: Address) -> Result<i128, VaultFeatureError> {
+        Self::do_check_anniversary(&env, &user)
+    }
+
+    fn do_check_anniversary(env: &Env, user: &Address) -> Result<i128, VaultFeatureError> {
+        let bonus_bps = balance::get_anniversary_bonus_bps(env);
+        if bonus_bps == 0 {
+            return Ok(0);
+        }
+
+        let staked_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        if staked_at == 0 {
+            return Ok(0);
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let elapsed = current_ledger.saturating_sub(staked_at);
+        let anniversary_number = elapsed / STELLAR_LEDGERS_PER_YEAR;
+        if anniversary_number == 0 {
+            return Ok(0);
+        }
+
+        let mut paid = balance::get_anniversaries_paid(env, user);
+        // Check if this anniversary was already paid.
+        for i in 0..paid.len() {
+            if paid.get(i).unwrap() == anniversary_number {
+                return Ok(0);
+            }
+        }
+
+        // Calculate bonus: position_amount * bonus_bps / 10000
+        let shares = balance::get_shares(env, user);
+        let total_shares = balance::get_total_shares(env);
+        let total_deposited = balance::get_total_deposited(env);
+        if shares == 0 || total_shares == 0 {
+            return Ok(0);
+        }
+        let position_amount = (shares * total_deposited) / total_shares;
+        let bonus = (position_amount * bonus_bps as i128) / 10_000;
+        if bonus <= 0 {
+            return Ok(0);
+        }
+
+        // Pay bonus from reward pool.
+        let reward_balance = balance::get_reward_pool_balance(env);
+        if reward_balance < bonus {
+            return Err(VaultFeatureError::InsufficientRewardPool);
+        }
+        balance::set_reward_pool_balance(env, reward_balance - bonus);
+
+        // Add bonus to user's accrued reward.
+        let accrued = balance::get_accrued_reward(env, user);
+        balance::set_accrued_reward(env, user, accrued + bonus);
+
+        // Record this anniversary as paid.
+        paid.push_back(anniversary_number);
+        balance::set_anniversaries_paid(env, user, &paid);
+
+        events::anniversary_bonus_paid(env, user, anniversary_number, bonus, env.ledger().sequence());
+
+        Ok(bonus)
+    }
+
+    // ── Issue #314: withdrawal receipt NFT ───────────────────────────────────
+
+    /// Read-only query: get a withdrawal receipt by ID.
+    pub fn get_withdrawal_receipt(
+        env: Env,
+        receipt_id: u64,
+    ) -> Option<crate::storage::WithdrawalReceipt> {
+        balance::get_withdrawal_receipt(&env, receipt_id)
+    }
+
+    /// Read-only query: get all receipt IDs for a user (max 50).
+    pub fn get_user_withdrawal_receipts(env: Env, user: Address) -> Vec<u64> {
+        balance::get_user_receipt_ids(&env, &user)
+    }
+
+    fn mint_withdrawal_receipt(
+        env: &Env,
+        user: &Address,
+        amount_returned: i128,
+        rewards_claimed: i128,
+        lock_penalty_paid: i128,
+    ) -> u64 {
+        let counter = balance::get_withdrawal_receipt_counter(env);
+        let receipt_id = counter + 1;
+        balance::set_withdrawal_receipt_counter(env, receipt_id);
+
+        let receipt = crate::storage::WithdrawalReceipt {
+            receipt_id,
+            user: user.clone(),
+            amount_returned,
+            rewards_claimed,
+            unstaked_at: env.ledger().sequence(),
+            lock_penalty_paid,
+        };
+        balance::set_withdrawal_receipt(env, &receipt);
+
+        // Append to user's receipt list (cap at 50).
+        let mut user_ids = balance::get_user_receipt_ids(env, user);
+        if user_ids.len() < 50 {
+            user_ids.push_back(receipt_id);
+            balance::set_user_receipt_ids(env, user, &user_ids);
+        }
+
+        events::withdrawal_receipt_minted(env, user, receipt_id, amount_returned, env.ledger().sequence());
+
+        receipt_id
+    }
+
+    // ── Issue #315: lot size normalization ───────────────────────────────────
+
+    /// Admin sets the lot size. 0 or 1 disables normalization.
+    pub fn set_lot_size(env: Env, admin: Address, lot_size: i128) -> Result<(), VaultError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if lot_size < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        balance::set_lot_size(&env, lot_size);
+        Ok(())
+    }
+
+    /// Read-only query for the current lot size.
+    pub fn get_lot_size(env: Env) -> i128 {
+        balance::get_lot_size(&env)
+    }
+
+    /// Helper: round down to nearest valid lot multiple. Read-only, does not modify state.
+    pub fn get_nearest_valid_amount(env: Env, amount: i128) -> i128 {
+        let lot_size = balance::get_lot_size(&env);
+        if lot_size <= 1 || amount <= 0 {
+            return amount;
+        }
+        (amount / lot_size) * lot_size
     }
 
     // ── Issue #286: debt NFT collateral ──────────────────────────────────────

@@ -1164,3 +1164,89 @@ pub fn higher_yield_detected(
     env.events()
         .publish(topics, (their_rate, our_rate, ledger));
 }
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+pub fn revenue_distributed(
+    env: &Env,
+    merkle_root: &soroban_sdk::Bytes,
+    total_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rev_dist"),);
+    env.events()
+        .publish(topics, (merkle_root.clone(), total_amount, ledger));
+}
+
+pub fn revenue_share_claimed(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    epoch: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("rev_clm"), user);
+    env.events().publish(topics, (amount, epoch, ledger));
+}
+
+// ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+pub fn escrow_released(env: &Env, user: &Address, escrowed_amount: i128, ledger: u32) {
+    let topics = (symbol_short!("esc_rel"), user);
+    env.events()
+        .publish(topics, (user.clone(), escrowed_amount, ledger));
+}
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+pub fn access_token_issued(env: &Env, user: &Address, tier_index: u32, ledger: u32) {
+    let topics = (symbol_short!("acc_iss"), user);
+    env.events().publish(topics, (tier_index, ledger));
+}
+
+pub fn access_token_revoked(
+    env: &Env,
+    user: &Address,
+    tier_index: u32,
+    reason: Symbol,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("acc_rev"), user);
+    env.events().publish(topics, (tier_index, reason, ledger));
+}
+
+// ── Issue #312: gift staking position ────────────────────────────────────────
+
+pub fn gift_staked(env: &Env, sender: &Address, recipient: &Address, amount: i128, ledger: u32) {
+    let topics = (symbol_short!("gift_stk"), sender);
+    env.events()
+        .publish(topics, (recipient.clone(), amount, ledger));
+}
+
+// ── Issue #313: anniversary bonus ────────────────────────────────────────────
+
+pub fn anniversary_bonus_paid(
+    env: &Env,
+    user: &Address,
+    anniversary_number: u32,
+    bonus_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("anniv_bp"), user);
+    env.events()
+        .publish(topics, (anniversary_number, bonus_amount, ledger));
+}
+
+// ── Issue #314: withdrawal receipt NFT ───────────────────────────────────────
+
+pub fn withdrawal_receipt_minted(
+    env: &Env,
+    user: &Address,
+    receipt_id: u64,
+    amount_returned: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("wd_rcpt"), user);
+    env.events()
+        .publish(topics, (receipt_id, amount_returned, ledger));
+}
+
