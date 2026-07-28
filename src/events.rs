@@ -1135,5 +1135,39 @@ pub fn access_token_revoked(
     env.events().publish(topics, (tier_index, reason, ledger));
 }
 
+// ── Issue #312: gift staking position ────────────────────────────────────────
 
+pub fn gift_staked(env: &Env, sender: &Address, recipient: &Address, amount: i128, ledger: u32) {
+    let topics = (symbol_short!("gift_stk"), sender);
+    env.events()
+        .publish(topics, (recipient.clone(), amount, ledger));
+}
+
+// ── Issue #313: anniversary bonus ────────────────────────────────────────────
+
+pub fn anniversary_bonus_paid(
+    env: &Env,
+    user: &Address,
+    anniversary_number: u32,
+    bonus_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("anniv_bp"), user);
+    env.events()
+        .publish(topics, (anniversary_number, bonus_amount, ledger));
+}
+
+// ── Issue #314: withdrawal receipt NFT ───────────────────────────────────────
+
+pub fn withdrawal_receipt_minted(
+    env: &Env,
+    user: &Address,
+    receipt_id: u64,
+    amount_returned: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("wd_rcpt"), user);
+    env.events()
+        .publish(topics, (receipt_id, amount_returned, ledger));
+}
 

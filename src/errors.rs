@@ -449,6 +449,10 @@ pub enum VaultFeatureError {
     IneligibleForAccessTier = 36,
     /// `revoke_access_token()`: user still qualifies for their current tier.
     UserStillEligible = 37,
+
+    // ── Issue #315: lot size normalization ──────────────────────────────────
+    /// `stake()`: amount is not a multiple of the configured lot size.
+    InvalidLotSize = 38,
 }
 
 

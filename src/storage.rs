@@ -1062,4 +1062,18 @@ pub struct AccessTier {
     pub access_token_contract: Address,
 }
 
+// ── Issue #314: withdrawal receipt ───────────────────────────────────────────
+
+/// Immutable on-chain proof of an unstake operation (issue #314).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithdrawalReceipt {
+    pub receipt_id: u64,
+    pub user: Address,
+    pub amount_returned: i128,
+    pub rewards_claimed: i128,
+    pub unstaked_at: u32,
+    pub lock_penalty_paid: i128,
+}
+
 
