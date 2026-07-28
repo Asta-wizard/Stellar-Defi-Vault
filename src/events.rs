@@ -971,3 +971,15 @@ pub fn precision_changed(env: &Env, admin: &Address, old_precision: u32, new_pre
     let topics = (symbol_short!("prec_chg"), admin);
     env.events().publish(topics, (old_precision, new_precision, ledger));
 }
+
+// ── Price Floor Protection ──────────────────────────────────────────────────
+
+pub fn rewards_halted(env: &Env, oracle_price: i128, floor_price: i128, ledger: u32) {
+    let topics = (symbol_short!("pr_halt"),);
+    env.events().publish(topics, (oracle_price, floor_price, ledger));
+}
+
+pub fn rewards_resumed(env: &Env, oracle_price: i128, floor_price: i128, ledger: u32) {
+    let topics = (symbol_short!("pr_resume"),);
+    env.events().publish(topics, (oracle_price, floor_price, ledger));
+}

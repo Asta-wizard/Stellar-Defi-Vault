@@ -20,7 +20,7 @@ use crate::{
         RewardMultiplierBreakdown, RoundingPolicy, SmoothingSchedule, SmoothingStatus, StakeAction,
         StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
         StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
-        UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        UnstakeCheckResult, UserStats, UserSummary, VestingEntry, PriceFloorConfig, HaltedInterval,
     },
 };
 
@@ -47,6 +47,12 @@ pub trait DexRouterInterface {
         min_amount_out: i128,
         to: Address,
     ) -> i128;
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "OracleClient")]
+pub trait Oracle {
+    fn lastprice(env: Env, asset_id: soroban_sdk::String) -> i128;
 }
 
 /// Maximum number of stake/unstake history entries kept per user (issue #105).
@@ -711,6 +717,9 @@ impl VaultContract {
     /// result is normalized to the reward token's precision before returning.
     pub fn calc_pending_reward(env: Env, user: Address) -> Result<i128, VaultError> {
         let _ = admin::get_admin(&env)?;
+        if storage::Storage::is_rewards_halted(&env) {
+            return Ok(0);
+        }
         let raw = Self::pending_reward(&env, &user)?;
         Self::normalize_to_reward_decimals(&env, raw)
     }
@@ -5880,6 +5889,8 @@ impl VaultContract {
         let mut cursor = start_ledger;
         let mut current_multiplier = BOOST_BPS_BASE;
         let mut tier_index = 0u32;
+        let halted_log = storage::Storage::get_halted_log(env);
+        let mut halted_index = 0u32;
 
         // Advance past boost tiers already fully elapsed at start_ledger
         while tier_index < schedule.len() {
@@ -5916,10 +5927,34 @@ impl VaultContract {
 
             let (campaign_mult, next_campaign_boundary) = Self::campaign_info_at(cursor, &campaign);
 
+            let mut is_currently_halted = false;
+            let mut next_halt_boundary = u32::MAX;
+            while halted_index < halted_log.len() {
+                let interval = halted_log.get(halted_index).unwrap();
+                let interval_end = interval.end_ledger.unwrap_or(u32::MAX);
+                
+                if cursor >= interval_end {
+                    halted_index += 1;
+                } else if cursor >= interval.start_ledger {
+                    is_currently_halted = true;
+                    next_halt_boundary = interval_end;
+                    break;
+                } else {
+                    next_halt_boundary = interval.start_ledger;
+                    break;
+                }
+            }
+
             let seg_end = next_halving_boundary
                 .min(next_tier_boundary)
                 .min(next_campaign_boundary)
+                .min(next_halt_boundary)
                 .min(end_ledger);
+
+            if is_currently_halted {
+                cursor = seg_end;
+                continue;
+            }
 
             // Compute halving-adjusted rate for this segment
             let seg_rate = if halving_config.is_some() {
@@ -6468,6 +6503,9 @@ impl VaultContract {
         if is_epoch_mode {
             return Err(VaultError::EpochModeConflict);
         }
+        
+        let _ = Self::check_price_floor(env.clone());
+
         // Issue #235: crank the smoothing schedule before accruing, so this
         // claim picks up everything that has vested up to now.
         Self::settle_smoothing(env);
@@ -10422,6 +10460,73 @@ impl VaultContract {
 
     pub fn get_accumulated_dust(env: Env, user: Address) -> i128 {
         storage::Storage::get_accumulated_dust(&env, &user)
+    }
+
+    // ── Price Floor Protection ────────────────────────────────────────────────
+    
+    pub fn set_price_floor(env: Env, admin: Address, min_price: i128, oracle: Address, asset_id: String) -> Result<(), VaultExtError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env).map_err(|_| VaultExtError::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(VaultExtError::Unauthorized);
+        }
+
+        let config = PriceFloorConfig {
+            min_price,
+            oracle,
+            asset_id,
+        };
+        storage::Storage::set_price_floor_config(&env, &config);
+        Ok(())
+    }
+
+    pub fn get_price_floor_config(env: Env) -> Option<PriceFloorConfig> {
+        storage::Storage::get_price_floor_config(&env)
+    }
+
+    pub fn is_rewards_halted(env: Env) -> bool {
+        storage::Storage::is_rewards_halted(&env)
+    }
+
+    pub fn check_price_floor(env: Env) -> Result<(), VaultError> {
+        let config = match storage::Storage::get_price_floor_config(&env) {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let client = OracleClient::new(&env, &config.oracle);
+        let current_price = client.lastprice(&config.asset_id);
+        
+        let currently_halted = storage::Storage::is_rewards_halted(&env);
+        let current_ledger = env.ledger().sequence();
+
+        if current_price < config.min_price && !currently_halted {
+            storage::Storage::set_rewards_halted(&env, true);
+            
+            // Log the start of a halted interval
+            let mut log = storage::Storage::get_halted_log(&env);
+            log.push_back(HaltedInterval {
+                start_ledger: current_ledger,
+                end_ledger: None,
+            });
+            storage::Storage::set_halted_log(&env, &log);
+            
+            events::rewards_halted(&env, current_price, config.min_price, current_ledger);
+        } else if current_price >= config.min_price && currently_halted {
+            storage::Storage::set_rewards_halted(&env, false);
+            
+            // Close the latest halted interval
+            let mut log = storage::Storage::get_halted_log(&env);
+            if let Some(mut last_interval) = log.pop_back() {
+                last_interval.end_ledger = Some(current_ledger);
+                log.push_back(last_interval);
+            }
+            storage::Storage::set_halted_log(&env, &log);
+            
+            events::rewards_resumed(&env, current_price, config.min_price, current_ledger);
+        }
+
+        Ok(())
     }
 }
 

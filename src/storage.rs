@@ -968,6 +968,9 @@ const MIN_POST: &Symbol = &symbol_short!("min_post");
 const TIER_PREFIX: &Symbol = &symbol_short!("tier");
 const REWARD_PRECISION: &Symbol = &symbol_short!("rw_prec");
 const DUST_PREFIX: &Symbol = &symbol_short!("dust");
+const PR_FLOOR: &Symbol = &symbol_short!("pr_floor");
+const HALTED: &Symbol = &symbol_short!("halted");
+const HALTED_LOG: &Symbol = &symbol_short!("halt_log");
 
 pub struct Storage;
 
@@ -1063,5 +1066,48 @@ impl Storage {
         } else {
             env.storage().persistent().set(&key, &amount);
         }
+    }
+}
+
+// ── Price Floor Protection ──────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriceFloorConfig {
+    pub min_price: i128,
+    pub oracle: Address,
+    pub asset_id: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct HaltedInterval {
+    pub start_ledger: u32,
+    pub end_ledger: Option<u32>,
+}
+
+impl Storage {
+    pub fn get_price_floor_config(env: &Env) -> Option<PriceFloorConfig> {
+        env.storage().instance().get(PR_FLOOR)
+    }
+
+    pub fn set_price_floor_config(env: &Env, config: &PriceFloorConfig) {
+        env.storage().instance().set(PR_FLOOR, config);
+    }
+
+    pub fn is_rewards_halted(env: &Env) -> bool {
+        env.storage().instance().get(HALTED).unwrap_or(false)
+    }
+
+    pub fn set_rewards_halted(env: &Env, halted: bool) {
+        env.storage().instance().set(HALTED, &halted);
+    }
+
+    pub fn get_halted_log(env: &Env) -> soroban_sdk::Vec<HaltedInterval> {
+        env.storage().instance().get(HALTED_LOG).unwrap_or_else(|| soroban_sdk::Vec::new(env))
+    }
+
+    pub fn set_halted_log(env: &Env, log: &soroban_sdk::Vec<HaltedInterval>) {
+        env.storage().instance().set(HALTED_LOG, log);
     }
 }
