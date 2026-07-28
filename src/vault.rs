@@ -6501,7 +6501,9 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::VestingEntries(staker.clone()), &entries);
-        } else if !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)? {
+        } else if !Self::try_reinvest_reward(env, staker, &token_addr, user_reward)?
+            && !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)?
+        {
             let token_client = token::Client::new(env, &token_addr);
             token_client.transfer(&env.current_contract_address(), staker, &user_reward);
         }
