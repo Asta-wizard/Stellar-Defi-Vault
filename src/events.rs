@@ -937,3 +937,15 @@ pub fn priority_bid_placed(
     env.events()
         .publish(topics, (bid_amount, previous_position, ledger));
 }
+
+// ── Message Board (Staker Messages) ─────────────────────────────────────────
+
+pub fn message_posted(
+    env: &Env,
+    author: &Address,
+    content_hash: soroban_sdk::BytesN<32>,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("msg_post"), author);
+    env.events().publish(topics, (content_hash, ledger));
+}

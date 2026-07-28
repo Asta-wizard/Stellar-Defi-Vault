@@ -10152,4 +10152,94 @@ impl VaultContract {
         stats.total_rewards_claimed = stats.total_rewards_claimed.saturating_add(reward);
         Self::cohort_save(env, stats);
     }
+
+    // ── Message Board (Staker Messages) ─────────────────────────────────────────
+
+    pub fn set_min_stake_to_post(env: Env, admin: Address, amount: i128) -> Result<(), VaultError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env)?;
+        if admin != stored_admin {
+            return Err(VaultError::Unauthorized);
+        }
+        if amount < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        storage::Storage::set_min_stake_to_post(&env, amount);
+        Ok(())
+    }
+
+    pub fn post_message(env: Env, user: Address, content: String) -> Result<(), VaultError> {
+        user.require_auth();
+
+        let len = content.len();
+        if len > 280 {
+            return Err(VaultError::MessageTooLong);
+        }
+
+        if !storage::Storage::has_position(&env, &user) {
+            return Err(VaultError::PositionNotFound);
+        }
+
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let current_stake = balance::shares_to_amount(total_shares, total_deposited, user_shares).unwrap_or(0);
+
+        if let Some(min_stake) = storage::Storage::get_min_stake_to_post(&env) {
+            if current_stake < min_stake {
+                return Err(VaultError::BelowMinimumStake);
+            }
+        }
+
+        let mut messages = storage::Storage::get_messages(&env);
+        let posted_at = env.ledger().sequence();
+        let message = storage::Message {
+            author: user.clone(),
+            content: content.clone(),
+            posted_at,
+            stake_amount_at_post: current_stake,
+        };
+
+        messages.push_back(message);
+
+        if messages.len() > 50 {
+            messages.pop_front();
+        }
+
+        storage::Storage::set_messages(&env, &messages);
+
+        let mut raw = [0u8; 280];
+        let slice = &mut raw[..len as usize];
+        content.copy_into_slice(slice);
+        let mut buf = Bytes::new(&env);
+        buf.extend_from_slice(slice);
+        let content_hash: soroban_sdk::BytesN<32> = env.crypto().sha256(&buf).into();
+
+        events::message_posted(&env, &user, content_hash, posted_at);
+        Ok(())
+    }
+
+    pub fn get_messages(env: Env) -> soroban_sdk::Vec<storage::Message> {
+        let mut messages = storage::Storage::get_messages(&env);
+        let mut reversed = soroban_sdk::Vec::new(&env);
+        while let Some(msg) = messages.pop_back() {
+            reversed.push_back(msg);
+        }
+        reversed
+    }
+
+    pub fn delete_message(env: Env, admin: Address, index: u32) -> Result<(), VaultError> {
+        admin.require_auth();
+        let stored_admin = admin::get_admin(&env)?;
+        if admin != stored_admin {
+            return Err(VaultError::Unauthorized);
+        }
+        let mut messages = storage::Storage::get_messages(&env);
+        if index >= messages.len() {
+            return Err(VaultError::ArithmeticError);
+        }
+        messages.remove(index);
+        storage::Storage::set_messages(&env, &messages);
+        Ok(())
+    }
 }
