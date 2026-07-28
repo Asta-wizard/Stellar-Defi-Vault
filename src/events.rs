@@ -1109,3 +1109,12 @@ pub fn revenue_share_claimed(
     env.events().publish(topics, (amount, epoch, ledger));
 }
 
+// ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+pub fn escrow_released(env: &Env, user: &Address, escrowed_amount: i128, ledger: u32) {
+    let topics = (symbol_short!("esc_rel"), user);
+    env.events()
+        .publish(topics, (user.clone(), escrowed_amount, ledger));
+}
+
+

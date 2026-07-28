@@ -2102,3 +2102,49 @@ pub fn set_revenue_share_claimed(env: &Env, user: &Address, epoch: u32) {
     env.storage().persistent().set(&key, &true);
 }
 
+// ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+pub fn get_escrow_period(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("esc_prd"))
+        .unwrap_or(0)
+}
+
+pub fn set_escrow_period(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("esc_prd"), &ledgers);
+}
+
+pub fn get_escrow_balance(env: &Env, user: &Address) -> i128 {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_escrow_balance(env: &Env, user: &Address, amount: i128) {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().set(&key, &amount);
+}
+
+pub fn remove_escrow_balance(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "esc_bal"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+pub fn get_escrow_release_ledger(env: &Env, user: &Address) -> Option<u32> {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_escrow_release_ledger(env: &Env, user: &Address, ledger: u32) {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().set(&key, &ledger);
+}
+
+pub fn remove_escrow_release_ledger(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "esc_rel"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+

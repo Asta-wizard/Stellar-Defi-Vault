@@ -5587,6 +5587,11 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::StakedAtLedger(staker.clone()), &current_ledger);
+            let escrow_period = balance::get_escrow_period(env);
+            if escrow_period > 0 {
+                let release_ledger = current_ledger.saturating_add(escrow_period);
+                balance::set_escrow_release_ledger(env, staker, release_ledger);
+            }
             // Write-once: record the very first time this address ever staked.
             if !env
                 .storage()
@@ -5823,6 +5828,8 @@ impl VaultContract {
             env.storage()
                 .persistent()
                 .remove(&DataKey::StakedAtLedger(staker.clone()));
+            balance::remove_escrow_release_ledger(env, staker);
+            balance::remove_escrow_balance(env, staker);
             // Issue #41: record the ledger of this full unstake and clear restaked flag
             balance::set_last_unstake_ledger(env, staker, current_ledger);
             balance::remove_restaked(env, staker);
@@ -6855,6 +6862,58 @@ impl VaultContract {
         // pool below.
         let (user_reward, loan_repayment) = Self::apply_reward_to_loan(env, staker, user_reward)?;
 
+        let current_ledger = env.ledger().sequence();
+        let in_escrow = if let Some(release_ledger) = balance::get_escrow_release_ledger(env, staker) {
+            current_ledger < release_ledger
+        } else {
+            false
+        };
+
+        if in_escrow {
+            let current_escrow = balance::get_escrow_balance(env, staker);
+            balance::set_escrow_balance(env, staker, current_escrow + user_reward);
+
+            balance::set_reward_pool_balance(env, reward_pool - reward + loan_repayment);
+            let total_ever_claimed: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalEverClaimed)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalEverClaimed, &(total_ever_claimed + reward));
+            let remaining_accrued = accrued
+                .checked_sub(reward)
+                .ok_or(VaultError::ArithmeticError)?;
+            balance::set_accrued_reward(env, staker, remaining_accrued);
+            balance::set_last_claim_ledger(env, staker, current_ledger);
+
+            let paid = balance::get_total_rewards_paid(env);
+            balance::set_total_rewards_paid(env, paid + reward);
+            balance::increment_user_claim_count(env, staker);
+            balance::add_user_total_claimed(env, staker, reward);
+
+            let mut claim_history = balance::get_claim_history(env, staker);
+            if claim_history.len() >= balance::MAX_CLAIM_HISTORY {
+                claim_history.pop_front();
+            }
+            claim_history.push_back((current_ledger, reward));
+            balance::set_claim_history(env, staker, &claim_history);
+
+            events::claimed(env, staker, reward, current_ledger);
+            return Ok(0);
+        }
+
+        let escrowed_amount = balance::get_escrow_balance(env, staker);
+        let payout = user_reward + escrowed_amount;
+        if escrowed_amount > 0 {
+            balance::set_escrow_balance(env, staker, 0);
+            events::escrow_released(env, staker, escrowed_amount, current_ledger);
+        }
+        if balance::get_escrow_release_ledger(env, staker).is_some() {
+            balance::remove_escrow_release_ledger(env, staker);
+        }
+
         let token_addr = Self::token_address(env)?;
 
         let vesting_period: u32 = env
@@ -6872,19 +6931,19 @@ impl VaultContract {
             if entries.len() >= 10 {
                 return Err(VaultError::VestingQueueFull);
             }
-            let claimable_at_ledger = env.ledger().sequence().saturating_add(vesting_period);
+            let claimable_at_ledger = current_ledger.saturating_add(vesting_period);
             entries.push_back(VestingEntry {
-                amount: user_reward,
+                amount: payout,
                 claimable_at_ledger,
             });
             env.storage()
                 .persistent()
                 .set(&DataKey::VestingEntries(staker.clone()), &entries);
-        } else if !Self::try_reinvest_reward(env, staker, &token_addr, user_reward)?
-            && !Self::try_auto_convert_reward(env, staker, &token_addr, user_reward)?
+        } else if !Self::try_reinvest_reward(env, staker, &token_addr, payout)?
+            && !Self::try_auto_convert_reward(env, staker, &token_addr, payout)?
         {
             let token_client = token::Client::new(env, &token_addr);
-            token_client.transfer(&env.current_contract_address(), staker, &user_reward);
+            token_client.transfer(&env.current_contract_address(), staker, &payout);
         }
 
         balance::set_reward_pool_balance(env, reward_pool - reward + loan_repayment);
@@ -11485,5 +11544,27 @@ impl VaultContract {
 
         events::revenue_share_claimed(&env, &user, amount, mr.epoch, env.ledger().sequence());
         Ok(())
+    }
+
+    // ── Issue #280: New Staker Reward Escrow ────────────────────────────────────
+
+    pub fn set_escrow_period(env: Env, admin: Address, ledgers: u32) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        balance::set_escrow_period(&env, ledgers);
+        Ok(())
+    }
+
+    pub fn get_escrow_period(env: Env) -> u32 {
+        balance::get_escrow_period(&env)
+    }
+
+    pub fn get_escrow_balance(env: Env, user: Address) -> i128 {
+        balance::get_escrow_balance(&env, &user)
+    }
+
+    pub fn get_escrow_release_ledger(env: Env, user: Address) -> Option<u32> {
+        balance::get_escrow_release_ledger(&env, &user)
     }
 }

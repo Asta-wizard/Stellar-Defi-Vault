@@ -1252,3 +1252,122 @@ fn test_revenue_sharing_invalid_proof_and_double_claim() {
     assert!(res_double.is_err());
 }
 
+// ── Issue #280: New Staker Reward Escrow Tests ──────────────────────────────
+
+#[test]
+fn test_new_staker_reward_escrow_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let (token_addr, token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // Fund reward pool
+    token_admin.mint(&admin, &1_000_000);
+    vault.fund_reward_pool(&admin, &1_000_000);
+
+    // Default escrow period is 0 (disabled)
+    assert_eq!(vault.get_escrow_period(), 0);
+
+    // Configure escrow period of 100 ledgers
+    vault.set_escrow_period(&admin, &100);
+    assert_eq!(vault.get_escrow_period(), 100);
+
+    // Alice stakes at ledger 100 -> release ledger should be 200
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    assert_eq!(vault.get_escrow_release_ledger(&alice), Some(200));
+    assert_eq!(vault.get_escrow_balance(&alice), 0);
+
+    // Set reward rate
+    vault.set_reward_rate_bps(&1000);
+
+    // Advance to ledger 150 (during escrow period)
+    env.ledger().with_mut(|li| li.sequence_number = 150);
+
+    // Claim during escrow period -> returns 0, adds accrued rewards to EscrowBalance
+    let claim_during = vault.claim(&alice);
+    assert_eq!(claim_during, 0);
+    let escrow_bal = vault.get_escrow_balance(&alice);
+    assert!(escrow_bal > 0, "expected escrow balance to accumulate");
+
+    // Advance past escrow period to ledger 250
+    env.ledger().with_mut(|li| li.sequence_number = 250);
+
+    let alice_bal_before = token.balance(&alice);
+
+    // Claim after escrow period -> releases full escrow balance + current pending in one payment
+    let claim_after = vault.claim(&alice);
+    assert!(claim_after > escrow_bal, "expected payout to include escrow balance + new pending");
+    assert_eq!(token.balance(&alice), alice_bal_before + claim_after);
+    assert_eq!(vault.get_escrow_balance(&alice), 0);
+    assert_eq!(vault.get_escrow_release_ledger(&alice), None);
+}
+
+#[test]
+fn test_escrow_period_zero_disables_and_restaker_gets_new_escrow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    token_admin.mint(&admin, &1_000_000);
+    vault.fund_reward_pool(&admin, &1_000_000);
+
+    // 1. Escrow period 0 disables escrow for new stakers
+    vault.set_escrow_period(&admin, &0);
+    token_admin.mint(&bob, &50_000);
+    vault.stake(&bob, &50_000);
+    assert_eq!(vault.get_escrow_release_ledger(&bob), None);
+
+    // 2. Configure escrow period = 50 ledgers
+    vault.set_escrow_period(&admin, &50);
+
+    // Alice stakes at ledger 100
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+    assert_eq!(vault.get_escrow_release_ledger(&alice), Some(150));
+
+    vault.set_reward_rate_bps(&1000);
+    env.ledger().with_mut(|li| li.sequence_number = 120);
+
+    // Claim during escrow
+    vault.claim(&alice);
+    assert!(vault.get_escrow_balance(&alice) > 0);
+
+    // Full unstake clears position and escrow state
+    vault.unstake(&alice, &100_000);
+    assert_eq!(vault.get_escrow_balance(&alice), 0);
+    assert_eq!(vault.get_escrow_release_ledger(&alice), None);
+
+    // Re-staker after full exit gets a new escrow period starting at new stake ledger
+    env.ledger().with_mut(|li| li.sequence_number = 300);
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    // New release ledger is 300 + 50 = 350
+    assert_eq!(vault.get_escrow_release_ledger(&alice), Some(350));
+}
+
+
