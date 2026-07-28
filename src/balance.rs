@@ -2,8 +2,8 @@ use crate::storage::{
     AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow, DataKey,
     DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
     InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig, Milestone, MultisigConfig,
-    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
-    StakePosition, VestingEntry,
+    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats, Season,
+    StakePosition, SunsetState, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1976,4 +1976,75 @@ pub fn set_loan(env: &Env, user: &Address, loan: &Loan) {
 pub fn remove_loan(env: &Env, user: &Address) {
     let key = (Symbol::new(env, "loan"), user.clone());
     env.storage().persistent().remove(&key);
+}
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+pub fn get_seasons(env: &Env) -> Vec<Season> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("seasons"))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_seasons(env: &Env, seasons: &Vec<Season>) {
+    env.storage().instance().set(&symbol_short!("seasons"), seasons);
+}
+
+/// `starts_at` of the season `maybe_emit_season_transition()` last observed
+/// as active, so it can detect start/end boundary crossings lazily. Absent
+/// when no season has been observed active yet (or the last observed one
+/// has since ended).
+pub fn get_last_active_season_marker(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("seas_lst"))
+}
+
+pub fn set_last_active_season_marker(env: &Env, marker: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("seas_lst"), &marker);
+}
+
+pub fn clear_last_active_season_marker(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("seas_lst"));
+}
+
+// ── Issue #274: staker bio ────────────────────────────────────────────────────
+
+pub fn get_staker_bio(env: &Env, user: &Address) -> Option<String> {
+    let key = (Symbol::new(env, "bio"), user.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_staker_bio(env: &Env, user: &Address, bio: &String) {
+    let key = (Symbol::new(env, "bio"), user.clone());
+    env.storage().persistent().set(&key, bio);
+}
+
+pub fn remove_staker_bio(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "bio"), user.clone());
+    env.storage().persistent().remove(&key);
+}
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+pub fn get_sunset_state(env: &Env) -> SunsetState {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("snst_st"))
+        .unwrap_or(SunsetState::Active)
+}
+
+pub fn set_sunset_state(env: &Env, state: SunsetState) {
+    env.storage().instance().set(&symbol_short!("snst_st"), &state);
+}
+
+pub fn get_grace_period_end(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("snst_gpe"))
+}
+
+pub fn set_grace_period_end(env: &Env, ledger: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("snst_gpe"), &ledger);
 }

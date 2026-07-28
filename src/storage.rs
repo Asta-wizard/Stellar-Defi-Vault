@@ -1005,3 +1005,32 @@ pub struct Loan {
     pub opened_at: u32,
     pub last_interest_at: u32,
 }
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+/// An admin-configured calendar window during which the reward rate is
+/// multiplied by `multiplier_bps` (issue #276). At most one season may be
+/// active at any given ledger — `add_season()` rejects overlapping ranges.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Season {
+    pub name: String,
+    pub starts_at: u32,
+    pub ends_at: u32,
+    pub multiplier_bps: u32,
+}
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+/// Lifecycle stage of a pool being formally deprecated (issue #298).
+/// Transitions are one-way: `Active` -> `SunsetAnnounced` -> `GracePeriodActive`
+/// -> `ForceResolutionActive` -> `Closed`.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SunsetState {
+    Active,
+    SunsetAnnounced,
+    GracePeriodActive,
+    ForceResolutionActive,
+    Closed,
+}

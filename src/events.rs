@@ -1022,3 +1022,65 @@ pub fn loan_liquidated(
     env.events()
         .publish(topics, (debt_covered, shares_slashed, ledger));
 }
+
+// ── Issue #275: reward Gini coefficient ───────────────────────────────────────
+
+pub fn gini_computed(env: &Env, result_bps: u32, staker_count: u32, ledger: u32) {
+    let topics = (symbol_short!("gini_cmp"),);
+    env.events()
+        .publish(topics, (result_bps, staker_count, ledger));
+}
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+/// `starts_at` identifies the season (stable across `remove_season()` calls
+/// on other entries, unlike a Vec index).
+pub fn season_started(
+    env: &Env,
+    starts_at: u32,
+    name: &soroban_sdk::String,
+    multiplier_bps: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("seas_str"),);
+    env.events()
+        .publish(topics, (starts_at, name.clone(), multiplier_bps, ledger));
+}
+
+pub fn season_ended(env: &Env, starts_at: u32, ledger: u32) {
+    let topics = (symbol_short!("seas_end"),);
+    env.events().publish(topics, (starts_at, ledger));
+}
+
+// ── Issue #274: staker bio ────────────────────────────────────────────────────
+
+/// No bio content in the event payload by design — keeps the event lean and
+/// avoids duplicating free-text content on-chain in two places.
+pub fn bio_updated(env: &Env, user: &Address, ledger: u32) {
+    let topics = (symbol_short!("bio_upd"), user);
+    env.events().publish(topics, (ledger,));
+}
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+pub fn sunset_announced(env: &Env, admin: &Address, grace_period_end: u32, ledger: u32) {
+    let topics = (symbol_short!("snst_ann"), admin);
+    env.events().publish(topics, (grace_period_end, ledger));
+}
+
+pub fn sunset_stage_changed(env: &Env, new_state: crate::storage::SunsetState, ledger: u32) {
+    let topics = (symbol_short!("snst_chg"),);
+    env.events().publish(topics, (new_state, ledger));
+}
+
+pub fn force_resolved(
+    env: &Env,
+    user: &Address,
+    principal: i128,
+    accrued_reward: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("frc_res"), user);
+    env.events()
+        .publish(topics, (principal, accrued_reward, ledger));
+}
