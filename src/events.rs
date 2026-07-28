@@ -2423,3 +2423,23 @@ pub fn withdrawal_receipt_minted(
         .publish(topics, (receipt_id, amount_returned, ledger));
 }
 
+// ── Issue #308: unstake-fee-funded buyback & burn ─────────────────────────────
+
+pub fn fee_buyback_executed(
+    env: &Env,
+    stake_fees_used: i128,
+    reward_tokens_burned: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("fee_buyb"),);
+    env.events()
+        .publish(topics, (stake_fees_used, reward_tokens_burned, ledger));
+}
+
+// ── Issue #309: staker onboarding checklist ───────────────────────────────────
+
+pub fn onboarding_completed(env: &Env, user: &Address, ledger: u32) {
+    let topics = (symbol_short!("onb_done"), user);
+    env.events().publish(topics, (ledger,));
+}
+

@@ -13404,6 +13404,10 @@ impl VaultContract {
 
         balance::set_staker_bio(&env, &user, &bio);
         events::bio_updated(&env, &user, env.ledger().sequence());
+        // Issue #309: onboarding checklist — "set a bio".
+        let mut onboarding = balance::get_onboarding_checklist(&env, &user);
+        onboarding.has_set_bio = true;
+        Self::save_onboarding_checklist(&env, &user, onboarding);
         Ok(())
     }
 
@@ -16220,7 +16224,16 @@ impl VaultContract {
     }
 
     fn effective_rate_bps_for_window(env: &Env, start_ledger: u32, end_ledger: u32) -> u32 {
-        let base_rate = balance::get_reward_rate_bps(env);
+        // Issue #311: when TVL-based smoothing is enabled, the effective
+        // per-staker rate is derived from the fixed pool-wide emission
+        // target instead of the static `reward_rate_bps`.
+        let base_rate = if balance::is_tvl_smoothing_enabled(env) {
+            let total_staked = balance::get_total_shares(env);
+            Self::compute_effective_rate_bps_for_tvl(env, total_staked)
+                .clamp(0, u32::MAX as i128) as u32
+        } else {
+            balance::get_reward_rate_bps(env)
+        };
         if end_ledger <= start_ledger {
             return base_rate;
         }
@@ -17840,6 +17853,12 @@ impl VaultContract {
     pub fn set_auto_restake(env: Env, user: Address, enabled: bool) {
         user.require_auth();
         balance::set_auto_restake(&env, &user, enabled);
+        // Issue #309: onboarding checklist — "set up auto-compounding".
+        if enabled {
+            let mut onboarding = balance::get_onboarding_checklist(&env, &user);
+            onboarding.has_set_auto_restake = true;
+            Self::save_onboarding_checklist(&env, &user, onboarding);
+        }
     }
 
     /// Read-only: returns `true` when the user has auto-restake enabled.
@@ -18206,6 +18225,11 @@ impl VaultContract {
         // Issue #242: credit the admin-funded stake match, if a program is live.
         Self::apply_stake_match(env, staker, amount)?;
 
+        // Issue #309: onboarding checklist — "staked at least once".
+        let mut onboarding = balance::get_onboarding_checklist(env, staker);
+        onboarding.has_staked = true;
+        Self::save_onboarding_checklist(env, staker, onboarding);
+
         Ok(shares)
     }
 
@@ -18346,29 +18370,40 @@ impl VaultContract {
         Self::check_activation(env);
 
         if unstake_fee > 0 {
-            let rev_share_portion = if let Some(rev_cfg) = balance::get_revenue_sharing_config(env) {
-                if rev_cfg.share_bps > 0 {
-                    (unstake_fee * rev_cfg.share_bps as i128) / BOOST_BPS_BASE as i128
-                } else {
-                    0
-                }
+            // Issue #308: while the fee-funded buyback is enabled, the whole
+            // unstake fee is diverted into a dedicated UnstakeFeeReserve
+            // (separate from the reward-pool treasury / revenue-share split
+            // below) so `execute_fee_buyback()` can later swap it for reward
+            // tokens and burn them. Disabled mode (the default) keeps the
+            // pre-existing treasury/revenue-share routing unchanged.
+            if balance::fee_buyback_enabled(env) {
+                balance::add_unstake_fee_reserve(env, unstake_fee);
             } else {
-                0
-            };
+                let rev_share_portion =
+                    if let Some(rev_cfg) = balance::get_revenue_sharing_config(env) {
+                        if rev_cfg.share_bps > 0 {
+                            (unstake_fee * rev_cfg.share_bps as i128) / BOOST_BPS_BASE as i128
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
 
-            let treasury_fee = unstake_fee - rev_share_portion;
-            if rev_share_portion > 0 {
-                let rev_pool = balance::get_revenue_share_pool(env);
-                balance::set_revenue_share_pool(env, rev_pool + rev_share_portion);
-            }
+                let treasury_fee = unstake_fee - rev_share_portion;
+                if rev_share_portion > 0 {
+                    let rev_pool = balance::get_revenue_share_pool(env);
+                    balance::set_revenue_share_pool(env, rev_pool + rev_share_portion);
+                }
 
-            if treasury_fee > 0 {
-                let recipients = balance::get_fee_recipients(env);
-                if recipients.is_empty() {
-                    let reward_pool = balance::get_reward_pool_balance(env);
-                    balance::set_reward_pool_balance(env, reward_pool + treasury_fee);
-                } else {
-                    Self::distribute_fee(env, &token_addr, treasury_fee, &recipients);
+                if treasury_fee > 0 {
+                    let recipients = balance::get_fee_recipients(env);
+                    if recipients.is_empty() {
+                        let reward_pool = balance::get_reward_pool_balance(env);
+                        balance::set_reward_pool_balance(env, reward_pool + treasury_fee);
+                    } else {
+                        Self::distribute_fee(env, &token_addr, treasury_fee, &recipients);
+                    }
                 }
             }
             balance::add_protocol_fee_collected(env, unstake_fee);
@@ -19405,6 +19440,11 @@ impl VaultContract {
             return Err(VaultError::InsufficientRewardPool);
         }
 
+        // Issue #309: onboarding checklist — "claimed at least once".
+        let mut onboarding = balance::get_onboarding_checklist(env, staker);
+        onboarding.has_claimed = true;
+        Self::save_onboarding_checklist(env, staker, onboarding);
+
         // Issue #199: retain an insurance-fund cut of the reward before
         // paying the user. Internal accounting only — the insurance portion
         // never leaves the contract's own token balance, it's just
@@ -19667,6 +19707,11 @@ impl VaultContract {
 
         // Issue #242: credit the admin-funded stake match, if a program is live.
         Self::apply_stake_match(env, staker, amount)?;
+
+        // Issue #309: onboarding checklist — "staked at least once".
+        let mut onboarding = balance::get_onboarding_checklist(env, staker);
+        onboarding.has_staked = true;
+        Self::save_onboarding_checklist(env, staker, onboarding);
 
         Ok(shares)
     }
@@ -20288,6 +20333,11 @@ impl VaultContract {
         if reward_pool < total_accumulated {
             return Err(VaultError::InsufficientRewardPool);
         }
+
+        // Issue #309: onboarding checklist — "claimed at least once".
+        let mut onboarding = balance::get_onboarding_checklist(&env, &user);
+        onboarding.has_claimed = true;
+        Self::save_onboarding_checklist(&env, &user, onboarding);
 
         let vesting_period: u32 = env
             .storage()
@@ -24585,5 +24635,317 @@ impl VaultContract {
             return amount;
         }
         (amount / lot_size) * lot_size
+    }
+
+    // ── Issue #308: unstake-fee-funded buyback & burn ─────────────────────────
+
+    /// Admin toggle: while enabled, `unstake()` routes 100% of the unstake
+    /// fee into a dedicated UnstakeFeeReserve instead of the reward-pool
+    /// treasury / revenue-share split used elsewhere. Distinct from the
+    /// general-fee buyback in `set_buyback_enabled()`/`execute_buyback()`
+    /// (issue #212), which burns from all accumulated protocol fees rather
+    /// than unstake fees specifically.
+    pub fn set_fee_buyback_enabled(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        balance::set_fee_buyback_enabled(&env, enabled);
+        Ok(())
+    }
+
+    /// Read-only: whether the fee-funded buyback is currently enabled.
+    pub fn is_fee_buyback_enabled(env: Env) -> bool {
+        balance::fee_buyback_enabled(&env)
+    }
+
+    /// Swaps the full UnstakeFeeReserve for reward tokens via the configured
+    /// DEX router and burns them, resetting the reserve to zero. If the
+    /// reward token is the same as the stake token (the common single-token
+    /// vault case), the reserve is burned directly with no swap needed.
+    ///
+    /// Reverts with `FeeBuybackNotEnabled` if `set_fee_buyback_enabled()`
+    /// hasn't been turned on, `ZeroAmount` if the reserve is empty, and
+    /// `NoDexRouterConfigured` if a swap is required but no DEX router has
+    /// been set via `set_dex_router()`.
+    pub fn execute_fee_buyback(env: Env, admin: Address) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+
+        if !balance::fee_buyback_enabled(&env) {
+            return Err(VaultFeatureError::FeeBuybackNotEnabled);
+        }
+
+        let reserve = balance::get_unstake_fee_reserve(&env);
+        if reserve <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let stake_token = Self::token_address(&env)?;
+        let reward_token = balance::get_reward_token(&env).unwrap_or(stake_token.clone());
+
+        let burned_amount = if reward_token == stake_token {
+            reserve
+        } else {
+            let router =
+                balance::get_dex_router(&env).ok_or(VaultFeatureError::NoDexRouterConfigured)?;
+            let router_client = DexRouterClient::new(&env, &router);
+            router_client.swap(
+                &stake_token,
+                &reward_token,
+                &reserve,
+                &0,
+                &env.current_contract_address(),
+            )
+        };
+
+        let reward_token_client = token::Client::new(&env, &reward_token);
+        reward_token_client.burn(&env.current_contract_address(), &burned_amount);
+
+        balance::set_unstake_fee_reserve(&env, 0);
+        balance::add_fees_burned(&env, burned_amount);
+
+        events::fee_buyback_executed(&env, reserve, burned_amount, env.ledger().sequence());
+        Ok(())
+    }
+
+    /// Read-only: `(reserve, total_burned)` — the current UnstakeFeeReserve
+    /// balance and the lifetime total of reward tokens burned via
+    /// `execute_fee_buyback()`.
+    pub fn get_fee_buyback_stats(env: Env) -> (i128, i128) {
+        (
+            balance::get_unstake_fee_reserve(&env),
+            balance::get_fees_burned(&env),
+        )
+    }
+
+    // ── Issue #309: staker onboarding checklist ───────────────────────────────
+
+    /// Persists `checklist` (the caller has already set whichever flag just
+    /// changed) and, the first time all five onboarding steps are true,
+    /// stamps `completed_at` with the current ledger and emits
+    /// `onboarding_completed`. Flags are append-only — callers never need to
+    /// unset one.
+    fn save_onboarding_checklist(env: &Env, user: &Address, mut checklist: OnboardingChecklist) {
+        let now_complete = checklist.has_staked
+            && checklist.has_claimed
+            && checklist.has_set_bio
+            && checklist.has_enabled_streaming
+            && checklist.has_set_auto_restake;
+
+        if now_complete && checklist.completed_at.is_none() {
+            let ledger = env.ledger().sequence();
+            checklist.completed_at = Some(ledger);
+            balance::set_onboarding_checklist(env, user, &checklist);
+            events::onboarding_completed(env, user, ledger);
+        } else {
+            balance::set_onboarding_checklist(env, user, &checklist);
+        }
+    }
+
+    /// Read-only query for `user`'s onboarding checklist.
+    pub fn get_onboarding_checklist(env: Env, user: Address) -> OnboardingChecklist {
+        balance::get_onboarding_checklist(&env, &user)
+    }
+
+    /// Read-only: `true` once all five checklist items are complete.
+    pub fn is_onboarding_complete(env: Env, user: Address) -> bool {
+        let checklist = balance::get_onboarding_checklist(&env, &user);
+        checklist.has_staked
+            && checklist.has_claimed
+            && checklist.has_set_bio
+            && checklist.has_enabled_streaming
+            && checklist.has_set_auto_restake
+    }
+
+    /// Opt-in streaming preference — tracked purely as the fifth onboarding
+    /// checklist item (issue #309). This contract does not implement a
+    /// continuous reward-streaming mechanism; this flag exists so frontends
+    /// have a "set up streaming" step to point users at.
+    pub fn set_streaming_enabled(env: Env, user: Address, enabled: bool) {
+        user.require_auth();
+        balance::set_streaming_enabled(&env, &user, enabled);
+        if enabled {
+            let mut checklist = balance::get_onboarding_checklist(&env, &user);
+            checklist.has_enabled_streaming = true;
+            Self::save_onboarding_checklist(&env, &user, checklist);
+        }
+    }
+
+    /// Read-only: whether `user` has enabled the streaming preference.
+    pub fn is_streaming_enabled(env: Env, user: Address) -> bool {
+        balance::get_streaming_enabled(&env, &user)
+    }
+
+    // ── Issue #310: contract allowance delegation ─────────────────────────────
+
+    /// Approve `contract` (a smart contract address, not a wallet) to call
+    /// `stake_via_contract()` on `user`'s behalf, up to `max_per_call` per
+    /// invocation and `total_cap` lifetime. Distinct from the human-wallet
+    /// delegation in `approve_delegate()`/`add_delegate_to_chain()` (issues
+    /// #23/#200), which target EOA delegates.
+    pub fn approve_contract_delegate(
+        env: Env,
+        user: Address,
+        contract: Address,
+        max_per_call: i128,
+        total_cap: i128,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        if max_per_call < 0 || total_cap < 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+        balance::set_contract_delegate(
+            &env,
+            &user,
+            &contract,
+            &ContractDelegate {
+                contract_address: contract.clone(),
+                max_stake_per_call: max_per_call,
+                total_authorized: total_cap,
+                total_used: 0,
+            },
+        );
+        Ok(())
+    }
+
+    /// Revoke `contract`'s delegation for `user`, if any.
+    pub fn revoke_contract_delegate(
+        env: Env,
+        user: Address,
+        contract: Address,
+    ) -> Result<(), VaultFeatureError> {
+        user.require_auth();
+        balance::remove_contract_delegate(&env, &user, &contract);
+        Ok(())
+    }
+
+    /// Read-only query for `user`'s delegation to `contract`, if any.
+    pub fn get_contract_delegate(
+        env: Env,
+        user: Address,
+        contract: Address,
+    ) -> Option<ContractDelegate> {
+        balance::get_contract_delegate(&env, &user, &contract)
+    }
+
+    /// Called by an approved delegate *contract* (never a wallet) to stake
+    /// on behalf of `beneficiary`, funded from the delegate contract's own
+    /// balance. Soroban's `Address::require_auth()` on a contract address is
+    /// only satisfiable by that contract genuinely being the invoking
+    /// contract in this call — there is no signature a wallet could produce
+    /// to spoof it — so requiring auth from `contract` itself is exactly
+    /// what enforces "caller is a contract, not a wallet", distinct from the
+    /// human-wallet delegation in `approve_delegate()`/`stake_for()` (issues
+    /// #23/#200).
+    pub fn stake_via_contract(
+        env: Env,
+        contract: Address,
+        beneficiary: Address,
+        amount: i128,
+    ) -> Result<i128, VaultFeatureError> {
+        contract.require_auth();
+
+        if amount <= 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+
+        let mut delegate = balance::get_contract_delegate(&env, &beneficiary, &contract)
+            .ok_or(VaultFeatureError::NotAContractDelegate)?;
+
+        if delegate.max_stake_per_call > 0 && amount > delegate.max_stake_per_call {
+            return Err(VaultFeatureError::ContractDelegatePerCallExceeded);
+        }
+
+        let new_total_used = delegate
+            .total_used
+            .checked_add(amount)
+            .ok_or(VaultFeatureError::ArithmeticError)?;
+        if new_total_used > delegate.total_authorized {
+            return Err(VaultFeatureError::ContractDelegateCapExceeded);
+        }
+
+        // Pull `amount` from the delegate contract's own balance, hand it to
+        // `beneficiary`, then let `do_stake_inner` pick it straight back up —
+        // the same same-transaction relay `swap_and_stake` uses so the
+        // resulting position, whitelist/cap/min-stake checks, and
+        // bookkeeping all attribute to `beneficiary` unchanged.
+        let stake_token = Self::token_address(&env)?;
+        let token_client = token::Client::new(&env, &stake_token);
+        token_client.transfer(&contract, &beneficiary, &amount);
+
+        let shares = Self::do_stake_inner(&env, &beneficiary, amount)?;
+
+        delegate.total_used = new_total_used;
+        balance::set_contract_delegate(&env, &beneficiary, &contract, &delegate);
+
+        Ok(shares)
+    }
+
+    // ── Issue #311: TVL-based reward-rate smoothing ───────────────────────────
+
+    /// Admin sets the fixed pool-wide reward emission target per ledger.
+    /// While TVL smoothing is enabled, the effective per-staker rate is
+    /// derived from this instead of the static `reward_rate_bps`.
+    pub fn set_target_emission_per_ledger(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        if amount < 0 {
+            return Err(VaultFeatureError::ZeroAmount);
+        }
+        balance::set_target_emission_per_ledger(&env, amount);
+        Ok(())
+    }
+
+    /// Read-only query for the configured target emission per ledger.
+    pub fn get_target_emission_per_ledger(env: Env) -> i128 {
+        balance::get_target_emission_per_ledger(&env)
+    }
+
+    /// Per-staker bps rate that keeps pool-wide emission fixed at
+    /// `target_emission_per_ledger` regardless of `total_staked`: doubling
+    /// TVL halves the individual rate, halving TVL doubles it. Returns 0 if
+    /// `total_staked` is not positive or no target has been configured.
+    pub fn get_effective_rate_bps_for_tvl(env: Env, total_staked: i128) -> i128 {
+        Self::compute_effective_rate_bps_for_tvl(&env, total_staked)
+    }
+
+    fn compute_effective_rate_bps_for_tvl(env: &Env, total_staked: i128) -> i128 {
+        if total_staked <= 0 {
+            return 0;
+        }
+        let target_emission = balance::get_target_emission_per_ledger(env);
+        if target_emission <= 0 {
+            return 0;
+        }
+        target_emission
+            .saturating_mul(BOOST_BPS_BASE as i128)
+            .saturating_mul(STELLAR_LEDGERS_PER_YEAR as i128)
+            / total_staked
+    }
+
+    /// Admin toggle: while enabled, reward accrual (and so
+    /// `calc_pending_reward()`) uses `get_effective_rate_bps_for_tvl()`
+    /// instead of the fixed `reward_rate_bps`.
+    pub fn set_tvl_smoothing_enabled(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), VaultFeatureError> {
+        admin::require_admin(&env)?;
+        admin.require_auth();
+        balance::set_tvl_smoothing_enabled(&env, enabled);
+        Ok(())
+    }
+
+    /// Read-only: whether TVL-based reward-rate smoothing is enabled.
+    pub fn is_tvl_smoothing_enabled(env: Env) -> bool {
+        balance::is_tvl_smoothing_enabled(&env)
     }
 }
