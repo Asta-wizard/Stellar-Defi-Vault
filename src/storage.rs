@@ -928,6 +928,24 @@ pub struct PriorityBidRecord {
     pub ledger: u32,
 }
 
+// ── Tier Rebalancing ─────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StakeTier {
+    Bronze = 1,
+    Silver = 2,
+    Gold = 3,
+    Platinum = 4,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TierBenefits {
+    pub boost_multiplier_bps: u32,
+    pub fee_discount_bps: u32,
+}
+
 // ── Message Board (Staker Messages) ─────────────────────────────────────────
 
 #[contracttype]
@@ -947,6 +965,7 @@ const MERGER_PREFIX: &Symbol = &symbol_short!("merger");
 const BIO_PREFIX: &Symbol = &symbol_short!("bio");
 const MSG_BOARD: &Symbol = &symbol_short!("messages");
 const MIN_POST: &Symbol = &symbol_short!("min_post");
+const TIER_PREFIX: &Symbol = &symbol_short!("tier");
 
 pub struct Storage;
 
@@ -1008,5 +1027,16 @@ impl Storage {
 
     pub fn set_min_stake_to_post(env: &Env, amount: i128) {
         env.storage().instance().set(MIN_POST, &amount);
+    }
+
+    // Tier Rebalancing
+    pub fn get_user_tier(env: &Env, user: &Address) -> Option<StakeTier> {
+        let key = (TIER_PREFIX, user.clone());
+        env.storage().persistent().get(&key)
+    }
+
+    pub fn set_user_tier(env: &Env, user: &Address, tier: &StakeTier) {
+        let key = (TIER_PREFIX, user.clone());
+        env.storage().persistent().set(&key, tier);
     }
 }

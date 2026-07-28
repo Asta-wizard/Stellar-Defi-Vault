@@ -5390,6 +5390,14 @@ impl VaultContract {
         // Issue #242: credit the admin-funded stake match, if a program is live.
         Self::apply_stake_match(env, staker, amount)?;
 
+        // Tier rebalancing for caller and top 20 stakers
+        let _ = Self::rebalance_tier(env.clone(), staker.clone());
+        if let Ok(leaderboard) = Self::get_leaderboard(env.clone()) {
+            for entry in leaderboard.iter() {
+                let _ = Self::rebalance_tier(env.clone(), entry.staker.clone());
+            }
+        }
+
         Ok(shares)
     }
 
@@ -5591,6 +5599,14 @@ impl VaultContract {
         // Issue #245: cohort bookkeeping — the gross position reduction, and
         // one fewer active member when the position is fully closed.
         Self::cohort_record_unstake(env, staker, amount, new_user_shares == 0);
+
+        // Tier rebalancing for caller and top 20 stakers
+        let _ = Self::rebalance_tier(env.clone(), staker.clone());
+        if let Ok(leaderboard) = Self::get_leaderboard(env.clone()) {
+            for entry in leaderboard.iter() {
+                let _ = Self::rebalance_tier(env.clone(), entry.staker.clone());
+            }
+        }
 
         Ok(amount_returned)
     }
@@ -10240,6 +10256,68 @@ impl VaultContract {
         }
         messages.remove(index);
         storage::Storage::set_messages(&env, &messages);
+        Ok(())
+    }
+
+    // ── Tier Rebalancing ─────────────────────────────────────────────────────────
+
+    pub fn get_user_tier(env: Env, user: Address) -> storage::StakeTier {
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        
+        let pool_share_bps = if total_shares > 0 {
+            ((user_shares as i128) * 10000 / (total_shares as i128)) as u32
+        } else {
+            0
+        };
+
+        if pool_share_bps >= 3000 {
+            storage::StakeTier::Platinum
+        } else if pool_share_bps >= 1500 {
+            storage::StakeTier::Gold
+        } else if pool_share_bps >= 500 {
+            storage::StakeTier::Silver
+        } else {
+            storage::StakeTier::Bronze
+        }
+    }
+
+    pub fn get_tier_benefits(env: Env, tier: storage::StakeTier) -> storage::TierBenefits {
+        match tier {
+            storage::StakeTier::Bronze => storage::TierBenefits { boost_multiplier_bps: 0, fee_discount_bps: 0 },
+            storage::StakeTier::Silver => storage::TierBenefits { boost_multiplier_bps: 1000, fee_discount_bps: 1000 },
+            storage::StakeTier::Gold => storage::TierBenefits { boost_multiplier_bps: 2000, fee_discount_bps: 2000 },
+            storage::StakeTier::Platinum => storage::TierBenefits { boost_multiplier_bps: 5000, fee_discount_bps: 5000 },
+        }
+    }
+
+    pub fn rebalance_tier(env: Env, user: Address) -> Result<(), VaultError> {
+        let user_shares = balance::get_shares(&env, &user);
+        let total_shares = balance::get_total_shares(&env);
+        
+        let pool_share_bps = if total_shares > 0 {
+            ((user_shares as i128) * 10000 / (total_shares as i128)) as u32
+        } else {
+            0
+        };
+
+        let new_tier = if pool_share_bps >= 3000 {
+            storage::StakeTier::Platinum
+        } else if pool_share_bps >= 1500 {
+            storage::StakeTier::Gold
+        } else if pool_share_bps >= 500 {
+            storage::StakeTier::Silver
+        } else {
+            storage::StakeTier::Bronze
+        };
+
+        let old_tier = storage::Storage::get_user_tier(&env, &user).unwrap_or(storage::StakeTier::Bronze);
+        
+        if old_tier != new_tier {
+            storage::Storage::set_user_tier(&env, &user, &new_tier);
+            events::tier_changed(&env, &user, old_tier, new_tier, pool_share_bps, env.ledger().sequence());
+        }
+        
         Ok(())
     }
 }

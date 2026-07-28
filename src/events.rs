@@ -949,3 +949,18 @@ pub fn message_posted(
     let topics = (symbol_short!("msg_post"), author);
     env.events().publish(topics, (content_hash, ledger));
 }
+
+// ── Tier Rebalancing ─────────────────────────────────────────────────────────
+
+pub fn tier_changed(
+    env: &Env,
+    user: &Address,
+    old_tier: crate::storage::StakeTier,
+    new_tier: crate::storage::StakeTier,
+    pool_share_bps: u32,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("tier_chg"), user);
+    env.events()
+        .publish(topics, (old_tier, new_tier, pool_share_bps, ledger));
+}
