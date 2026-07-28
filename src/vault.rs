@@ -733,7 +733,18 @@ impl VaultContract {
     pub fn calc_pending_reward(env: Env, user: Address) -> Result<i128, VaultError> {
         let _ = admin::get_admin(&env)?;
         let raw = Self::pending_reward(&env, &user)?;
-        Self::normalize_to_reward_decimals(&env, raw)
+
+        // Issue #287: a position inside its vesting cliff accrues nothing, so
+        // it must report zero rather than a balance it cannot yet claim. The
+        // gate is applied here, at the single read-through point, so the query
+        // and the accrual path cannot disagree. Once the cliff passes, `raw`
+        // already covers the whole period since `staked_at_ledger` — that is
+        // the retroactive accrual the issue calls for, and it falls out of
+        // gating rather than needing a separate recomputation.
+        let gated = crate::vesting_cliff::apply_cliff(&env, &user, raw);
+        crate::vesting_cliff::maybe_emit_cliff_unlocked(&env, &user, gated);
+
+        Self::normalize_to_reward_decimals(&env, gated)
     }
 
     /// Gini coefficient of pending-reward distribution across all active
