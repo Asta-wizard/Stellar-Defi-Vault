@@ -938,88 +938,87 @@ pub fn priority_bid_placed(
         .publish(topics, (bid_amount, previous_position, ledger));
 }
 
-// ── DCA stake scheduler ─────────────────────────────────────────────────────────
+// ── Issue #258: pool whitelabel branding ──────────────────────────────────────
 
-pub fn dca_executed(
+pub fn branding_updated(
     env: &Env,
-    user: &Address,
-    keeper: &Address,
-    amount_staked: i128,
-    execution_number: u32,
+    admin: &Address,
+    display_name: &soroban_sdk::String,
+    website_url: &soroban_sdk::String,
     ledger: u32,
 ) {
-    let topics = (symbol_short!("dca_exec"), user);
+    let topics = (symbol_short!("brand_upd"), admin);
+    env.events()
+        .publish(topics, (display_name.clone(), website_url.clone(), ledger));
+}
+
+// ── Issue #259: staking insurance ─────────────────────────────────────────────
+
+pub fn insurance_activated(
+    env: &Env,
+    user: &Address,
+    premium_bps: u32,
+    coverage_amount: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("ins_act"), user);
+    env.events()
+        .publish(topics, (premium_bps, coverage_amount, ledger));
+}
+
+pub fn insurance_cancelled(env: &Env, user: &Address, coverage_amount: i128, ledger: u32) {
+    let topics = (symbol_short!("ins_canc"), user);
+    env.events().publish(topics, (coverage_amount, ledger));
+}
+
+pub fn insurance_premium_paid(env: &Env, user: &Address, premium: i128, ledger: u32) {
+    let topics = (symbol_short!("ins_prem"), user);
+    env.events().publish(topics, (premium, ledger));
+}
+
+pub fn shortfall_paid(env: &Env, user: &Address, payout: i128, ledger: u32) {
+    let topics = (symbol_short!("shortfal"), user);
+    env.events().publish(topics, (payout, ledger));
+}
+
+// ── Issue #260: flash stake ───────────────────────────────────────────────────
+
+pub fn flash_staked(env: &Env, user: &Address, amount: i128, receipt_id: u64, ledger: u32) {
+    let topics = (symbol_short!("flash_st"), user);
+    env.events().publish(topics, (amount, receipt_id, ledger));
+}
+
+// ── Issue #261: stake-backed loans ────────────────────────────────────────────
+
+pub fn loan_opened(env: &Env, user: &Address, amount: i128, total_principal: i128, ledger: u32) {
+    let topics = (symbol_short!("loan_opn"), user);
+    env.events()
+        .publish(topics, (amount, total_principal, ledger));
+}
+
+pub fn loan_repaid(
+    env: &Env,
+    user: &Address,
+    amount: i128,
+    remaining_principal: i128,
+    remaining_interest: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("loan_rpy"), user);
     env.events().publish(
         topics,
-        (keeper.clone(), amount_staked, execution_number, ledger),
+        (amount, remaining_principal, remaining_interest, ledger),
     );
 }
 
-// ── Staker social profile ───────────────────────────────────────────────────────
-
-pub fn profile_updated(
+pub fn loan_liquidated(
     env: &Env,
     user: &Address,
-    username: &soroban_sdk::String,
+    debt_covered: i128,
+    shares_slashed: i128,
     ledger: u32,
 ) {
-    let topics = (symbol_short!("prof_upd"), user);
-    env.events().publish(topics, (username.clone(), ledger));
-}
-
-/// Carries the name of the field that broke its length limit, since
-/// `VaultFeatureError::InvalidProfileField` itself can't hold a payload.
-pub fn profile_field_rejected(
-    env: &Env,
-    user: &Address,
-    field: &soroban_sdk::String,
-    ledger: u32,
-) {
-    let topics = (symbol_short!("prof_rej"), user);
-    env.events().publish(topics, (field.clone(), ledger));
-}
-
-pub fn profile_deleted(env: &Env, user: &Address, ledger: u32) {
-    let topics = (symbol_short!("prof_del"), user);
-    env.events().publish(topics, (ledger,));
-}
-
-// ── Pool rating system ──────────────────────────────────────────────────────────
-
-pub fn rating_submitted(
-    env: &Env,
-    user: &Address,
-    rating: u32,
-    new_average_bps: u32,
-    ledger: u32,
-) {
-    let topics = (symbol_short!("rat_sub"), user);
+    let topics = (symbol_short!("loan_liq"), user);
     env.events()
-        .publish(topics, (rating, new_average_bps, ledger));
-}
-
-// ── Reinvest rewards into an external pool ──────────────────────────────────────
-
-pub fn reward_reinvested(
-    env: &Env,
-    user: &Address,
-    target_pool: &Address,
-    amount: i128,
-    ledger: u32,
-) {
-    let topics = (symbol_short!("rwd_rinv"), user);
-    env.events()
-        .publish(topics, (target_pool.clone(), amount, ledger));
-}
-
-pub fn reinvestment_failed(
-    env: &Env,
-    user: &Address,
-    target_pool: &Address,
-    amount: i128,
-    ledger: u32,
-) {
-    let topics = (symbol_short!("rinv_fail"), user);
-    env.events()
-        .publish(topics, (target_pool.clone(), amount, ledger));
+        .publish(topics, (debt_covered, shares_slashed, ledger));
 }

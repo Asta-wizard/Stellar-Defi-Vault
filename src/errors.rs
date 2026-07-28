@@ -321,12 +321,18 @@ pub enum VaultExtError {
     InvalidVetoThreshold = 50,
 }
 
-/// Third error enum, added for the same reason `VaultExtError` exists: both
-/// `VaultError` and `VaultExtError` are already at Soroban's hard 50-variant
-/// cap for `#[contracterror]` enums, so the DCA scheduler, social profile,
-/// pool rating, and external-pool reinvestment features need their own enum.
-/// The first few cases mirror the `VaultError` cases these functions can also
-/// hit, so `?` keeps working at call sites via the `From` impl below.
+/// Third error enum, for the same 50-variant reason `VaultExtError` exists:
+/// both `VaultError` and `VaultExtError` are now at exactly the cap, so the
+/// cases introduced by issues #258 (branding), #259 (staking insurance),
+/// #260 (flash stake), and #261 (stake-backed loans) live here, plus mirrors
+/// of the handful of `VaultError` cases those functions can also hit (via the
+/// `From` impl below, so `?` still works normally at call sites).
+///
+/// Note on `InvalidBrandingField`: a `#[contracterror]` variant cannot carry a
+/// payload, so the offending field name is encoded in the variant itself —
+/// `InvalidBrandingDisplayName`, `InvalidBrandingLogoHash`,
+/// `InvalidBrandingWebsiteUrl`, `InvalidBrandingTwitterHandle` — rather than
+/// as an inner `String` on a single generic variant.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -339,53 +345,58 @@ pub enum VaultFeatureError {
     ZeroAmount = 3,
     /// Mirrors `VaultError::ArithmeticError`.
     ArithmeticError = 4,
-    /// Mirrors `VaultError::PositionNotFound` — returned by
-    /// `set_social_profile()` and `submit_rating()`, which both require an
-    /// active staking position.
+    /// Mirrors `VaultError::PositionNotFound`.
     PositionNotFound = 5,
-    /// Returned by `set_social_profile()` when `username` exceeds 20 bytes,
-    /// `avatar_hash` exceeds 64 bytes, or `bio` exceeds 160 bytes. Soroban
-    /// contract errors carry no payload, so the offending field name is
-    /// reported in the accompanying `profile_field_rejected` event rather
-    /// than in the error value itself.
-    InvalidProfileField = 6,
-    /// Returned by `submit_rating()` when `rating` is outside 1–5.
-    InvalidRating = 7,
-    /// Returned by `execute_dca()` / `cancel_dca()` when the user has no DCA
-    /// config stored.
-    DcaConfigNotFound = 8,
-    /// Returned by `execute_dca()` before `last_executed_at + interval_ledgers`.
-    DcaIntervalNotElapsed = 9,
-    /// Returned by `execute_dca()` once `executions_done` has reached a
-    /// non-zero `max_executions`.
-    DcaExecutionsExhausted = 10,
-    /// Returned by `set_dca_config()` when `interval_ledgers` is 0 or
-    /// `variance_bps` exceeds 10 000 (100%).
-    InvalidDcaConfig = 11,
-}
+    /// Mirrors `VaultError::VaultPaused`.
+    VaultPaused = 6,
+    /// Mirrors `VaultError::InsufficientRewardPool`.
+    InsufficientRewardPool = 7,
 
-impl From<VaultError> for VaultFeatureError {
-    fn from(err: VaultError) -> Self {
-        match err {
-            VaultError::Unauthorized => VaultFeatureError::Unauthorized,
-            VaultError::NotInitialized => VaultFeatureError::NotInitialized,
-            VaultError::ZeroAmount => VaultFeatureError::ZeroAmount,
-            VaultError::PositionNotFound => VaultFeatureError::PositionNotFound,
-            VaultError::ArithmeticError => VaultFeatureError::ArithmeticError,
-            _ => VaultFeatureError::Unauthorized,
-        }
-    }
-}
+    // ── Issue #258: branding ────────────────────────────────────────────────
+    /// `set_branding()`: `display_name` exceeds `MAX_BRANDING_NAME_LEN` (50).
+    InvalidBrandingDisplayName = 8,
+    /// `set_branding()`: `logo_hash` exceeds `MAX_BRANDING_LOGO_LEN` (64).
+    InvalidBrandingLogoHash = 9,
+    /// `set_branding()`: `website_url` exceeds `MAX_BRANDING_URL_LEN` (200).
+    InvalidBrandingWebsiteUrl = 10,
+    /// `set_branding()`: `twitter_handle` exceeds `MAX_BRANDING_TWITTER_LEN` (16).
+    InvalidBrandingTwitterHandle = 11,
 
-impl From<VaultExtError> for VaultFeatureError {
-    fn from(err: VaultExtError) -> Self {
-        match err {
-            VaultExtError::Unauthorized => VaultFeatureError::Unauthorized,
-            VaultExtError::NotInitialized => VaultFeatureError::NotInitialized,
-            VaultExtError::ZeroAmount => VaultFeatureError::ZeroAmount,
-            _ => VaultFeatureError::ArithmeticError,
-        }
-    }
+    // ── Issue #259: staking insurance ───────────────────────────────────────
+    /// `set_insurance_product()`: `premium_bps` above 10 000, or
+    /// `max_coverage_per_user` is negative.
+    InvalidInsuranceProduct = 12,
+    /// `purchase_insurance()` before any `set_insurance_product()` call.
+    InsuranceProductNotSet = 13,
+    /// `purchase_insurance()` when the caller already holds an active policy.
+    InsuranceAlreadyActive = 14,
+    /// `cancel_insurance()` / `declare_shortfall()` for a user with no policy.
+    InsurancePolicyNotFound = 15,
+    /// `declare_shortfall()` when the insurance fund cannot cover the total
+    /// coverage owed to `affected_users`.
+    InsuranceFundInsufficient = 16,
+    /// `declare_shortfall()` when `affected_users.len()` exceeds
+    /// `MAX_SHORTFALL_USERS` (50) — split the payout across several calls.
+    TooManyAffectedUsers = 23,
+
+    // ── Issue #260: flash stake ─────────────────────────────────────────────
+    /// `set_flash_stake_fee_bps()`: `bps` above 10 000.
+    InvalidFlashStakeFee = 17,
+
+    // ── Issue #261: stake-backed loans ──────────────────────────────────────
+    /// `set_loan_config()`: `max_ltv_bps` or `interest_rate_bps` above 10 000.
+    InvalidLoanConfig = 18,
+    /// `borrow()` before any `set_loan_config()` call.
+    LoanConfigNotSet = 19,
+    /// `repay()` / `liquidate_loan()` / `get_loan()` flows for a user with no
+    /// outstanding loan.
+    LoanNotFound = 20,
+    /// `borrow()` when the requested amount would push total debt above
+    /// `position.amount * max_ltv_bps / 10000`.
+    ExceedsMaxLtv = 21,
+    /// `liquidate_loan()` when the borrower's LTV is still below
+    /// `LIQUIDATION_LTV_BPS` (9 000).
+    LoanNotLiquidatable = 22,
 }
 
 impl From<VaultError> for VaultExtError {
@@ -398,6 +409,23 @@ impl From<VaultError> for VaultExtError {
             // Any other VaultError reaching here (shouldn't happen given how
             // these functions are written) maps to the closest generic case.
             _ => VaultExtError::Unauthorized,
+        }
+    }
+}
+
+impl From<VaultError> for VaultFeatureError {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::Unauthorized => VaultFeatureError::Unauthorized,
+            VaultError::NotInitialized => VaultFeatureError::NotInitialized,
+            VaultError::ZeroAmount => VaultFeatureError::ZeroAmount,
+            VaultError::ArithmeticError => VaultFeatureError::ArithmeticError,
+            VaultError::PositionNotFound => VaultFeatureError::PositionNotFound,
+            VaultError::VaultPaused => VaultFeatureError::VaultPaused,
+            VaultError::InsufficientRewardPool => VaultFeatureError::InsufficientRewardPool,
+            // Any other VaultError reaching here (shouldn't happen given how
+            // these functions are written) maps to the closest generic case.
+            _ => VaultFeatureError::Unauthorized,
         }
     }
 }

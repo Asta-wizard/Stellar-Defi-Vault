@@ -1,8 +1,9 @@
 use crate::storage::{
-    AdminProposal, AutoConvertConfig, ChangelogEntry, ClaimWindow, DataKey, DayBucket,
-    DCAConfig, DynamicFeeConfig, FeeRecipient, GovernanceProposal, LotteryConfig, Milestone,
-    MultisigConfig, PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry,
-    ReferralStats, SocialProfile, StakePosition, VestingEntry,
+    AdminProposal, AutoConvertConfig, BrandingConfig, ChangelogEntry, ClaimWindow, DataKey,
+    DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt, GovernanceProposal,
+    InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig, Milestone, MultisigConfig,
+    PendingAction, PriceCondition, PriorityBidRecord, RateHistoryEntry, ReferralStats,
+    StakePosition, VestingEntry,
 };
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
@@ -1878,81 +1879,101 @@ pub fn set_priority_bids(env: &Env, records: &Vec<PriorityBidRecord>) {
         .set(&symbol_short!("pbidrec"), records);
 }
 
-// ── DCA stake scheduler ─────────────────────────────────────────────────────────
+// ── Issue #258: pool whitelabel branding ──────────────────────────────────────
 
-pub fn get_dca_config(env: &Env, user: &Address) -> Option<DCAConfig> {
-    let key = (Symbol::new(env, "dca_cfg"), user.clone());
+pub fn get_branding(env: &Env) -> Option<BrandingConfig> {
+    env.storage().instance().get(&symbol_short!("branding"))
+}
+
+pub fn set_branding(env: &Env, config: &BrandingConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("branding"), config);
+}
+
+// ── Issue #259: staking insurance ─────────────────────────────────────────────
+
+pub fn get_insurance_product(env: &Env) -> Option<InsuranceProduct> {
+    env.storage().instance().get(&symbol_short!("ins_prod"))
+}
+
+pub fn set_insurance_product(env: &Env, product: &InsuranceProduct) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("ins_prod"), product);
+}
+
+pub fn get_insurance_policy(env: &Env, user: &Address) -> Option<InsurancePolicy> {
+    let key = (Symbol::new(env, "ins_pol"), user.clone());
     env.storage().persistent().get(&key)
 }
 
-pub fn set_dca_config(env: &Env, user: &Address, config: &DCAConfig) {
-    let key = (Symbol::new(env, "dca_cfg"), user.clone());
-    env.storage().persistent().set(&key, config);
+pub fn set_insurance_policy(env: &Env, user: &Address, policy: &InsurancePolicy) {
+    let key = (Symbol::new(env, "ins_pol"), user.clone());
+    env.storage().persistent().set(&key, policy);
 }
 
-pub fn remove_dca_config(env: &Env, user: &Address) {
-    let key = (Symbol::new(env, "dca_cfg"), user.clone());
+pub fn remove_insurance_policy(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "ins_pol"), user.clone());
     env.storage().persistent().remove(&key);
 }
 
-// ── Staker social profile ───────────────────────────────────────────────────────
+// ── Issue #260: flash stake ───────────────────────────────────────────────────
 
-pub fn get_social_profile(env: &Env, user: &Address) -> Option<SocialProfile> {
-    let key = (Symbol::new(env, "soc_prof"), user.clone());
-    env.storage().persistent().get(&key)
-}
-
-pub fn set_social_profile(env: &Env, user: &Address, profile: &SocialProfile) {
-    let key = (Symbol::new(env, "soc_prof"), user.clone());
-    env.storage().persistent().set(&key, profile);
-}
-
-pub fn remove_social_profile(env: &Env, user: &Address) {
-    let key = (Symbol::new(env, "soc_prof"), user.clone());
-    env.storage().persistent().remove(&key);
-}
-
-// ── Pool rating system ──────────────────────────────────────────────────────────
-
-/// Raw star buckets, index 0 = one star … index 4 = five stars. The derived
-/// `average_bps`/`total_ratings` fields of `RatingDistribution` are computed on
-/// read rather than stored, so they can never drift from the buckets.
-pub fn get_rating_buckets(env: &Env) -> Vec<u32> {
+pub fn get_flash_stake_fee_bps(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&symbol_short!("rat_bkt"))
-        .unwrap_or_else(|| Vec::from_array(env, [0u32, 0, 0, 0, 0]))
+        .get(&symbol_short!("fs_fee"))
+        .unwrap_or(0)
 }
 
-pub fn set_rating_buckets(env: &Env, buckets: &Vec<u32>) {
+pub fn set_flash_stake_fee_bps(env: &Env, bps: u32) {
+    env.storage().instance().set(&symbol_short!("fs_fee"), &bps);
+}
+
+/// Monotonic counter backing `FlashStakeReceipt::receipt_id`. Returns the id
+/// to use for the next receipt and advances the counter.
+pub fn next_flash_receipt_id(env: &Env) -> u64 {
+    let key = symbol_short!("fs_seq");
+    let next: u64 = env.storage().instance().get(&key).unwrap_or(0) + 1;
+    env.storage().instance().set(&key, &next);
+    next
+}
+
+/// `FlashStakeReceiptLog(receipt_id)` — permanent proof, never removed.
+pub fn get_flash_receipt(env: &Env, receipt_id: u64) -> Option<FlashStakeReceipt> {
+    let key = (Symbol::new(env, "fs_rcpt"), receipt_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_flash_receipt(env: &Env, receipt_id: u64, receipt: &FlashStakeReceipt) {
+    let key = (Symbol::new(env, "fs_rcpt"), receipt_id);
+    env.storage().persistent().set(&key, receipt);
+}
+
+// ── Issue #261: stake-backed loans ────────────────────────────────────────────
+
+pub fn get_loan_config(env: &Env) -> Option<LoanConfig> {
+    env.storage().instance().get(&symbol_short!("loan_cfg"))
+}
+
+pub fn set_loan_config(env: &Env, config: &LoanConfig) {
     env.storage()
         .instance()
-        .set(&symbol_short!("rat_bkt"), buckets);
+        .set(&symbol_short!("loan_cfg"), config);
 }
 
-pub fn get_user_rating(env: &Env, user: &Address) -> Option<u32> {
-    let key = (Symbol::new(env, "usr_rat"), user.clone());
+pub fn get_loan(env: &Env, user: &Address) -> Option<Loan> {
+    let key = (Symbol::new(env, "loan"), user.clone());
     env.storage().persistent().get(&key)
 }
 
-pub fn set_user_rating(env: &Env, user: &Address, rating: u32) {
-    let key = (Symbol::new(env, "usr_rat"), user.clone());
-    env.storage().persistent().set(&key, &rating);
+pub fn set_loan(env: &Env, user: &Address, loan: &Loan) {
+    let key = (Symbol::new(env, "loan"), user.clone());
+    env.storage().persistent().set(&key, loan);
 }
 
-// ── Reinvest rewards into an external pool ──────────────────────────────────────
-
-pub fn get_reinvestment_target(env: &Env, user: &Address) -> Option<Address> {
-    let key = (Symbol::new(env, "rinv_tgt"), user.clone());
-    env.storage().persistent().get(&key)
-}
-
-pub fn set_reinvestment_target(env: &Env, user: &Address, target: &Address) {
-    let key = (Symbol::new(env, "rinv_tgt"), user.clone());
-    env.storage().persistent().set(&key, target);
-}
-
-pub fn remove_reinvestment_target(env: &Env, user: &Address) {
-    let key = (Symbol::new(env, "rinv_tgt"), user.clone());
+pub fn remove_loan(env: &Env, user: &Address) {
+    let key = (Symbol::new(env, "loan"), user.clone());
     env.storage().persistent().remove(&key);
 }
