@@ -1162,3 +1162,27 @@ impl Storage {
         env.storage().instance().set(LAST_BATCH, &ledger);
     }
 }
+
+// ── Progressive Stake Tax ────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgressiveTaxTier {
+    pub pool_share_threshold_bps: u32,
+    pub fee_bps: u32,
+}
+
+const PROG_TAX: &Symbol = &symbol_short!("prog_tax");
+
+impl Storage {
+    pub fn get_progressive_tax_tiers(env: &Env) -> soroban_sdk::Vec<ProgressiveTaxTier> {
+        env.storage()
+            .instance()
+            .get(PROG_TAX)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env))
+    }
+
+    pub fn set_progressive_tax_tiers(env: &Env, tiers: &soroban_sdk::Vec<ProgressiveTaxTier>) {
+        env.storage().instance().set(PROG_TAX, tiers);
+    }
+}

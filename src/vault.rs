@@ -21,7 +21,7 @@ use crate::{
         StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
         StorageUsageReport, TaxReport, Tournament, TriggerDirection, UnbondingPosition,
         UnstakeCheckResult, UserStats, UserSummary, VestingEntry, PriceFloorConfig, HaltedInterval,
-        ExitQueueConfig, ExitRequest,
+        ExitQueueConfig, ExitRequest, ProgressiveTaxTier,
     },
 };
 
@@ -5534,10 +5534,16 @@ impl VaultContract {
         //
         // Issue #213: when a dynamic fee config is set, it replaces the static
         // fee from `set_unstake_fee_bps` entirely.
-        let unstake_fee_bps = if balance::get_dynamic_fee_config(env).is_some() {
-            Self::compute_dynamic_fee_bps(env)
-        } else {
-            balance::get_unstake_fee_bps(env)
+        // Progressive stake tax overrides both dynamic and flat fee when configured.
+        let unstake_fee_bps = {
+            let prog_tiers = storage::Storage::get_progressive_tax_tiers(env);
+            if !prog_tiers.is_empty() {
+                Self::compute_progressive_tax_bps(env, staker, &prog_tiers)
+            } else if balance::get_dynamic_fee_config(env).is_some() {
+                Self::compute_dynamic_fee_bps(env)
+            } else {
+                balance::get_unstake_fee_bps(env)
+            }
         };
         let unstake_fee = if unstake_fee_bps > 0 {
             amount_after_penalty
@@ -10677,6 +10683,87 @@ impl VaultContract {
 
         // Return 0 — real payout happens when process_exit_batch runs
         Ok(0)
+    }
+
+    // ── Progressive Stake Tax ─────────────────────────────────────────────────
+
+    /// Admin: configure tiered unstake fee based on pool share size.
+    /// Tiers must be in ascending order of `pool_share_threshold_bps`.
+    /// Max 5 tiers. Pass an empty Vec to disable progressive tax.
+    /// Note: VaultError::InvalidRate is re-used here for out-of-order thresholds
+    /// since both VaultError and VaultExtError are at Soroban's 50-variant cap.
+    pub fn set_progressive_tax(
+        env: Env,
+        admin: Address,
+        tiers: Vec<ProgressiveTaxTier>,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        let _ = admin;
+
+        if tiers.len() > 5 {
+            return Err(VaultError::InvalidRate);
+        }
+
+        // Validate ascending threshold order
+        let mut prev_threshold: u32 = 0;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if i > 0 && tier.pool_share_threshold_bps <= prev_threshold {
+                return Err(VaultError::InvalidRate); // InvalidTaxConfig
+            }
+            if tier.fee_bps > BOOST_BPS_BASE {
+                return Err(VaultError::InvalidRate);
+            }
+            prev_threshold = tier.pool_share_threshold_bps;
+        }
+
+        storage::Storage::set_progressive_tax_tiers(&env, &tiers);
+        Ok(())
+    }
+
+    pub fn get_progressive_tax(env: Env) -> Vec<ProgressiveTaxTier> {
+        storage::Storage::get_progressive_tax_tiers(&env)
+    }
+
+    pub fn get_applicable_tax_bps(env: Env, user: Address) -> u32 {
+        let tiers = storage::Storage::get_progressive_tax_tiers(&env);
+        if tiers.is_empty() {
+            return balance::get_unstake_fee_bps(&env);
+        }
+        Self::compute_progressive_tax_bps(&env, &user, &tiers)
+    }
+
+    /// Internal: compute the applicable fee tier for `user` given current pool share.
+    fn compute_progressive_tax_bps(
+        env: &Env,
+        user: &Address,
+        tiers: &Vec<ProgressiveTaxTier>,
+    ) -> u32 {
+        let user_shares = balance::get_shares(env, user);
+        let total_shares = balance::get_total_shares(env);
+
+        if total_shares == 0 || tiers.is_empty() {
+            return 0;
+        }
+
+        // Pool share in bps: (user_shares * 10_000) / total_shares
+        let pool_share_bps = (user_shares as u128)
+            .saturating_mul(BOOST_BPS_BASE as u128)
+            .checked_div(total_shares as u128)
+            .unwrap_or(0) as u32;
+
+        // Tiers are ascending by threshold. Walk from highest to lowest to find
+        // the first tier whose threshold is <= pool_share_bps (inclusive lower bound).
+        let mut applicable_fee: u32 = 0;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if pool_share_bps >= tier.pool_share_threshold_bps {
+                applicable_fee = tier.fee_bps;
+            } else {
+                break;
+            }
+        }
+        applicable_fee
     }
 }
 
