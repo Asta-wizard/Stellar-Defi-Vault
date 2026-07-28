@@ -6199,6 +6199,12 @@ impl VaultContract {
                 .checked_add(segment_dust)
                 .ok_or(VaultError::ArithmeticError)?;
 
+            if seg_end == next_halving_boundary && next_halving_boundary < end_ledger {
+                let h_count = balance::halving_count_at(env, seg_end);
+                let eff_rate = balance::halving_adjusted_rate(env, base_rate, seg_end);
+                events::halving_occurred(env, h_count, eff_rate, seg_end);
+            }
+
             // Advance tier multiplier when we land exactly on a tier boundary
             if seg_end == next_tier_boundary && tier_index < schedule.len() {
                 let (_, tier_mult) = schedule.get(tier_index).unwrap();

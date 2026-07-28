@@ -1456,5 +1456,62 @@ fn test_stake_gated_access_flow() {
     assert!(!nft_client_2.has_receipt(&alice));
 }
 
+// ── Issue #279: Reward Halving Schedule Integration Tests ───────────────────
+
+#[test]
+fn test_reward_halving_schedule_integration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 0;
+        li.min_persistent_entry_ttl = 10_000_000;
+        li.max_entry_ttl = 10_000_000;
+    });
+
+    let admin = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let (token_addr, _token, token_admin) = create_token(&env, &admin);
+    let vault_id = env.register_contract(None, VaultContract);
+    let vault = VaultContractClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr, &0_u32, &None, &None);
+
+    // 1. Without halving config, base rate is used
+    vault.set_reward_rate_bps(&1000);
+    assert_eq!(vault.get_current_halving_count(), 0);
+    assert_eq!(vault.next_halving_at(), None);
+
+    // 2. Set halving schedule: interval = 100 ledgers, floor_rate_bps = 200
+    vault.set_halving_schedule(&admin, &100, &200);
+
+    let config = vault.get_halving_config().unwrap();
+    assert_eq!(config.interval_ledgers, 100);
+    assert_eq!(config.floor_rate_bps, 200);
+
+    // Next halving boundary is at ledger 100
+    assert_eq!(vault.next_halving_at(), Some(100));
+
+    // Stake at ledger 0
+    token_admin.mint(&alice, &100_000);
+    vault.stake(&alice, &100_000);
+
+    // Ledger 50: halving count is 0
+    env.ledger().with_mut(|li| li.sequence_number = 50);
+    assert_eq!(vault.get_current_halving_count(), 0);
+
+    // Ledger 150: 1 halving has occurred (count = 1). Base rate 1000 / 2^1 = 500
+    env.ledger().with_mut(|li| li.sequence_number = 150);
+    assert_eq!(vault.get_current_halving_count(), 1);
+    assert_eq!(vault.next_halving_at(), Some(200));
+
+    // Ledger 250: 2 halvings have occurred (count = 2). Base rate 1000 / 2^2 = 250
+    env.ledger().with_mut(|li| li.sequence_number = 250);
+    assert_eq!(vault.get_current_halving_count(), 2);
+
+    // Ledger 350: 3 halvings occurred. Base rate 1000 / 2^3 = 125, but floored at floor_rate_bps = 200!
+    env.ledger().with_mut(|li| li.sequence_number = 350);
+    assert_eq!(vault.get_current_halving_count(), 3);
+}
+
+
 
 
