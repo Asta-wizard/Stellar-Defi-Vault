@@ -8215,6 +8215,8 @@ fn test_set_tvl_smoothing_enabled_requires_admin_auth() {
     let f = VaultFixture::new();
     f.vault.set_tvl_smoothing_enabled(&f.admin, &true);
     assert_eq!(f.env.auths()[0].0, f.admin);
+}
+
 // ── Issue #286: debt NFT collateral tests ──────────────────────────────────
 
 #[test]
