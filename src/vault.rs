@@ -5685,6 +5685,11 @@ impl VaultContract {
             panic_with_error!(env, VaultFeatureError::PositionCollateralized);
         }
 
+        // Reject unstake if position is fractionalized (locked until reconstruction).
+        if crate::nft_fractionalize::is_position_locked(env, staker) {
+            panic_with_error!(env, VaultError::ContractStopped);
+        }
+
         Self::require_not_paused(env)?;
         // Issue #235: credit vested smoothing before pricing the exit, so a
         // leaving staker is paid out at a share price that includes it.
@@ -8229,14 +8234,10 @@ impl VaultContract {
 
     // ── Issue #214: staker reputation score ───────────────────────────────────
 
-    /// Read-only composite reputation score combining stake duration, claim
-    /// consistency, position size, and streak participation into a single
-    /// 0-10000 bps score. Useful for tiered access, airdrops, and governance
-    /// weight. No auth required, no state changes.
-    ///
-    /// Returns all-zero for an address with no active position.
-    pub fn get_reputation_score(env: Env, user: Address) -> ReputationScore {
-        if balance::get_shares(&env, &user) == 0 {
+    /// Compute the raw reputation score without time decay. Internal helper
+    /// used by both `get_reputation_score` and `apply_reputation_decay`.
+    pub fn get_reputation_score_raw(env: &Env, user: &Address) -> ReputationScore {
+        if balance::get_shares(env, user) == 0 {
             return ReputationScore {
                 duration_score: 0,
                 consistency_score: 0,
@@ -8246,10 +8247,10 @@ impl VaultContract {
             };
         }
 
-        let duration_score = Self::compute_duration_score(&env, &user);
-        let consistency_score = Self::compute_consistency_score(&env, &user);
+        let duration_score = Self::compute_duration_score(env, user);
+        let consistency_score = Self::compute_consistency_score(env, user);
         let size_score = Self::compute_size_score(env.clone(), user.clone());
-        let streak_score = Self::compute_streak_score(&env, &user);
+        let streak_score = Self::compute_streak_score(env, user);
         let total_score = duration_score
             .saturating_add(consistency_score)
             .saturating_add(size_score)
@@ -8262,6 +8263,22 @@ impl VaultContract {
             size_score,
             streak_score,
             total_score,
+        }
+    }
+
+    /// Read-only composite reputation score combining stake duration, claim
+    /// consistency, position size, and streak participation into a single
+    /// 0-10000 bps score, with time-based decay applied for inactivity.
+    /// No auth required.
+    ///
+    /// Returns all-zero for an address with no active position.
+    pub fn get_reputation_score(env: Env, user: Address) -> ReputationScore {
+        let raw = Self::get_reputation_score_raw(&env, &user);
+        let (decayed, _old, _epochs) =
+            crate::reputation_decay::compute_decayed_score(&env, &user, &raw);
+        ReputationScore {
+            total_score: decayed,
+            ..raw
         }
     }
 
@@ -20817,14 +20834,10 @@ impl VaultContract {
 
     // ── Issue #214: staker reputation score ───────────────────────────────────
 
-    /// Read-only composite reputation score combining stake duration, claim
-    /// consistency, position size, and streak participation into a single
-    /// 0-10000 bps score. Useful for tiered access, airdrops, and governance
-    /// weight. No auth required, no state changes.
-    ///
-    /// Returns all-zero for an address with no active position.
-    pub fn get_reputation_score(env: Env, user: Address) -> ReputationScore {
-        if balance::get_shares(&env, &user) == 0 {
+    /// Compute the raw reputation score without time decay. Internal helper
+    /// used by both `get_reputation_score` and `apply_reputation_decay`.
+    pub fn get_reputation_score_raw(env: &Env, user: &Address) -> ReputationScore {
+        if balance::get_shares(env, user) == 0 {
             return ReputationScore {
                 duration_score: 0,
                 consistency_score: 0,
@@ -20834,10 +20847,10 @@ impl VaultContract {
             };
         }
 
-        let duration_score = Self::compute_duration_score(&env, &user);
-        let consistency_score = Self::compute_consistency_score(&env, &user);
+        let duration_score = Self::compute_duration_score(env, user);
+        let consistency_score = Self::compute_consistency_score(env, user);
         let size_score = Self::compute_size_score(env.clone(), user.clone());
-        let streak_score = Self::compute_streak_score(&env, &user);
+        let streak_score = Self::compute_streak_score(env, user);
         let total_score = duration_score
             .saturating_add(consistency_score)
             .saturating_add(size_score)
@@ -20850,6 +20863,22 @@ impl VaultContract {
             size_score,
             streak_score,
             total_score,
+        }
+    }
+
+    /// Read-only composite reputation score combining stake duration, claim
+    /// consistency, position size, and streak participation into a single
+    /// 0-10000 bps score, with time-based decay applied for inactivity.
+    /// No auth required.
+    ///
+    /// Returns all-zero for an address with no active position.
+    pub fn get_reputation_score(env: Env, user: Address) -> ReputationScore {
+        let raw = Self::get_reputation_score_raw(&env, &user);
+        let (decayed, _old, _epochs) =
+            crate::reputation_decay::compute_decayed_score(&env, &user, &raw);
+        ReputationScore {
+            total_score: decayed,
+            ..raw
         }
     }
 
