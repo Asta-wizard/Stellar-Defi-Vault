@@ -17,8 +17,12 @@ mod vault;
 // file. `DataKey` is at Soroban's 50-variant cap for `#[contracttype]` enums,
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
 pub mod commitment; // issue #288 — commit–reveal stake commitments
+pub mod content_curation; // content curation stake-weighted voting
 pub mod insurance; // issue #289 — pool health insurance
+pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod price_oracle; // issue #290 — position price oracle
+pub mod reputation_decay; // reputation score time-decay mechanism
+pub mod validator_rewards; // validator node reward integration
 pub mod vesting_cliff; // issue #287 — reward vesting cliff
 
 pub use nft::StakeReceiptNFT;
@@ -28,7 +32,19 @@ pub use vault::VaultContract;
 mod test;
 
 #[cfg(test)]
+mod test_content_curation;
+
+#[cfg(test)]
 mod test_integration;
+
+#[cfg(test)]
+mod test_nft_fractionalize;
+
+#[cfg(test)]
+mod test_reputation_decay;
+
+#[cfg(test)]
+mod test_validator_rewards;
 
 #[cfg(test)]
 mod test_features_287_290;
