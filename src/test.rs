@@ -13,7 +13,7 @@ use crate::{
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{
         AdminAction, ChangelogEntry, DebtNFT, FeeRecipient, HalvingConfig, MilestoneCondition, PauseReason,
-        ProposableParam, RoundingPolicy, StakingCertificate, SunsetState, TriggerDirection,
+        ProposableParam, RewardTier, RoundingPolicy, StakingCertificate, SunsetState, TriggerDirection,
         UnstakeCheckResult,
     },
     vault::{
@@ -8577,4 +8577,61 @@ fn test_operator_dashboard_populates_operational_metrics() {
 fn test_operator_dashboard_requires_admin_auth() {
     let f = VaultFixture::with_mock_auths(false);
     f.vault.get_operator_dashboard();
+}
+
+fn reward_tiers(env: &Env) -> Vec<RewardTier> {
+    let mut tiers = Vec::new(env);
+    tiers.push_back(RewardTier {
+        max_amount: 1_000,
+        rate_bps: 1_000,
+    });
+    tiers.push_back(RewardTier {
+        max_amount: 10_000,
+        rate_bps: 800,
+    });
+    tiers.push_back(RewardTier {
+        max_amount: i128::MAX,
+        rate_bps: 500,
+    });
+    tiers
+}
+
+#[test]
+fn test_layered_reward_tiers_first_band_rate() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_tiers(&reward_tiers(&f.env));
+    f.vault.stake(&f.alice, &1_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 100);
+}
+
+#[test]
+fn test_layered_reward_tiers_split_across_bands() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_tiers(&reward_tiers(&f.env));
+    f.vault.stake(&f.alice, &5_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 420);
+}
+
+#[test]
+fn test_layered_reward_tiers_blended_effective_rate() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_tiers(&reward_tiers(&f.env));
+
+    assert_eq!(f.vault.get_effective_rate_for_amount(&5_000), 840);
+}
+
+#[test]
+fn test_layered_reward_tiers_empty_uses_flat_rate() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&700);
+    f.vault.set_reward_tiers(&Vec::new(&f.env));
+    f.vault.stake(&f.alice, &1_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 70);
+    assert_eq!(f.vault.get_effective_rate_for_amount(&1_000), 700);
 }

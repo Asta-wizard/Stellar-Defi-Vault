@@ -17,7 +17,7 @@ use crate::{
         LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
         OperatorDashboard, PoolHealthReport, PoolStats, PredictionMarket, PriceCondition, PriorityBidRecord, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
+        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore, RewardTier,
         RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
         Season, SmoothingSchedule, SmoothingStatus,
         StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
@@ -2548,6 +2548,63 @@ impl VaultContract {
     /// Read-only: returns the current effective APR in basis points.
     pub fn current_apr_bps(env: Env) -> u32 {
         balance::get_reward_rate_bps(&env)
+    }
+
+    pub fn set_reward_tiers(env: Env, tiers: Vec<RewardTier>) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        if tiers.len() > 5 {
+            return Err(VaultError::TooManyBoostTiers);
+        }
+        if !tiers.is_empty() {
+            let mut previous_max = 0i128;
+            for i in 0..tiers.len() {
+                let tier = tiers.get(i).unwrap();
+                if tier.max_amount <= previous_max || tier.rate_bps < 0 {
+                    return Err(VaultError::InvalidRate);
+                }
+                previous_max = tier.max_amount;
+            }
+            if tiers.get(tiers.len() - 1).unwrap().max_amount != i128::MAX {
+                return Err(VaultError::InvalidRate);
+            }
+        }
+        balance::set_reward_tiers(&env, &tiers);
+        Ok(())
+    }
+
+    pub fn get_reward_tiers(env: Env) -> Vec<RewardTier> {
+        balance::get_reward_tiers(&env)
+    }
+
+    pub fn get_effective_rate_for_amount(env: Env, amount: i128) -> i128 {
+        if amount <= 0 {
+            return 0;
+        }
+        let tiers = balance::get_reward_tiers(&env);
+        if tiers.is_empty() {
+            return balance::get_reward_rate_bps(&env) as i128;
+        }
+
+        let mut covered = 0i128;
+        let mut weighted_rate = 0i128;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            let upper = amount.min(tier.max_amount);
+            if upper > covered {
+                let band_amount = upper - covered;
+                weighted_rate = match weighted_rate.checked_add(
+                    band_amount.checked_mul(tier.rate_bps).unwrap_or(0),
+                ) {
+                    Some(value) => value,
+                    None => return 0,
+                };
+                covered = upper;
+            }
+            if covered == amount {
+                break;
+            }
+        }
+        weighted_rate.checked_div(amount).unwrap_or(0)
     }
 
     /// Read-only estimate of the compute cost `stake(user, amount)` would
@@ -6221,6 +6278,7 @@ impl VaultContract {
             // as `reward_for_ledgers`, or a season (or campaign) boost would
             // silently fail to affect real accrual.
             let segment_dust = Self::reward_dust_for_ledgers(
+                env,
                 current_shares,
                 seg_rate,
                 current_multiplier,
@@ -6249,6 +6307,7 @@ impl VaultContract {
         }
 
         let final_segment_dust = Self::reward_dust_for_ledgers(
+            env,
             current_shares,
             base_rate,
             current_multiplier,
@@ -6300,6 +6359,7 @@ impl VaultContract {
     /// reward = (100 * 100 * 300) / (10,000 * 6,307,200) = 3,000,000 / 63,072,000_000 = 0.
     /// To mitigate this value loss, we track the sub-unit remainder (dust) per-user and carry it forward.
     fn reward_dust_for_ledgers(
+        env: &Env,
         amount: i128,
         rate_bps: u32,
         multiplier_bps: u32,
@@ -6311,24 +6371,66 @@ impl VaultContract {
             return Ok(0);
         }
 
-        let effective_rate_bps = (rate_bps as i128)
+        let tiers = balance::get_reward_tiers(env);
+        if tiers.is_empty() {
+            return Self::reward_dust_for_rate(
+                amount,
+                rate_bps as i128,
+                multiplier_bps,
+                campaign_multiplier_bps,
+                season_multiplier_bps,
+                elapsed_ledgers,
+            );
+        }
+
+        let mut covered = 0i128;
+        let mut total_dust = 0i128;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            let upper = amount.min(tier.max_amount);
+            if upper > covered {
+                total_dust = total_dust
+                    .checked_add(Self::reward_dust_for_rate(
+                        upper - covered,
+                        tier.rate_bps,
+                        multiplier_bps,
+                        campaign_multiplier_bps,
+                        season_multiplier_bps,
+                        elapsed_ledgers,
+                    )?)
+                    .ok_or(VaultError::ArithmeticError)?;
+                covered = upper;
+            }
+            if covered == amount {
+                break;
+            }
+        }
+        Ok(total_dust)
+    }
+
+    fn reward_dust_for_rate(
+        amount: i128,
+        rate_bps: i128,
+        multiplier_bps: u32,
+        campaign_multiplier_bps: u32,
+        season_multiplier_bps: u32,
+        elapsed_ledgers: u32,
+    ) -> Result<i128, VaultError> {
+        let effective_rate_bps = rate_bps
             .checked_mul(multiplier_bps as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
-
         let boosted_rate_bps = effective_rate_bps
             .checked_mul(campaign_multiplier_bps as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
-
         let seasoned_rate_bps = boosted_rate_bps
             .checked_mul(season_multiplier_bps as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
-
         amount
             .checked_mul(seasoned_rate_bps)
             .ok_or(VaultError::ArithmeticError)?
@@ -12641,7 +12743,7 @@ use crate::{
         LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
         OperatorDashboard, PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
+        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore, RewardTier,
         RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
         Season, SmoothingSchedule, SmoothingStatus,
         StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
@@ -15165,6 +15267,63 @@ impl VaultContract {
     /// Read-only: returns the current effective APR in basis points.
     pub fn current_apr_bps(env: Env) -> u32 {
         balance::get_reward_rate_bps(&env)
+    }
+
+    pub fn set_reward_tiers(env: Env, tiers: Vec<RewardTier>) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        if tiers.len() > 5 {
+            return Err(VaultError::TooManyBoostTiers);
+        }
+        if !tiers.is_empty() {
+            let mut previous_max = 0i128;
+            for i in 0..tiers.len() {
+                let tier = tiers.get(i).unwrap();
+                if tier.max_amount <= previous_max || tier.rate_bps < 0 {
+                    return Err(VaultError::InvalidRate);
+                }
+                previous_max = tier.max_amount;
+            }
+            if tiers.get(tiers.len() - 1).unwrap().max_amount != i128::MAX {
+                return Err(VaultError::InvalidRate);
+            }
+        }
+        balance::set_reward_tiers(&env, &tiers);
+        Ok(())
+    }
+
+    pub fn get_reward_tiers(env: Env) -> Vec<RewardTier> {
+        balance::get_reward_tiers(&env)
+    }
+
+    pub fn get_effective_rate_for_amount(env: Env, amount: i128) -> i128 {
+        if amount <= 0 {
+            return 0;
+        }
+        let tiers = balance::get_reward_tiers(&env);
+        if tiers.is_empty() {
+            return balance::get_reward_rate_bps(&env) as i128;
+        }
+
+        let mut covered = 0i128;
+        let mut weighted_rate = 0i128;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            let upper = amount.min(tier.max_amount);
+            if upper > covered {
+                let band_amount = upper - covered;
+                weighted_rate = match weighted_rate.checked_add(
+                    band_amount.checked_mul(tier.rate_bps).unwrap_or(0),
+                ) {
+                    Some(value) => value,
+                    None => return 0,
+                };
+                covered = upper;
+            }
+            if covered == amount {
+                break;
+            }
+        }
+        weighted_rate.checked_div(amount).unwrap_or(0)
     }
 
     /// Read-only estimate of the compute cost `stake(user, amount)` would
@@ -18858,6 +19017,7 @@ impl VaultContract {
             // as `reward_for_ledgers`, or a season (or campaign) boost would
             // silently fail to affect real accrual.
             let segment_dust = Self::reward_dust_for_ledgers(
+                env,
                 current_shares,
                 seg_rate,
                 current_multiplier,
@@ -18886,6 +19046,7 @@ impl VaultContract {
         }
 
         let final_segment_dust = Self::reward_dust_for_ledgers(
+            env,
             current_shares,
             base_rate,
             current_multiplier,
@@ -18937,6 +19098,7 @@ impl VaultContract {
     /// reward = (100 * 100 * 300) / (10,000 * 6,307,200) = 3,000,000 / 63,072,000_000 = 0.
     /// To mitigate this value loss, we track the sub-unit remainder (dust) per-user and carry it forward.
     fn reward_dust_for_ledgers(
+        env: &Env,
         amount: i128,
         rate_bps: u32,
         multiplier_bps: u32,
@@ -18948,24 +19110,66 @@ impl VaultContract {
             return Ok(0);
         }
 
-        let effective_rate_bps = (rate_bps as i128)
+        let tiers = balance::get_reward_tiers(env);
+        if tiers.is_empty() {
+            return Self::reward_dust_for_rate(
+                amount,
+                rate_bps as i128,
+                multiplier_bps,
+                campaign_multiplier_bps,
+                season_multiplier_bps,
+                elapsed_ledgers,
+            );
+        }
+
+        let mut covered = 0i128;
+        let mut total_dust = 0i128;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            let upper = amount.min(tier.max_amount);
+            if upper > covered {
+                total_dust = total_dust
+                    .checked_add(Self::reward_dust_for_rate(
+                        upper - covered,
+                        tier.rate_bps,
+                        multiplier_bps,
+                        campaign_multiplier_bps,
+                        season_multiplier_bps,
+                        elapsed_ledgers,
+                    )?)
+                    .ok_or(VaultError::ArithmeticError)?;
+                covered = upper;
+            }
+            if covered == amount {
+                break;
+            }
+        }
+        Ok(total_dust)
+    }
+
+    fn reward_dust_for_rate(
+        amount: i128,
+        rate_bps: i128,
+        multiplier_bps: u32,
+        campaign_multiplier_bps: u32,
+        season_multiplier_bps: u32,
+        elapsed_ledgers: u32,
+    ) -> Result<i128, VaultError> {
+        let effective_rate_bps = rate_bps
             .checked_mul(multiplier_bps as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
-
         let boosted_rate_bps = effective_rate_bps
             .checked_mul(campaign_multiplier_bps as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
-
         let seasoned_rate_bps = boosted_rate_bps
             .checked_mul(season_multiplier_bps as i128)
             .ok_or(VaultError::ArithmeticError)?
             .checked_div(BOOST_BPS_BASE as i128)
             .ok_or(VaultError::ArithmeticError)?;
-
         amount
             .checked_mul(seasoned_rate_bps)
             .ok_or(VaultError::ArithmeticError)?

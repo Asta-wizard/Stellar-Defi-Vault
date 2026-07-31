@@ -139,6 +139,13 @@ pub struct PoolStats {
     pub total_rewards_paid: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RewardTier {
+    pub max_amount: i128,
+    pub rate_bps: i128,
+}
+
 /// Aggregate user stats used by `user_stats`.
 ///
 /// - `position_amount`: the user's current position size expressed in token units.
@@ -1296,6 +1303,13 @@ pub struct PoolStats {
     pub reward_token_balance: i128,
     pub paused: bool,
     pub total_rewards_paid: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RewardTier {
+    pub max_amount: i128,
+    pub rate_bps: i128,
 }
 
 /// Aggregate user stats used by `user_stats`.
