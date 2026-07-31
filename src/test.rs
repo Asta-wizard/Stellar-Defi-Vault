@@ -8519,3 +8519,62 @@ fn test_rate_unchanged_refunds_all() {
     let winnings = f.vault.claim_prediction_winnings(&f.alice);
     assert_eq!(winnings, 1_000);
 }
+
+// ── operator dashboard ─────────────────────────────────────────────────────
+
+#[test]
+fn test_operator_dashboard_defaults_for_empty_pool() {
+    let f = VaultFixture::new();
+    let dashboard = f.vault.get_operator_dashboard();
+
+    assert_eq!(dashboard.pool_health.total_staked, 0);
+    assert_eq!(dashboard.staker_count, 0);
+    assert_eq!(dashboard.inactive_staker_count, 0);
+    assert_eq!(dashboard.pending_exit_queue_count, 0);
+    assert_eq!(dashboard.total_ever_staked, 0);
+    assert_eq!(dashboard.total_ever_claimed, 0);
+    assert_eq!(dashboard.largest_position, 0);
+    assert_eq!(dashboard.smallest_active_position, 0);
+    assert_eq!(dashboard.sunset_state, SunsetState::Active);
+    assert_eq!(dashboard.open_governance_proposals, 0);
+    assert_eq!(dashboard.reward_token_runway_days, 0);
+}
+
+#[test]
+fn test_operator_dashboard_populates_operational_metrics() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &500_000);
+
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+    assert!(f.vault.claim(&f.alice) > 0);
+    f.vault.set_cooldown_period(&100);
+    f.vault.request_unstake(&f.alice, &200_000);
+    f.vault
+        .create_proposal(&f.bob, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    let dashboard = f.vault.get_operator_dashboard();
+    assert_eq!(dashboard.pool_health.total_staked, 1_300_000);
+    assert_eq!(dashboard.staker_count, 2);
+    assert_eq!(dashboard.inactive_staker_count, 1);
+    assert_eq!(dashboard.pending_exit_queue_count, 1);
+    assert_eq!(dashboard.total_ever_staked, 1_500_000);
+    assert!(dashboard.total_ever_claimed > 0);
+    assert_eq!(dashboard.largest_position, 800_000);
+    assert_eq!(dashboard.smallest_active_position, 500_000);
+    assert_eq!(dashboard.sunset_state, SunsetState::Active);
+    assert_eq!(dashboard.open_governance_proposals, 1);
+    assert_eq!(
+        dashboard.reward_token_runway_days,
+        f.vault.get_reward_token_solvency_ratio()
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_operator_dashboard_requires_admin_auth() {
+    let f = VaultFixture::with_mock_auths(false);
+    f.vault.get_operator_dashboard();
+}

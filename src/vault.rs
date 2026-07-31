@@ -16,7 +16,7 @@ use crate::{
         InsurancePolicy, InsuranceProduct, InterfaceId, LeaderboardEntry, Loan, LoanConfig,
         LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        PoolHealthReport, PoolStats, PredictionMarket, PriceCondition, PriorityBidRecord, ProposableParam,
+        OperatorDashboard, PoolHealthReport, PoolStats, PredictionMarket, PriceCondition, PriorityBidRecord, ProposableParam,
         RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
         RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
         Season, SmoothingSchedule, SmoothingStatus,
@@ -8446,6 +8446,58 @@ impl VaultContract {
         }
     }
 
+    /// Return all operational metrics needed by an administrator dashboard.
+    pub fn get_operator_dashboard(env: Env) -> Result<OperatorDashboard, VaultError> {
+        admin::require_admin(&env)?;
+
+        let current_ledger = env.ledger().sequence();
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let stakers = balance::get_all_stakers(&env);
+        let mut inactive_staker_count = 0u32;
+        let mut largest_position = 0i128;
+        let mut smallest_active_position: Option<i128> = None;
+
+        for i in 0..stakers.len() {
+            let staker = stakers.get(i).unwrap();
+            let shares = balance::get_shares(&env, &staker);
+            if shares == 0 {
+                continue;
+            }
+
+            if current_ledger.saturating_sub(balance::get_last_claim_ledger(&env, &staker)) >= 100_000 {
+                inactive_staker_count = inactive_staker_count.saturating_add(1);
+            }
+
+            let position = balance::shares_to_amount(total_shares, total_deposited, shares)
+                .unwrap_or(0);
+            if position > largest_position {
+                largest_position = position;
+            }
+            if position > 0 && smallest_active_position.map_or(true, |smallest| position < smallest) {
+                smallest_active_position = Some(position);
+            }
+        }
+
+        Ok(OperatorDashboard {
+            pool_health: Self::pool_health_report(env.clone()),
+            staker_count: balance::get_total_stakers(&env),
+            inactive_staker_count,
+            pending_exit_queue_count: balance::get_exit_queue(&env).len(),
+            total_ever_staked: balance::get_total_ever_staked(&env),
+            total_ever_claimed: env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalEverClaimed)
+                .unwrap_or(0),
+            largest_position,
+            smallest_active_position: smallest_active_position.unwrap_or(0),
+            sunset_state: balance::get_sunset_state(&env),
+            open_governance_proposals: balance::get_open_proposal_count(&env),
+            reward_token_runway_days: Self::get_reward_token_solvency_ratio(env),
+        })
+    }
+
     /// Consolidate multiple staking positions into a single position.
     ///
     /// For the current scalar share balance layout, this performs a reward accrual step
@@ -12588,7 +12640,7 @@ use crate::{
         InsurancePolicy, InsuranceProduct, InterfaceId, LeaderboardEntry, Loan, LoanConfig,
         LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
+        OperatorDashboard, PoolHealthReport, PoolStats, PriceCondition, PriorityBidRecord, ProposableParam,
         RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore,
         RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
         Season, SmoothingSchedule, SmoothingStatus,
@@ -21044,6 +21096,58 @@ impl VaultContract {
             estimated_daily_obligations,
             is_solvent_7_days,
         }
+    }
+
+    /// Return all operational metrics needed by an administrator dashboard.
+    pub fn get_operator_dashboard(env: Env) -> Result<OperatorDashboard, VaultError> {
+        admin::require_admin(&env)?;
+
+        let current_ledger = env.ledger().sequence();
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let stakers = balance::get_all_stakers(&env);
+        let mut inactive_staker_count = 0u32;
+        let mut largest_position = 0i128;
+        let mut smallest_active_position: Option<i128> = None;
+
+        for i in 0..stakers.len() {
+            let staker = stakers.get(i).unwrap();
+            let shares = balance::get_shares(&env, &staker);
+            if shares == 0 {
+                continue;
+            }
+
+            if current_ledger.saturating_sub(balance::get_last_claim_ledger(&env, &staker)) >= 100_000 {
+                inactive_staker_count = inactive_staker_count.saturating_add(1);
+            }
+
+            let position = balance::shares_to_amount(total_shares, total_deposited, shares)
+                .unwrap_or(0);
+            if position > largest_position {
+                largest_position = position;
+            }
+            if position > 0 && smallest_active_position.map_or(true, |smallest| position < smallest) {
+                smallest_active_position = Some(position);
+            }
+        }
+
+        Ok(OperatorDashboard {
+            pool_health: Self::pool_health_report(env.clone()),
+            staker_count: balance::get_total_stakers(&env),
+            inactive_staker_count,
+            pending_exit_queue_count: balance::get_exit_queue(&env).len(),
+            total_ever_staked: balance::get_total_ever_staked(&env),
+            total_ever_claimed: env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalEverClaimed)
+                .unwrap_or(0),
+            largest_position,
+            smallest_active_position: smallest_active_position.unwrap_or(0),
+            sunset_state: balance::get_sunset_state(&env),
+            open_governance_proposals: balance::get_open_proposal_count(&env),
+            reward_token_runway_days: Self::get_reward_token_solvency_ratio(env),
+        })
     }
 
     /// Consolidate multiple staking positions into a single position.
