@@ -832,6 +832,45 @@ fn test_pause_requires_admin_auth() {
 }
 
 #[test]
+fn test_emergency_admin_can_pause() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    f.vault.with_source_account(&f.bob).pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "crisis"),
+    );
+    assert!(f.vault.is_paused());
+}
+
+#[test]
+fn test_emergency_admin_cannot_change_rate() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    let result = f.vault.with_source_account(&f.bob).try_set_reward_rate_bps(&500);
+    assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+}
+
+#[test]
+fn test_revoked_emergency_admin_is_rejected() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    f.vault.with_source_account(&f.admin).revoke_emergency_admin(&f.admin);
+    let result = f.vault.with_source_account(&f.bob).try_pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "crisis"),
+    );
+    assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+}
+
+#[test]
+fn test_primary_admin_keeps_full_access() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    f.vault.with_source_account(&f.admin).set_reward_rate_bps(&500);
+    assert_eq!(f.vault.get_reward_rate_bps(), 500);
+}
+
+#[test]
 fn test_unpause_requires_admin_auth() {
     let f = VaultFixture::new();
     f.vault.unpause();
