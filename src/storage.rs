@@ -139,6 +139,13 @@ pub struct PoolStats {
     pub total_rewards_paid: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RewardTier {
+    pub max_amount: i128,
+    pub rate_bps: i128,
+}
+
 /// Aggregate user stats used by `user_stats`.
 ///
 /// - `position_amount`: the user's current position size expressed in token units.
@@ -323,6 +330,23 @@ pub struct PoolHealthReport {
     pub uptime_ledgers: u32,
     pub estimated_daily_obligations: i128,
     pub is_solvent_7_days: bool,
+}
+
+/// Admin-only operational snapshot for monitoring and alerting dashboards.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OperatorDashboard {
+    pub pool_health: PoolHealthReport,
+    pub staker_count: u32,
+    pub inactive_staker_count: u32,
+    pub pending_exit_queue_count: u32,
+    pub total_ever_staked: i128,
+    pub total_ever_claimed: i128,
+    pub largest_position: i128,
+    pub smallest_active_position: i128,
+    pub sunset_state: SunsetState,
+    pub open_governance_proposals: u32,
+    pub reward_token_runway_days: u32,
 }
 
 /// Effective reward rate breakdown returned by `reward_multiplier_preview` (issue #181).
@@ -1281,6 +1305,13 @@ pub struct PoolStats {
     pub total_rewards_paid: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RewardTier {
+    pub max_amount: i128,
+    pub rate_bps: i128,
+}
+
 /// Aggregate user stats used by `user_stats`.
 ///
 /// - `position_amount`: the user's current position size expressed in token units.
@@ -1465,6 +1496,23 @@ pub struct PoolHealthReport {
     pub uptime_ledgers: u32,
     pub estimated_daily_obligations: i128,
     pub is_solvent_7_days: bool,
+}
+
+/// Admin-only operational snapshot for monitoring and alerting dashboards.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OperatorDashboard {
+    pub pool_health: PoolHealthReport,
+    pub staker_count: u32,
+    pub inactive_staker_count: u32,
+    pub pending_exit_queue_count: u32,
+    pub total_ever_staked: i128,
+    pub total_ever_claimed: i128,
+    pub largest_position: i128,
+    pub smallest_active_position: i128,
+    pub sunset_state: SunsetState,
+    pub open_governance_proposals: u32,
+    pub reward_token_runway_days: u32,
 }
 
 /// Effective reward rate breakdown returned by `reward_multiplier_preview` (issue #181).

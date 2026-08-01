@@ -13,7 +13,7 @@ use crate::{
     nft::{StakeReceiptNFT, StakeReceiptNFTClient},
     storage::{
         AdminAction, ChangelogEntry, DebtNFT, FeeRecipient, HalvingConfig, MilestoneCondition, PauseReason,
-        ProposableParam, RoundingPolicy, StakingCertificate, SunsetState, TriggerDirection,
+        ProposableParam, RewardTier, RoundingPolicy, StakingCertificate, SunsetState, TriggerDirection,
         UnstakeCheckResult,
     },
     vault::{
@@ -829,6 +829,45 @@ fn test_pause_requires_admin_auth() {
         &soroban_sdk::String::from_str(&f.env, "test"),
     );
     assert_eq!(f.env.auths()[0].0, f.admin);
+}
+
+#[test]
+fn test_emergency_admin_can_pause() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    f.vault.with_source_account(&f.bob).pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "crisis"),
+    );
+    assert!(f.vault.is_paused());
+}
+
+#[test]
+fn test_emergency_admin_cannot_change_rate() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    let result = f.vault.with_source_account(&f.bob).try_set_reward_rate_bps(&500);
+    assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+}
+
+#[test]
+fn test_revoked_emergency_admin_is_rejected() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    f.vault.with_source_account(&f.admin).revoke_emergency_admin(&f.admin);
+    let result = f.vault.with_source_account(&f.bob).try_pause(
+        &PauseReason::Other,
+        &soroban_sdk::String::from_str(&f.env, "crisis"),
+    );
+    assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+}
+
+#[test]
+fn test_primary_admin_keeps_full_access() {
+    let f = VaultFixture::new();
+    f.vault.with_source_account(&f.admin).set_emergency_admin(&f.admin, &f.bob);
+    f.vault.with_source_account(&f.admin).set_reward_rate_bps(&500);
+    assert_eq!(f.vault.get_reward_rate_bps(), 500);
 }
 
 #[test]
@@ -8518,4 +8557,120 @@ fn test_rate_unchanged_refunds_all() {
 
     let winnings = f.vault.claim_prediction_winnings(&f.alice);
     assert_eq!(winnings, 1_000);
+}
+
+// ── operator dashboard ─────────────────────────────────────────────────────
+
+#[test]
+fn test_operator_dashboard_defaults_for_empty_pool() {
+    let f = VaultFixture::new();
+    let dashboard = f.vault.get_operator_dashboard();
+
+    assert_eq!(dashboard.pool_health.total_staked, 0);
+    assert_eq!(dashboard.staker_count, 0);
+    assert_eq!(dashboard.inactive_staker_count, 0);
+    assert_eq!(dashboard.pending_exit_queue_count, 0);
+    assert_eq!(dashboard.total_ever_staked, 0);
+    assert_eq!(dashboard.total_ever_claimed, 0);
+    assert_eq!(dashboard.largest_position, 0);
+    assert_eq!(dashboard.smallest_active_position, 0);
+    assert_eq!(dashboard.sunset_state, SunsetState::Active);
+    assert_eq!(dashboard.open_governance_proposals, 0);
+    assert_eq!(dashboard.reward_token_runway_days, 0);
+}
+
+#[test]
+fn test_operator_dashboard_populates_operational_metrics() {
+    let f = VaultFixture::new();
+    setup_reward_pool(&f);
+    set_ledger(&f.env, 1);
+    f.vault.stake(&f.alice, &1_000_000);
+    f.vault.stake(&f.bob, &500_000);
+
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+    assert!(f.vault.claim(&f.alice) > 0);
+    f.vault.set_cooldown_period(&100);
+    f.vault.request_unstake(&f.alice, &200_000);
+    f.vault
+        .create_proposal(&f.bob, &ProposableParam::MinStake, &1_i128, &100_u32);
+
+    let dashboard = f.vault.get_operator_dashboard();
+    assert_eq!(dashboard.pool_health.total_staked, 1_300_000);
+    assert_eq!(dashboard.staker_count, 2);
+    assert_eq!(dashboard.inactive_staker_count, 1);
+    assert_eq!(dashboard.pending_exit_queue_count, 1);
+    assert_eq!(dashboard.total_ever_staked, 1_500_000);
+    assert!(dashboard.total_ever_claimed > 0);
+    assert_eq!(dashboard.largest_position, 800_000);
+    assert_eq!(dashboard.smallest_active_position, 500_000);
+    assert_eq!(dashboard.sunset_state, SunsetState::Active);
+    assert_eq!(dashboard.open_governance_proposals, 1);
+    assert_eq!(
+        dashboard.reward_token_runway_days,
+        f.vault.get_reward_token_solvency_ratio()
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_operator_dashboard_requires_admin_auth() {
+    let f = VaultFixture::with_mock_auths(false);
+    f.vault.get_operator_dashboard();
+}
+
+fn reward_tiers(env: &Env) -> Vec<RewardTier> {
+    let mut tiers = Vec::new(env);
+    tiers.push_back(RewardTier {
+        max_amount: 1_000,
+        rate_bps: 1_000,
+    });
+    tiers.push_back(RewardTier {
+        max_amount: 10_000,
+        rate_bps: 800,
+    });
+    tiers.push_back(RewardTier {
+        max_amount: i128::MAX,
+        rate_bps: 500,
+    });
+    tiers
+}
+
+#[test]
+fn test_layered_reward_tiers_first_band_rate() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_tiers(&reward_tiers(&f.env));
+    f.vault.stake(&f.alice, &1_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 100);
+}
+
+#[test]
+fn test_layered_reward_tiers_split_across_bands() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_tiers(&reward_tiers(&f.env));
+    f.vault.stake(&f.alice, &5_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 420);
+}
+
+#[test]
+fn test_layered_reward_tiers_blended_effective_rate() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_tiers(&reward_tiers(&f.env));
+
+    assert_eq!(f.vault.get_effective_rate_for_amount(&5_000), 840);
+}
+
+#[test]
+fn test_layered_reward_tiers_empty_uses_flat_rate() {
+    let f = VaultFixture::new();
+    f.vault.set_reward_rate_bps(&700);
+    f.vault.set_reward_tiers(&Vec::new(&f.env));
+    f.vault.stake(&f.alice, &1_000);
+    set_ledger(&f.env, STELLAR_LEDGERS_PER_YEAR);
+
+    assert_eq!(f.vault.calc_pending_reward(&f.alice), 70);
+    assert_eq!(f.vault.get_effective_rate_for_amount(&1_000), 700);
 }

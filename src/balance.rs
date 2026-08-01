@@ -3,7 +3,7 @@ use crate::storage::{
     ContractDelegate, DataKey, DayBucket, DynamicFeeConfig, FeeRecipient, FlashStakeReceipt,
     GovernanceProposal, InsurancePolicy, InsuranceProduct, Loan, LoanConfig, LotteryConfig,
     Milestone, MultisigConfig, OnboardingChecklist, PendingAction, PriceCondition,
-    PriorityBidRecord, RateHistoryEntry, ReferralStats, RevenueShareMerkleRoot,
+    PriorityBidRecord, RateHistoryEntry, ReferralStats, RewardTier, RevenueShareMerkleRoot,
     RevenueSharingConfig, Season, StakePosition, SunsetState, VestingEntry,
 };
 
@@ -68,6 +68,17 @@ pub fn set_reward_rate_bps(env: &Env, rate_bps: u32) {
     env.storage()
         .instance()
         .set(&DataKey::RewardRateBps, &rate_bps);
+}
+
+pub fn get_reward_tiers(env: &Env) -> Vec<RewardTier> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("rwtiers"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_reward_tiers(env: &Env, tiers: &Vec<RewardTier>) {
+    env.storage().instance().set(&symbol_short!("rwtiers"), tiers);
 }
 
 pub fn get_rate_history(env: &Env) -> Vec<(u32, u32)> {
