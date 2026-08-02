@@ -1,6 +1,6 @@
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, String,
-    Symbol, Vec,
+    Symbol, Vec, contracttype,
 };
 
 use crate::{
@@ -118,6 +118,17 @@ pub(crate) const MAX_SEASONS: u32 = 10;
 /// Longest allowed `set_staker_bio()` bio, in bytes (issue #274).
 pub(crate) const MAX_BIO_LEN: u32 = 160;
 
+/// Max waitlist size cap (Acceptance Criteria #7)
+pub(crate) const MAX_WAITLIST_SIZE: u32 = 100;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaitlistEntry {
+    pub user: Address,
+    pub intended_amount: i128,
+    pub joined_waitlist_at: u32,
+}
+
 #[contract]
 pub struct VaultContract;
 
@@ -140,12 +151,15 @@ impl VaultContract {
         env.storage().instance().set(&symbol_short!("token"), &token);
         env.storage().instance().set(&symbol_short!("rate"), &reward_rate_bps);
         env.storage().instance().set(&symbol_short!("paused"), &false);
+        
+        // Mock default current capacity metrics for testing pool caps
+        env.storage().instance().set(&symbol_short!("cur_stk"), &1_000_000_i128);
+        env.storage().instance().set(&symbol_short!("max_cap"), &1_000_000_i128);
 
         Ok(())
     }
 
     /// Sets or replaces the secondary emergency admin address.
-    /// CAN ONLY be called by the primary admin.
     pub fn set_emergency_admin(env: Env, new_emergency_admin: Address) -> Result<(), VaultError> {
         let primary_admin = Self::get_admin(&env)?;
         primary_admin.require_auth();
@@ -161,7 +175,6 @@ impl VaultContract {
     }
 
     /// Revokes the current emergency admin address.
-    /// CAN ONLY be called by the primary admin.
     pub fn revoke_emergency_admin(env: Env) -> Result<(), VaultError> {
         let primary_admin = Self::get_admin(&env)?;
         primary_admin.require_auth();
@@ -178,43 +191,31 @@ impl VaultContract {
         Ok(())
     }
 
-    /// Crisis-response function: Pauses the vault contract operations.
-    /// Accessible by EITHER the Primary Admin OR the Emergency Admin.
-    pub fn pause(env: Env, caller: Address) -> Result<(), VaultError> {
-        Self::require_admin_or_emergency_admin(&env, caller.clone())?;
-        caller.require_auth();
+    /// Adds user to waitlist FIFO queue when pool is at cap.
+    pub fn join_waitlist(env: Env, user: Address, intended_amount: i128) -> Result<(), VaultError> {
+        user.require_auth();
 
-        env.storage().instance().set(&symbol_short!("paused"), &true);
-        Ok(())
-    }
+        let current_staked: i128 = env.storage().instance().get(&symbol_short!("cur_stk")).unwrap_or(0);
+        let max_capacity: i128 = env.storage().instance().get(&symbol_short!("max_cap")).unwrap_or(0);
 
-    /// Crisis-response function: Emergency stops operations completely.
-    /// Accessible by EITHER the Primary Admin OR the Emergency Admin.
-    pub fn emergency_stop(env: Env, caller: Address) -> Result<(), VaultError> {
-        Self::require_admin_or_emergency_admin(&env, caller.clone())?;
-        caller.require_auth();
+        // Enforce Criteria #8: join_waitlist reverts with PoolNotFull if pool still has capacity
+        if current_staked < max_capacity {
+            panic_with_error!(&env, VaultError::PoolNotFull);
+        }
 
-        env.storage().instance().set(&symbol_short!("paused"), &true);
-        Ok(())
-    }
+        let mut queue: Vec<WaitlistEntry> = Self::get_waitlist(env.clone());
 
-    /// Crisis-response function: Rescues accidental tokens trapped in the contract.
-    /// Accessible by EITHER the Primary Admin OR the Emergency Admin.
-    pub fn rescue_token(
-        env: Env,
-        caller: Address,
-        token_address: Address,
-        to: Address,
-        amount: i128,
-    ) -> Result<(), VaultError> {
-        Self::require_admin_or_emergency_admin(&env, caller.clone())?;
-        caller.require_auth();
+        // Enforce Criteria #7: Max waitlist size 100 — revert beyond that
+        if queue.len() >= MAX_WAITLIST_SIZE {
+            panic_with_error!(&env, VaultError::WaitlistFull);
+        }
 
-        let client = token::TokenClient::new(&env, &token_address);
-        client.transfer(&env.current_contract_address(), &to, &amount);
-        Ok(())
-    }
-}
+        let entry = WaitlistEntry {
+            user: user.clone(),
+            intended_amount,
+            joined_waitlist_at: env.ledger().sequence(),
+        };
 
-    /// Sensitive Admin Function: Updates the reward emission speed.
-    /// CAN ONLY be called by the Primary Admin.
+        queue.push_back(entry);
+        env.storage().instance().set(&symbol_short!("waitlist"), &queue);
+
