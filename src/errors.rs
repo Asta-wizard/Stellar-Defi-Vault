@@ -159,12 +159,6 @@ pub enum VaultError {
     /// Returned when a user tries to join the waitlist but it has reached its 100-entry capacity limit.
     WaitlistFull = 49,
     
-    // --- Legacy Workspace Mappings ---
-    
-    /// Fallback mapping variant for workspace configurations.
-    VaultFeatureError = 50,
-    /// Fallback mapping variant for internal validation configurations.
-    VaultExtError = 51,
     /// Fallback mapping variant for authorization error conditions.
-    NotAuthorized = 52,
+    NotAuthorized = 50,
 }

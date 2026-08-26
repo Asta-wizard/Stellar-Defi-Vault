@@ -5,7 +5,7 @@ use soroban_sdk::{
 
 use crate::{
     admin, balance,
-    errors::{VaultError, VaultExtError, VaultFeatureError},
+    errors::VaultError,
     events,
     nft::StakeReceiptNFTClient,
     storage::{
@@ -159,9 +159,48 @@ impl VaultContract {
         Ok(())
     }
 
+    /// Stakes `amount` of the pool's token on behalf of `user`, minting
+    /// shares proportional to the current share price (1:1 for the pool's
+    /// first deposit). Returns the number of shares minted.
+    pub fn stake(env: Env, user: Address, amount: i128) -> Result<i128, VaultError> {
+        user.require_auth();
+        if amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("token"))
+            .ok_or(VaultError::NotInitialized)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &user,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let total_shares = balance::get_total_shares(&env);
+        let total_deposited = balance::get_total_deposited(&env);
+        let shares_minted = if total_shares == 0 || total_deposited == 0 {
+            amount
+        } else {
+            amount
+                .checked_mul(total_shares)
+                .and_then(|v| v.checked_div(total_deposited))
+                .ok_or(VaultError::ArithmeticError)?
+        };
+
+        let current_shares = balance::get_shares(&env, &user);
+        balance::set_shares(&env, &user, current_shares + shares_minted);
+        balance::set_total_shares(&env, total_shares + shares_minted);
+        balance::set_total_deposited(&env, total_deposited + amount);
+
+        Ok(shares_minted)
+    }
+
     /// Sets or replaces the secondary emergency admin address.
     pub fn set_emergency_admin(env: Env, new_emergency_admin: Address) -> Result<(), VaultError> {
-        let primary_admin = Self::get_admin(&env)?;
+        let primary_admin = admin::get_admin(&env)?;
         primary_admin.require_auth();
 
         env.storage().instance().set(&symbol_short!("em_admin"), &new_emergency_admin);
@@ -176,7 +215,7 @@ impl VaultContract {
 
     /// Revokes the current emergency admin address.
     pub fn revoke_emergency_admin(env: Env) -> Result<(), VaultError> {
-        let primary_admin = Self::get_admin(&env)?;
+        let primary_admin = admin::get_admin(&env)?;
         primary_admin.require_auth();
 
         if env.storage().instance().has(&symbol_short!("em_admin")) {
@@ -218,4 +257,21 @@ impl VaultContract {
 
         queue.push_back(entry);
         env.storage().instance().set(&symbol_short!("waitlist"), &queue);
+
+        env.events().publish(
+            (symbol_short!("wl_join"), user),
+            (intended_amount, env.ledger().sequence()),
+        );
+
+        Ok(())
+    }
+
+    /// Read-only query for the current waitlist FIFO queue.
+    pub fn get_waitlist(env: Env) -> Vec<WaitlistEntry> {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("waitlist"))
+            .unwrap_or(Vec::new(&env))
+    }
+}
 
