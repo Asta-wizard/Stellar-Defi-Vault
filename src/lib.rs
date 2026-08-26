@@ -16,12 +16,16 @@ mod vault;
 // keys, types, and entrypoints together instead of appending to a 25k-line
 // file. `DataKey` is at Soroban's 50-variant cap for `#[contracttype]` enums,
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
+pub mod collateral_swap; // issue #335 — collateral swap without unstaking
 pub mod commitment; // issue #288 — commit–reveal stake commitments
+pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
+pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
 pub mod insurance; // issue #289 — pool health insurance
 pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod reputation_decay; // reputation score time-decay mechanism
+pub mod tvl_rate_rebalance; // issue #333 — TVL-tiered pool reward rate rebalancing
 pub mod validator_rewards; // validator node reward integration
 pub mod vesting_cliff; // issue #287 — reward vesting cliff
 
