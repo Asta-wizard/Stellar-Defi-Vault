@@ -23,6 +23,7 @@ pub mod performance_league_table; // issue #373 — cross-pool performance leagu
 pub mod xlm_wrapper_integration; // issue #372 — auto-wrap native XLM to wXLM before staking
 pub mod commitment; // issue #288 — commit–reveal stake commitments
 pub mod competitive_season; // periodic leaderboard-resetting competitive seasons
+pub mod compliance_report; // issue #409 — regulatory compliance report generator
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
@@ -31,12 +32,15 @@ pub mod insurance; // issue #289 — pool health insurance
 pub mod keeper_registry; // approved-keeper registry with performance stats
 pub mod mutual_insurance_pool; // issue #366 — peer mutual insurance pool
 pub mod nft_fractionalize; // NFT receipt fractionalization
+pub mod nft_redeem; // issue #410 — burn-and-redeem NFT-triggered position exit
 pub mod partial_freeze; // issue #337 — partial position freeze
 pub mod pool_presale; // issue #369 — pool pre-sale reserved staking spots
 pub mod position_dna; // deterministic staking position fingerprint (position DNA)
+pub mod position_var; // issue #408 — position value-at-risk estimate
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod qr_metadata; // issue #324 — stake receipt QR metadata
 pub mod reputation_decay; // reputation score time-decay mechanism
+pub mod staker_diversity; // issue #407 — staker diversity / stake-concentration score
 pub mod sub_unit_reward_accumulator; // issue #367 — fractional reward carry-forward below minimum transfer
 pub mod tvl_rate_rebalance; // issue #333 — TVL-tiered pool reward rate rebalancing
 pub mod validator_rewards; // validator node reward integration
@@ -77,3 +81,15 @@ mod test_stake_quota;
 
 #[cfg(test)]
 mod test_slash_dispute;
+
+#[cfg(test)]
+mod test_nft_redeem;
+
+#[cfg(test)]
+mod test_compliance_report;
+
+#[cfg(test)]
+mod test_position_var;
+
+#[cfg(test)]
+mod test_staker_diversity;
