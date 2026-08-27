@@ -17,6 +17,8 @@ mod vault;
 // file. `DataKey` is at Soroban's 50-variant cap for `#[contracttype]` enums,
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
 pub mod combined_vesting; // issue #346 — cliff-then-linear combined reward vesting
+pub mod performance_league_table; // issue #373 — cross-pool performance league table
+pub mod xlm_wrapper_integration; // issue #372 — auto-wrap native XLM to wXLM before staking
 pub mod commitment; // issue #288 — commit–reveal stake commitments
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
