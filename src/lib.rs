@@ -21,19 +21,23 @@ mod vault;
 pub mod combined_vesting; // issue #346 — cliff-then-linear combined reward vesting
 pub mod performance_league_table; // issue #373 — cross-pool performance league table
 pub mod xlm_wrapper_integration; // issue #372 — auto-wrap native XLM to wXLM before staking
+pub mod collusion_detector; // issue #406 — coordinated stake/unstake pattern detector
 pub mod commitment; // issue #288 — commit–reveal stake commitments
 pub mod competitive_season; // periodic leaderboard-resetting competitive seasons
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
 pub mod epoch_reward_cap; // per-epoch reward outflow cap with deferred overflow claims
+pub mod governance_power_decay; // issue #404 — governance vote weight decay for long-inactive voters
 pub mod insurance; // issue #289 — pool health insurance
 pub mod keeper_registry; // approved-keeper registry with performance stats
+pub mod minimum_reserve_ratio; // issue #405 — minimum reward-reserve ratio floor
 pub mod mutual_insurance_pool; // issue #366 — peer mutual insurance pool
 pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod partial_freeze; // issue #337 — partial position freeze
 pub mod pool_presale; // issue #369 — pool pre-sale reserved staking spots
 pub mod position_dna; // deterministic staking position fingerprint (position DNA)
+pub mod position_sealed_bid_auction; // issue #403 — sealed-bid position auction
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod qr_metadata; // issue #324 — stake receipt QR metadata
 pub mod reputation_decay; // reputation score time-decay mechanism
@@ -77,3 +81,15 @@ mod test_stake_quota;
 
 #[cfg(test)]
 mod test_slash_dispute;
+
+#[cfg(test)]
+mod test_collusion_detector;
+
+#[cfg(test)]
+mod test_minimum_reserve_ratio;
+
+#[cfg(test)]
+mod test_governance_power_decay;
+
+#[cfg(test)]
+mod test_position_sealed_bid_auction;
