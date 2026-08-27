@@ -2,6 +2,7 @@
 
 mod admin;
 pub mod admin_succession; // designated heir admin activated on prolonged inactivity
+pub mod anti_dump_claim_cooldown; // issue #365 — cooldown after large reward claims
 mod balance;
 mod errors;
 mod events;
@@ -26,6 +27,7 @@ pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignme
 pub mod epoch_reward_cap; // per-epoch reward outflow cap with deferred overflow claims
 pub mod insurance; // issue #289 — pool health insurance
 pub mod keeper_registry; // approved-keeper registry with performance stats
+pub mod mutual_insurance_pool; // issue #366 — peer mutual insurance pool
 pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod partial_freeze; // issue #337 — partial position freeze
 pub mod pool_presale; // issue #369 — pool pre-sale reserved staking spots
@@ -33,6 +35,7 @@ pub mod position_dna; // deterministic staking position fingerprint (position DN
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod qr_metadata; // issue #324 — stake receipt QR metadata
 pub mod reputation_decay; // reputation score time-decay mechanism
+pub mod sub_unit_reward_accumulator; // issue #367 — fractional reward carry-forward below minimum transfer
 pub mod tvl_rate_rebalance; // issue #333 — TVL-tiered pool reward rate rebalancing
 pub mod validator_rewards; // validator node reward integration
 pub mod vesting_cliff; // issue #287 — reward vesting cliff
