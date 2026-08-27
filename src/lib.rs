@@ -25,7 +25,10 @@ pub mod partial_freeze; // issue #337 — partial position freeze
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod qr_metadata; // issue #324 — stake receipt QR metadata
 pub mod reputation_decay; // reputation score time-decay mechanism
-pub mod validator_delegation; // issue #332 — validator set delegation
+pub mod reward_waterfall; // issue #341 — multi-reward-type priority payout
+pub mod slash_dispute; // issue #336 — community-voted slash disputes
+pub mod stake_quota; // issue #339 — stake-weighted operation quota
+pub mod transfer_cooldown; // issue #340 — cooldown after receiving a transferred position
 pub mod validator_rewards; // validator node reward integration
 pub mod vesting_cliff; // issue #287 — reward vesting cliff
 
@@ -52,3 +55,15 @@ mod test_validator_rewards;
 
 #[cfg(test)]
 mod test_features_287_290;
+
+#[cfg(test)]
+mod test_reward_waterfall;
+
+#[cfg(test)]
+mod test_transfer_cooldown;
+
+#[cfg(test)]
+mod test_stake_quota;
+
+#[cfg(test)]
+mod test_slash_dispute;

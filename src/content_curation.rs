@@ -14,7 +14,8 @@ use soroban_sdk::{contractimpl, contracttype, symbol_short, Address, Env, String
 use crate::admin;
 use crate::balance;
 use crate::errors::VaultError;
-use crate::vault::{VaultContract, VaultContractClient};
+use crate::stake_quota;
+use crate::vault::VaultContract;
 
 /// Maximum number of open (not-yet-closed) content items.
 pub const MAX_OPEN_ITEMS: u32 = 100;
@@ -108,6 +109,13 @@ impl VaultContract {
         if balance::get_shares(&env, &user) == 0 {
             return Err(VaultError::PositionNotFound);
         }
+
+        // Issue #339: consuming quota before the open-items check means a
+        // caller can't grief the shared item cap without spending their own
+        // quota, but still leaves the quota check itself first so an
+        // exhausted caller gets `QuotaExhausted` rather than a confusing
+        // `MaxPositionsReached` once items happen to be full too.
+        stake_quota::consume_quota(&env, &user, 1)?;
 
         let mut items = get_items(&env);
 
