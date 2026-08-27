@@ -23,7 +23,9 @@ pub mod content_curation; // content curation stake-weighted voting
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
 pub mod insurance; // issue #289 — pool health insurance
 pub mod nft_fractionalize; // NFT receipt fractionalization
+pub mod partial_freeze; // issue #337 — partial position freeze
 pub mod price_oracle; // issue #290 — position price oracle
+pub mod qr_metadata; // issue #324 — stake receipt QR metadata
 pub mod reputation_decay; // reputation score time-decay mechanism
 pub mod tvl_rate_rebalance; // issue #333 — TVL-tiered pool reward rate rebalancing
 pub mod validator_rewards; // validator node reward integration
@@ -52,3 +54,15 @@ mod test_validator_rewards;
 
 #[cfg(test)]
 mod test_features_287_290;
+
+#[cfg(test)]
+mod test_reward_waterfall;
+
+#[cfg(test)]
+mod test_transfer_cooldown;
+
+#[cfg(test)]
+mod test_stake_quota;
+
+#[cfg(test)]
+mod test_slash_dispute;
