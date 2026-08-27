@@ -1,6 +1,7 @@
 #![no_std]
 
 mod admin;
+pub mod admin_succession; // designated heir admin activated on prolonged inactivity
 mod balance;
 mod errors;
 mod events;
@@ -18,10 +19,13 @@ mod vault;
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
 pub mod combined_vesting; // issue #346 — cliff-then-linear combined reward vesting
 pub mod commitment; // issue #288 — commit–reveal stake commitments
+pub mod competitive_season; // periodic leaderboard-resetting competitive seasons
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
 pub mod insurance; // issue #289 — pool health insurance
+pub mod liquidity_bridge; // atomic stake bridging between compatible active pools
+pub mod lock_extension; // voluntary lock-period extension for a reward boost
 pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod partial_freeze; // issue #337 — partial position freeze
 pub mod price_oracle; // issue #290 — position price oracle
