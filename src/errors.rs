@@ -249,4 +249,27 @@ pub enum VaultError {
     /// caller is still inside the cooldown window started by a prior claim
     /// that exceeded the configured threshold.
     ClaimCooldownActive = 70,
+
+    // --- Position sealed-bid auction (issue #403) ---
+    /// Returned by `list_position_for_auction` when the caller already has
+    /// an unsettled auction listing open.
+    SellerAuctionAlreadyActive = 71,
+    /// Returned by `commit_bid`, `reveal_bid`, and `settle_auction` when the
+    /// given auction id does not exist.
+    AuctionNotFound = 72,
+    /// Returned by `commit_bid` after the commit deadline has passed, by
+    /// `reveal_bid` outside the reveal window, and by `settle_auction` before
+    /// the reveal deadline has passed.
+    AuctionPhaseClosed = 73,
+    /// Returned by `settle_auction` and `refund_losing_bids` when the
+    /// auction has already been settled.
+    AuctionAlreadySettled = 74,
+    /// Returned by `reveal_bid` when the caller never called `commit_bid`
+    /// for the given auction.
+    BidNotFound = 75,
+
+    // --- Collusion detector (issue #406) ---
+    /// Returned by `dismiss_alert` when the given alert index does not exist
+    /// in the current rolling alert list.
+    AlertNotFound = 76,
 }
