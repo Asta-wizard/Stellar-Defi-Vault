@@ -197,7 +197,7 @@ impl VaultContract {
     /// the base score, applies decay based on elapsed epochs since last activity,
     /// and emits a `reputation_decayed` event if the score decreased.
     pub fn apply_reputation_decay(env: Env, user: Address) -> ReputationScore {
-        let base = Self::get_reputation_score_raw(&env, &user);
+        let base = Self::get_reputation_score_raw(&env, user.clone());
         let (decayed, old_score, epochs_elapsed) =
             compute_decayed_score(&env, &user, &base);
 

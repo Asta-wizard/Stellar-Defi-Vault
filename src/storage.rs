@@ -161,6 +161,36 @@ pub struct UserStats {
     pub last_claim_ledger: u32,
 }
 
+/// Matching program configuration (issue #242).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchingProgram {
+    pub match_rate_bps: u32,
+    pub per_user_cap: i128,
+    pub total_budget: i128,
+    pub budget_used: i128,
+    pub active: bool,
+}
+
+/// Per-user matching stats (issue #242).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserMatchingStats {
+    pub total_matched: i128,
+}
+
+/// Cohort statistics for weekly staker cohorts.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CohortStats {
+    pub cohort_id: u32,
+    pub member_count: u32,
+    pub total_staked: i128,
+    pub avg_position: i128,
+    pub total_rewards_claimed: i128,
+    pub active_members: u32,
+}
+
 /// Active boost campaign set by admin (#48).
 ///
 /// - `multiplier_bps`: reward multiplier stacked on top of tier multipliers (10000 = 1x).

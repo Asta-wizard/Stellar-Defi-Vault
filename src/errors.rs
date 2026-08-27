@@ -137,6 +137,7 @@ pub enum VaultError {
     InvalidRate = 40,
     /// Custom error message exceeds MAX_ERROR_MESSAGE_LENGTH (150 characters).
     MessageTooLong = 41,
+
     /// Returned by epoch-mode entrypoints when the contract is in the wrong mode.
     EpochModeConflict = 42,
     /// Returned when a vesting queue already holds the maximum supported entries.
