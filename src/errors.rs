@@ -249,4 +249,11 @@ pub enum VaultError {
     /// caller is still inside the cooldown window started by a prior claim
     /// that exceeded the configured threshold.
     ClaimCooldownActive = 70,
+
+    /// Returned by `sign_covenant` (issue #413) when the supplied
+    /// `terms_hash` does not match the currently published pool terms.
+    TermsMismatch = 71,
+    /// Returned by `stake_with_covenant` (issue #413) when the caller has
+    /// not signed the currently published pool terms.
+    CovenantRequired = 72,
 }
