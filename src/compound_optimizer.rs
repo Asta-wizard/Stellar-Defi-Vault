@@ -178,6 +178,10 @@ impl VaultContract {
     /// account for position-size changes) before checking it, per the
     /// issue's note that the interval is refreshed on every trigger.
     ///
+    /// Reverts with `Unauthorized` unless `keeper` is an active, registered
+    /// keeper (see `keeper_registry.rs`); a successful trigger records the
+    /// incentive against that keeper's stats.
+    ///
     /// Does not actually claim/restake -- see this module's doc comment --
     /// but performs every other step: auth, the elapsed gate, interval
     /// refresh, and the keeper-incentive event.
@@ -187,6 +191,10 @@ impl VaultContract {
         user: Address,
     ) -> Result<i128, VaultError> {
         keeper.require_auth();
+
+        if !crate::keeper_registry::is_registered(&env, &keeper) {
+            return Err(VaultError::Unauthorized);
+        }
 
         let mut config =
             crate::compound_optimizer::get_config(&env, &user).ok_or(VaultError::NotInitialized)?;
@@ -213,6 +221,8 @@ impl VaultContract {
         config.last_optimized_at = now;
         config.optimal_interval_ledgers = new_interval;
         crate::compound_optimizer::set_config(&env, &user, &config);
+
+        crate::keeper_registry::record_keeper_action(&env, &keeper, keeper_incentive);
 
         env.events().publish(
             (symbol_short!("opt_trig"), user.clone()),

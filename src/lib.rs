@@ -23,11 +23,12 @@ pub mod competitive_season; // periodic leaderboard-resetting competitive season
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
+pub mod epoch_reward_cap; // per-epoch reward outflow cap with deferred overflow claims
 pub mod insurance; // issue #289 — pool health insurance
-pub mod liquidity_bridge; // atomic stake bridging between compatible active pools
-pub mod lock_extension; // voluntary lock-period extension for a reward boost
+pub mod keeper_registry; // approved-keeper registry with performance stats
 pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod partial_freeze; // issue #337 — partial position freeze
+pub mod position_dna; // deterministic staking position fingerprint (position DNA)
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod qr_metadata; // issue #324 — stake receipt QR metadata
 pub mod reputation_decay; // reputation score time-decay mechanism

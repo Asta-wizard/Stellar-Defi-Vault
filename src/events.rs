@@ -1274,6 +1274,31 @@ pub fn insurance_purchased(
     env.events().publish(topics, (premium, coverage, ledger));
 }
 
+// ── Keeper registry ───────────────────────────────────────────────────────────
+
+pub fn keeper_registered(env: &Env, keeper: &Address, ledger: u32) {
+    let topics = (symbol_short!("kpr_reg"), keeper);
+    env.events().publish(topics, (ledger,));
+}
+
+pub fn keeper_deregistered(env: &Env, keeper: &Address, ledger: u32) {
+    let topics = (symbol_short!("kpr_dreg"), keeper);
+    env.events().publish(topics, (ledger,));
+}
+
+// ── Epoch reward outflow cap ─────────────────────────────────────────────────
+
+/// Emitted when a claim exceeds the remaining epoch cap headroom and the
+/// excess is queued as a `DeferredReward`, claimable once `next_epoch_start`
+/// is reached.
+pub fn reward_deferred(env: &Env, user: &Address, deferred_amount: i128, next_epoch_start: u32) {
+    let topics = (symbol_short!("rwd_defr"), user);
+    env.events().publish(
+        topics,
+        (deferred_amount, next_epoch_start, env.ledger().sequence()),
+    );
+}
+
 /// Issue #244: emitted when rewards are claimed in a non-stake output token.
 pub fn reward_claimed_in_token(
     env: &Env,
