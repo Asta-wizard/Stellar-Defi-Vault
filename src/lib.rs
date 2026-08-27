@@ -19,6 +19,7 @@ mod vault;
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
 pub mod combined_vesting; // issue #346 — cliff-then-linear combined reward vesting
 pub mod commitment; // issue #288 — commit–reveal stake commitments
+pub mod competitive_season; // periodic leaderboard-resetting competitive seasons
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
