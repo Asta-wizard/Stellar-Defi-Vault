@@ -25,6 +25,7 @@ pub mod content_curation; // content curation stake-weighted voting
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
 pub mod insurance; // issue #289 — pool health insurance
 pub mod liquidity_bridge; // atomic stake bridging between compatible active pools
+pub mod lock_extension; // voluntary lock-period extension for a reward boost
 pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod partial_freeze; // issue #337 — partial position freeze
 pub mod price_oracle; // issue #290 — position price oracle
