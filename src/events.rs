@@ -1300,6 +1300,62 @@ pub fn reward_deferred(env: &Env, user: &Address, deferred_amount: i128, next_ep
 }
 
 /// Issue #244: emitted when rewards are claimed in a non-stake output token.
+// ── Issue #374: admin action nonce (replay protection) ───────────────────────
+
+/// Emitted by `execute_admin_action_with_nonce()` after a nonce-gated admin
+/// action successfully executes. `nonce` is the value that was just consumed
+/// — the admin's next call must supply `nonce + 1`.
+pub fn admin_action_nonce_consumed(env: &Env, admin: &Address, nonce: u64, ledger: u32) {
+    let topics = (symbol_short!("adm_nonce"), admin);
+    env.events().publish(topics, (nonce, ledger));
+}
+
+// ── Issue #376: halving countdown ─────────────────────────────────────────────
+// Read-only advisory (like `reward_smoothing()`'s `SmoothingStatus`) — no
+// event to emit, nothing about pool state changes when it's queried.
+
+// ── Issue #375: governance proposal comment thread ────────────────────────────
+
+/// Emitted by `post_proposal_comment()` when a stake-weighted comment is
+/// added to a proposal's thread.
+pub fn proposal_comment_posted(
+    env: &Env,
+    author: &Address,
+    proposal_id: u32,
+    stake_weight: i128,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("prop_cmt"), author);
+    env.events()
+        .publish(topics, (proposal_id, stake_weight, ledger));
+}
+
+// ── Issue #377: position health alert ─────────────────────────────────────────
+
+/// Emitted by `position_health_alert()` when at least one attention-worthy
+/// condition is true for the checked position.
+pub fn position_health_alert(
+    env: &Env,
+    user: &Address,
+    approaching_expiry: bool,
+    lock_ending_soon: bool,
+    loan_at_risk: bool,
+    rewards_near_cap: bool,
+    ledger: u32,
+) {
+    let topics = (symbol_short!("pos_hlth"), user);
+    env.events().publish(
+        topics,
+        (
+            approaching_expiry,
+            lock_ending_soon,
+            loan_at_risk,
+            rewards_near_cap,
+            ledger,
+        ),
+    );
+}
+
 pub fn reward_claimed_in_token(
     env: &Env,
     user: &Address,
