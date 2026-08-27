@@ -28,6 +28,7 @@ pub mod insurance; // issue #289 — pool health insurance
 pub mod keeper_registry; // approved-keeper registry with performance stats
 pub mod nft_fractionalize; // NFT receipt fractionalization
 pub mod partial_freeze; // issue #337 — partial position freeze
+pub mod pool_presale; // issue #369 — pool pre-sale reserved staking spots
 pub mod position_dna; // deterministic staking position fingerprint (position DNA)
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod qr_metadata; // issue #324 — stake receipt QR metadata

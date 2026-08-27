@@ -200,4 +200,26 @@ pub enum VaultError {
     /// Returned by `vote_on_dispute` when the caller has already voted on
     /// the given dispute, or has no active position (so no vote weight).
     AlreadyVotedOrNoWeight = 59,
+
+    // --- Pool pre-sale (issue #369) ---
+    /// Returned by `reserve_presale_spot`, `redeem_presale_reservation`, and
+    /// `cancel_presale` when no pre-sale has been started, or the active one
+    /// was already cancelled.
+    PresaleNotActive = 60,
+    /// Returned by `start_presale` when a pre-sale is already active, and by
+    /// `reserve_presale_spot` once the pre-sale's `opens_at` ledger has been
+    /// reached (reservations are only accepted before the pool opens).
+    PresaleReservationClosed = 61,
+    /// Returned by `redeem_presale_reservation` when called before the
+    /// pre-sale's `opens_at` ledger.
+    PresaleNotYetOpen = 62,
+    /// Returned by `reserve_presale_spot` when the reservation would exceed
+    /// `max_reservation_per_user`.
+    PresaleReservationExceedsMax = 63,
+    /// Returned by `redeem_presale_reservation` when the caller has no
+    /// reservation (or reserved zero).
+    NoPresaleReservation = 64,
+    /// Returned by `redeem_presale_reservation` when the reservation was
+    /// already redeemed.
+    PresaleReservationAlreadyRedeemed = 65,
 }
