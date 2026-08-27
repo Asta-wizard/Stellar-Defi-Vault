@@ -14,7 +14,6 @@
 
 use soroban_sdk::{contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
 
-use crate::admin;
 use crate::balance;
 use crate::errors::VaultError;
 use crate::vault::VaultContract;
@@ -187,8 +186,8 @@ impl VaultContract {
         to: Address,
         amount: u32,
     ) -> Result<(), VaultError> {
-        let from = env.invoker();
-        from.require_auth();
+        owner.require_auth();
+        let from = owner.clone();
 
         if amount == 0 {
             return Err(VaultError::ZeroAmount);

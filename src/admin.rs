@@ -78,5 +78,5 @@ pub fn require_admin_or_emergency_admin(env: &Env, caller: &Address) -> Result<(
     }
 
     // Falls back to NotAuthorized/Unauthorized variant present in your error definitions
-    Err(VaultError::NotAuthorized)
+    Err(VaultError::Unauthorized)
 }
