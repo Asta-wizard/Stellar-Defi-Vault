@@ -17,7 +17,7 @@ use crate::admin;
 use crate::balance;
 use crate::errors::VaultError;
 use crate::storage::ReputationScore;
-use crate::vault::{VaultContract, BOOST_BPS_BASE};
+use crate::vault::{VaultContract, VaultContractClient, BOOST_BPS_BASE};
 
 /// Instance-storage key for the decay configuration.
 const DECAY_CFG_KEY: Symbol = symbol_short!("rd_cfg");
@@ -112,6 +112,46 @@ pub fn compute_decayed_score(
 
 #[contractimpl]
 impl VaultContract {
+    /// Minimal base reputation score computed from a user's current position,
+    /// before decay is applied. Reduced to `total_score` only — no per-sub-score
+    /// business logic (that lives on the full reputation feature, not this
+    /// decay-only module) — so every sub-score is folded into `total_score`
+    /// directly, capped at `BOOST_BPS_BASE` (10 000).
+    fn get_reputation_score_raw(env: &Env, user: &Address) -> ReputationScore {
+        let shares = balance::get_shares(env, user);
+        if shares == 0 {
+            return ReputationScore {
+                duration_score: 0,
+                consistency_score: 0,
+                size_score: 0,
+                streak_score: 0,
+                total_score: 0,
+            };
+        }
+
+        let staked_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&crate::storage::DataKey::StakedAtLedger(user.clone()))
+            .unwrap_or(0);
+        let current = env.ledger().sequence();
+        let tenure_ledgers = current.saturating_sub(staked_at);
+
+        // Score linearly with tenure, capped at the max — a full year staked
+        // reaches the cap.
+        let total_score = ((tenure_ledgers as u64 * BOOST_BPS_BASE as u64)
+            / crate::vault::STELLAR_LEDGERS_PER_YEAR as u64)
+            .min(BOOST_BPS_BASE as u64) as u32;
+
+        ReputationScore {
+            duration_score: total_score,
+            consistency_score: 0,
+            size_score: 0,
+            streak_score: 0,
+            total_score,
+        }
+    }
+
     /// Configure the reputation decay rate. Admin only.
     ///
     /// `decay_bps_per_epoch`: basis points subtracted from `total_score` per
@@ -157,7 +197,7 @@ impl VaultContract {
     /// the base score, applies decay based on elapsed epochs since last activity,
     /// and emits a `reputation_decayed` event if the score decreased.
     pub fn apply_reputation_decay(env: Env, user: Address) -> ReputationScore {
-        let base = Self::get_reputation_score_raw(&env, &user);
+        let base = Self::get_reputation_score_raw(&env, user.clone());
         let (decayed, old_score, epochs_elapsed) =
             compute_decayed_score(&env, &user, &base);
 

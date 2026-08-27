@@ -137,6 +137,7 @@ pub enum VaultError {
     InvalidRate = 40,
     /// Custom error message exceeds MAX_ERROR_MESSAGE_LENGTH (150 characters).
     MessageTooLong = 41,
+
     /// Returned by epoch-mode entrypoints when the contract is in the wrong mode.
     EpochModeConflict = 42,
     /// Returned when a vesting queue already holds the maximum supported entries.
@@ -159,12 +160,6 @@ pub enum VaultError {
     /// Returned when a user tries to join the waitlist but it has reached its 100-entry capacity limit.
     WaitlistFull = 49,
     
-    // --- Legacy Workspace Mappings ---
-    
-    /// Fallback mapping variant for workspace configurations.
-    VaultFeatureError = 50,
-    /// Fallback mapping variant for internal validation configurations.
-    VaultExtError = 51,
     /// Fallback mapping variant for authorization error conditions.
     NotAuthorized = 52,
 

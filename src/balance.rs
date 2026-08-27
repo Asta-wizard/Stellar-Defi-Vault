@@ -2432,3 +2432,128 @@ pub fn set_tvl_smoothing_enabled(env: &Env, enabled: bool) {
         .set(&symbol_short!("tvl_smth"), &enabled);
 }
 
+// ── Insurance-backed penalty waiver (issue #243) ───────────────────────────
+
+pub fn is_position_insured(env: &Env, user: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("insured"), user.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_position_insured(env: &Env, user: &Address, insured: bool) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("insured"), user.clone()), &insured);
+}
+
+pub fn clear_position_insured(env: &Env, user: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&(symbol_short!("insured"), user.clone()));
+}
+
+// ── Matching program (issue #242) ──────────────────────────────────────────
+
+pub fn get_matching_program(env: &Env) -> Option<crate::storage::MatchingProgram> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("match_pg"))
+}
+
+pub fn set_matching_program(env: &Env, program: &crate::storage::MatchingProgram) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("match_pg"), program);
+}
+
+pub fn get_user_matching_stats(env: &Env, user: &Address) -> crate::storage::UserMatchingStats {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("match_st"), user.clone()))
+        .unwrap_or(crate::storage::UserMatchingStats { total_matched: 0 })
+}
+
+pub fn set_user_matching_stats(env: &Env, user: &Address, stats: &crate::storage::UserMatchingStats) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("match_st"), user.clone()), stats);
+}
+
+// ── Unstake insurance bps ──────────────────────────────────────────────────
+
+pub fn get_unstake_insurance_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("unst_ins"))
+        .unwrap_or(0)
+}
+
+pub fn set_unstake_insurance_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("unst_ins"), &bps);
+}
+
+// ── Output tokens whitelist (issue #244) ───────────────────────────────────
+
+pub fn get_output_tokens(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("out_toks"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_output_tokens(env: &Env, tokens: &Vec<Address>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("out_toks"), tokens);
+}
+
+// ── Cohort tracking ────────────────────────────────────────────────────────
+
+pub fn get_cohort_of(env: &Env, user: &Address) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("cohort"), user.clone()))
+}
+
+pub fn set_cohort_of(env: &Env, user: &Address, cohort_id: u32) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("cohort"), user.clone()), &cohort_id);
+}
+
+pub fn get_cohort_ids(env: &Env) -> Vec<u32> {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("crt_ids"))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn set_cohort_ids(env: &Env, ids: &Vec<u32>) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("crt_ids"), ids);
+}
+
+pub fn get_cohort_stats(env: &Env, cohort_id: u32) -> Option<crate::storage::CohortStats> {
+    env.storage()
+        .instance()
+        .get(&(symbol_short!("crt_st"), cohort_id))
+}
+
+pub fn set_cohort_stats(env: &Env, cohort_id: u32, stats: &crate::storage::CohortStats) {
+    env.storage()
+        .instance()
+        .set(&(symbol_short!("crt_st"), cohort_id), stats);
+}
+
+// ── Staked at ledger (direct access) ───────────────────────────────────────
+
+pub fn set_staked_at_ledger(env: &Env, user: &Address, ledger: u32) {
+    env.storage()
+        .instance()
+        .set(&crate::storage::DataKey::StakedAtLedger(user.clone()), &ledger);
+}
+
