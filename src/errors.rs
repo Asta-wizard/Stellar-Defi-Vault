@@ -250,11 +250,10 @@ pub enum VaultError {
     /// that exceeded the configured threshold.
     ClaimCooldownActive = 70,
 
-    /// Returned by `generate_compliance_report` (issue #409) when
-    /// `ledger_from` is not strictly less than `ledger_to`.
-    InvalidLedgerRange = 71,
-
-    /// Returned by `burn_and_redeem` (issue #410) when the caller's position
-    /// is still inside its configured lock-up period.
-    PositionStillLocked = 72,
+    /// Returned by `sign_covenant` (issue #413) when the supplied
+    /// `terms_hash` does not match the currently published pool terms.
+    TermsMismatch = 71,
+    /// Returned by `stake_with_covenant` (issue #413) when the caller has
+    /// not signed the currently published pool terms.
+    CovenantRequired = 72,
 }
