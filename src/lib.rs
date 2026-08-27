@@ -18,7 +18,10 @@ mod vault;
 // keys, types, and entrypoints together instead of appending to a 25k-line
 // file. `DataKey` is at Soroban's 50-variant cap for `#[contracttype]` enums,
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
+pub mod boost_activation_age; // issue #401 — minimum position age before boost multipliers activate
+pub mod capacity_forecast; // issue #402 — TVL capacity-cap arrival forecast from stake inflow
 pub mod combined_vesting; // issue #346 — cliff-then-linear combined reward vesting
+pub mod comfort_score; // issue #399 — personalized pool comfort score for a user's risk profile
 pub mod performance_league_table; // issue #373 — cross-pool performance league table
 pub mod xlm_wrapper_integration; // issue #372 — auto-wrap native XLM to wXLM before staking
 pub mod collusion_detector; // issue #406 — coordinated stake/unstake pattern detector
@@ -48,6 +51,7 @@ pub mod reputation_decay; // reputation score time-decay mechanism
 pub mod staking_covenant; // issue #413 — on-chain commitment to pool terms by each staker
 pub mod sub_unit_reward_accumulator; // issue #367 — fractional reward carry-forward below minimum transfer
 pub mod tvl_rate_rebalance; // issue #333 — TVL-tiered pool reward rate rebalancing
+pub mod twa_reward_rate; // issue #400 — time-weighted average reward rate for smoother pending-reward estimates
 pub mod validator_rewards; // validator node reward integration
 pub mod vesting_cliff; // issue #287 — reward vesting cliff
 
@@ -98,3 +102,15 @@ mod test_position_var;
 
 #[cfg(test)]
 mod test_staker_diversity;
+
+#[cfg(test)]
+mod test_comfort_score;
+
+#[cfg(test)]
+mod test_twa_reward_rate;
+
+#[cfg(test)]
+mod test_boost_activation_age;
+
+#[cfg(test)]
+mod test_capacity_forecast;
