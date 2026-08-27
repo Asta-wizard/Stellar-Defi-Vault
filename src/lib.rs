@@ -16,7 +16,7 @@ mod vault;
 // keys, types, and entrypoints together instead of appending to a 25k-line
 // file. `DataKey` is at Soroban's 50-variant cap for `#[contracttype]` enums,
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
-pub mod collateral_swap; // issue #335 — collateral swap without unstaking
+pub mod combined_vesting; // issue #346 — cliff-then-linear combined reward vesting
 pub mod commitment; // issue #288 — commit–reveal stake commitments
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting

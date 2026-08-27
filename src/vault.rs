@@ -1374,3 +1374,16 @@ impl VaultContract {
     }
 }
 
+        Ok(())
+    }
+
+    /// Reads the current waitlist FIFO queue. Empty when nothing has been
+    /// stored yet, matching `join_waitlist`'s own storage key.
+    pub fn get_waitlist(env: Env) -> Vec<WaitlistEntry> {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("waitlist"))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+}
+
