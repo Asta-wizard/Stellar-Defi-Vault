@@ -1,6 +1,7 @@
 #![no_std]
 
 mod admin;
+pub mod admin_succession; // designated heir admin activated on prolonged inactivity
 mod balance;
 mod errors;
 mod events;
