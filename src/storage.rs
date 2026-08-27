@@ -1195,6 +1195,158 @@ pub struct WithdrawalReceipt {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ── Issue #105: stake/unstake history ────────────────────────────────────────
+
+
+
+// ── Issue #104: interface detection ──────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+// ── Issue #219: pause reason ─────────────────────────────────────────────────
+
+
+
+// ── Issue #217: tax reporting ────────────────────────────────────────────────
+
+
+// ── Issue #220: rounding policy ──────────────────────────────────────────────
+
+
+// ── Issue #216: governance voting ────────────────────────────────────────────
+
+
+
+// ── Issue #207: cross-chain bridge relayer hook ──────────────────────────────
+
+
+// ── Issue #197: fee splitting ─────────────────────────────────────────────────
+
+
+// ── Issue #195: timelocked admin actions ─────────────────────────────────────
+
+
+// ── Issue #196: multi-sig admin ──────────────────────────────────────────────
+
+
+
+// ── Missing types for existing feature branches ──────────────────────────────
+
+
+
+
+
+// ── Issue #210: Merkle Reward Distribution ────────────────────────────────────
+
+
+// ── Issue #231: Halving Schedule ──────────────────────────────────────────────
+
+
+// ── Issue #222: Staking Certificate ───────────────────────────────────────────
+
+
+// ── Issue #211: Staking Tournament Competition ─────────────────────────────────
+
+
+// ── Issue #221: Cross-Pool Reward Comparison ──────────────────────────────────
+
+
+// ── Issue #235: Reward Smoothing ──────────────────────────────────────────────
+
+
+
+// ── Issue #236: Referral Tree Visualization ───────────────────────────────────
+
+
+// ── Issue #237: Capacity Auction ──────────────────────────────────────────────
+
+
+
+// ── Issue #239: stake-weighted lottery ────────────────────────────────────────
+
+
+// ── Issue #238: loyalty milestone badges ──────────────────────────────────────
+
+
+
+// ── Issue #240: oracle-triggered lock-up release ──────────────────────────────
+
+
+
+// ── Issue #250: optimal claim frequency advisory ───────────────────────────────
+
+
+// ── Issue #257: auto-convert reward on claim ────────────────────────────────────
+
+
+// ── Issue #251: exit-queue priority bidding ─────────────────────────────────────
+
+
+// ── Issue #258: pool whitelabel branding ────────────────────────────────────────
+
+
+// ── Issue #259: staking insurance (principal protection) ────────────────────────
+
+
+
+// ── Issue #260: flash stake ─────────────────────────────────────────────────────
+
+
+// ── Issue #261: stake-backed loans ──────────────────────────────────────────────
+
+
+
+// ── Issue #276: seasonal reward multiplier ────────────────────────────────────
+
+
+// ── Issue #298: pool sunsetting workflow ──────────────────────────────────────
+
+
+// ── Issue #281: Fee Revenue Sharing ──────────────────────────────────────────
+
+
+
+// ── Issue #282: Stake-Gated Access ───────────────────────────────────────────
+
+
+// ── Issue #314: withdrawal receipt ───────────────────────────────────────────
+
+
+// ── Issue #309: staker onboarding checklist ───────────────────────────────────
+
 /// Tracks completion of the recommended onboarding steps for a staker (issue
 /// #309). Append-only: flags never reset to false even after the user
 /// unstakes. `completed_at` is set once, to the ledger at which the last
@@ -1225,3 +1377,5 @@ pub struct ContractDelegate {
     pub total_authorized: i128,
     pub total_used: i128,
 }
+
+

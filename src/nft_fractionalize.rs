@@ -16,7 +16,7 @@ use soroban_sdk::{contractimpl, contracttype, symbol_short, Address, Env, Symbol
 
 use crate::balance;
 use crate::errors::VaultError;
-use crate::vault::VaultContract;
+use crate::vault::{VaultContract, VaultContractClient};
 
 /// Minimum number of fractions per NFT.
 pub const MIN_FRACTIONS: u32 = 2;
@@ -186,8 +186,8 @@ impl VaultContract {
         to: Address,
         amount: u32,
     ) -> Result<(), VaultError> {
-        owner.require_auth();
         let from = owner.clone();
+        from.require_auth();
 
         if amount == 0 {
             return Err(VaultError::ZeroAmount);
