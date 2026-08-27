@@ -16,7 +16,7 @@ use soroban_sdk::{contractimpl, symbol_short, Address, Env, Symbol, Vec};
 use crate::admin;
 use crate::balance;
 use crate::errors::VaultError;
-use crate::vault::VaultContract;
+use crate::vault::{VaultContract, VaultContractClient};
 
 /// Instance-storage key for the linked validator node address.
 const VALIDATOR_KEY: Symbol = symbol_short!("vr_node");

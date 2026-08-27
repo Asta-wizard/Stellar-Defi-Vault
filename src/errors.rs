@@ -137,6 +137,7 @@ pub enum VaultError {
     InvalidRate = 40,
     /// Custom error message exceeds MAX_ERROR_MESSAGE_LENGTH (150 characters).
     MessageTooLong = 41,
+
     /// Returned by epoch-mode entrypoints when the contract is in the wrong mode.
     EpochModeConflict = 42,
     /// Returned when a vesting queue already holds the maximum supported entries.
@@ -159,12 +160,44 @@ pub enum VaultError {
     /// Returned when a user tries to join the waitlist but it has reached its 100-entry capacity limit.
     WaitlistFull = 49,
     
-    // --- Legacy Workspace Mappings ---
-    
-    /// Fallback mapping variant for workspace configurations.
-    VaultFeatureError = 50,
-    /// Fallback mapping variant for internal validation configurations.
-    VaultExtError = 51,
     /// Fallback mapping variant for authorization error conditions.
     NotAuthorized = 52,
+
+    // --- Reward waterfall / transfer cooldown / stake quota / slash dispute
+    // (issues #341, #340, #339, #336) ---
+    //
+    // NOTE: this enum was already over Soroban's ~50-case `#[contracterror]`
+    // cap (52 variants) *before* these 7 were added — confirmed by testing
+    // the pre-existing 52-variant enum alone, which already panics the
+    // `#[contracterror]` macro at build time. That's part of the same
+    // unrelated pre-existing corruption described in the PR: `VaultError`
+    // used to be three separate enums (see the "Legacy Workspace Mappings"
+    // variants above) that got collapsed into one. Adding 7 more here
+    // doesn't introduce a new failure mode — the type already can't build —
+    // but it does mean whoever splits this enum back apart to actually fix
+    // the cap should fold these 7 in wherever the rest end up.
+    /// Returned by `unstake` / `check_transfer_cooldown` when the caller
+    /// received their position via a transfer and is still inside the
+    /// configured transfer cooldown window. Call
+    /// `get_transfer_cooldown_remaining()` for how many ledgers remain.
+    TransferCooldownActive = 53,
+    /// Returned by quota-gated entrypoints (`create_proposal`,
+    /// `submit_content`, `create_poll`) when the caller has no operation
+    /// quota remaining in the current epoch.
+    QuotaExhausted = 54,
+    /// Returned by `dispute_slash` when the pool already has 5 open disputes.
+    TooManyOpenDisputes = 55,
+    /// Returned by `dispute_slash` when the dispute window for the given
+    /// slash has already elapsed, and by `resolve_dispute` when the dispute's
+    /// voting deadline has not been reached yet.
+    DisputeWindowClosed = 56,
+    /// Returned by `dispute_slash` / `vote_on_dispute` / `resolve_dispute`
+    /// when the referenced slash or dispute id does not exist.
+    DisputeNotFound = 57,
+    /// Returned by `resolve_dispute` when the dispute has already been
+    /// resolved.
+    DisputeAlreadyResolved = 58,
+    /// Returned by `vote_on_dispute` when the caller has already voted on
+    /// the given dispute, or has no active position (so no vote weight).
+    AlreadyVotedOrNoWeight = 59,
 }

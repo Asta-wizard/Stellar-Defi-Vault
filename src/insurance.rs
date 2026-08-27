@@ -92,12 +92,12 @@ impl VaultContract {
         admin::require_admin(&env)?;
 
         if coverage_amount <= 0 {
-            return Err(VaultError::InvalidRewardAmount);
+            return Err(VaultError::ZeroAmount);
         }
         if is_insolvent(&env) {
             // Registering a new guarantor after insolvency would let an admin
             // reset the arrangement on top of an unpaid claim window.
-            return Err(VaultError::PoolShuttingDown);
+            return Err(VaultError::ContractStopped);
         }
 
         env.storage().instance().set(&GUARANTOR_KEY, &guarantor);
@@ -134,7 +134,7 @@ impl VaultContract {
             return Err(VaultError::RelayerNotApproved);
         }
         if amount <= 0 {
-            return Err(VaultError::InvalidRewardAmount);
+            return Err(VaultError::ZeroAmount);
         }
 
         let updated = get_reserve(&env)
@@ -157,7 +157,7 @@ impl VaultContract {
         admin::require_admin(&env)?;
 
         if is_insolvent(&env) {
-            return Err(VaultError::PoolShuttingDown);
+            return Err(VaultError::ContractStopped);
         }
 
         let ledger = env.ledger().sequence();
@@ -185,7 +185,7 @@ impl VaultContract {
             return Err(VaultError::NotInitialized);
         }
         if amount <= 0 {
-            return Err(VaultError::InvalidRewardAmount);
+            return Err(VaultError::ZeroAmount);
         }
 
         let reserve = get_reserve(&env);
@@ -219,7 +219,7 @@ impl VaultContract {
             return Err(VaultError::RelayerNotApproved);
         }
         if is_insolvent(&env) {
-            return Err(VaultError::PoolShuttingDown);
+            return Err(VaultError::ContractStopped);
         }
 
         let registered_at: u32 = env
