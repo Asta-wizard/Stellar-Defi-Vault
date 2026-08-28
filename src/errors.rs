@@ -189,7 +189,10 @@ pub enum VaultError {
     TooManyOpenDisputes = 55,
     /// Returned by `dispute_slash` when the dispute window for the given
     /// slash has already elapsed, and by `resolve_dispute` when the dispute's
-    /// voting deadline has not been reached yet.
+    /// voting deadline has not been reached yet. Also returned by
+    /// `vote_on_mutual_loss` (voting after the deadline) and
+    /// `resolve_mutual_loss_claim` (resolving before it) in
+    /// `mutual_insurance_pool.rs`, issue #366.
     DisputeWindowClosed = 56,
     /// Returned by `dispute_slash` / `vote_on_dispute` / `resolve_dispute`
     /// when the referenced slash or dispute id does not exist.
@@ -199,6 +202,8 @@ pub enum VaultError {
     DisputeAlreadyResolved = 58,
     /// Returned by `vote_on_dispute` when the caller has already voted on
     /// the given dispute, or has no active position (so no vote weight).
+    /// Also returned by `vote_on_mutual_loss` for the same two reasons
+    /// (`mutual_insurance_pool.rs`, issue #366).
     AlreadyVotedOrNoWeight = 59,
 
     // --- Admin action nonce / governance comment thread (issues #374, #375) ---
@@ -211,4 +216,54 @@ pub enum VaultError {
     /// Returned by `post_proposal_comment` when the comment text exceeds
     /// `proposal_comment_thread::MAX_COMMENT_LENGTH`.
     CommentTooLong = 61,
+    // --- Pool pre-sale (issue #369) ---
+    /// Returned by `reserve_presale_spot`, `redeem_presale_reservation`, and
+    /// `cancel_presale` when no pre-sale has been started, or the active one
+    /// was already cancelled.
+    PresaleNotActive = 60,
+    /// Returned by `start_presale` when a pre-sale is already active, and by
+    /// `reserve_presale_spot` once the pre-sale's `opens_at` ledger has been
+    /// reached (reservations are only accepted before the pool opens).
+    PresaleReservationClosed = 61,
+    /// Returned by `redeem_presale_reservation` when called before the
+    /// pre-sale's `opens_at` ledger.
+    PresaleNotYetOpen = 62,
+    /// Returned by `reserve_presale_spot` when the reservation would exceed
+    /// `max_reservation_per_user`.
+    PresaleReservationExceedsMax = 63,
+    /// Returned by `redeem_presale_reservation` when the caller has no
+    /// reservation (or reserved zero).
+    NoPresaleReservation = 64,
+    /// Returned by `redeem_presale_reservation` when the reservation was
+    /// already redeemed.
+    PresaleReservationAlreadyRedeemed = 65,
+
+    // --- Mutual insurance pool (issue #366) ---
+    /// Returned by `enable_mutual_insurance`-gated entrypoints
+    /// (`join_mutual_insurance`, `claim_reward_with_mutual_contribution`,
+    /// `file_mutual_loss_claim`) and by `disable_mutual_insurance` when the
+    /// pool has never been configured, or has been disabled.
+    MutualInsuranceNotActive = 66,
+    /// Returned by `claim_reward_with_mutual_contribution` and
+    /// `file_mutual_loss_claim` when the caller has not opted in via
+    /// `join_mutual_insurance`.
+    NotAMutualMember = 67,
+    /// Returned by `vote_on_mutual_loss` and `resolve_mutual_loss_claim`
+    /// when the given loss-event id does not exist.
+    LossEventNotFound = 68,
+    /// Returned by `vote_on_mutual_loss` and `resolve_mutual_loss_claim`
+    /// when the referenced loss event has already been resolved.
+    LossEventAlreadyResolved = 69,
+
+    /// Returned by `claim_with_anti_dump_cooldown` (issue #365) when the
+    /// caller is still inside the cooldown window started by a prior claim
+    /// that exceeded the configured threshold.
+    ClaimCooldownActive = 70,
+
+    /// Returned by `sign_covenant` (issue #413) when the supplied
+    /// `terms_hash` does not match the currently published pool terms.
+    TermsMismatch = 71,
+    /// Returned by `stake_with_covenant` (issue #413) when the caller has
+    /// not signed the currently published pool terms.
+    CovenantRequired = 72,
 }

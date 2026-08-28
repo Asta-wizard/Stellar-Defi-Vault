@@ -2,6 +2,7 @@
 
 mod admin;
 pub mod admin_succession; // designated heir admin activated on prolonged inactivity
+pub mod anti_dump_claim_cooldown; // issue #365 — cooldown after large reward claims
 mod balance;
 mod errors;
 mod events;
@@ -18,25 +19,42 @@ mod vault;
 // file. `DataKey` is at Soroban's 50-variant cap for `#[contracttype]` enums,
 // so all of them use raw `Symbol`-keyed storage as `balance.rs` does.
 pub mod admin_action_nonce; // issue #374 — replay-protected admin actions via per-admin nonce
+pub mod boost_activation_age; // issue #401 — minimum position age before boost multipliers activate
+pub mod capacity_forecast; // issue #402 — TVL capacity-cap arrival forecast from stake inflow
 pub mod combined_vesting; // issue #346 — cliff-then-linear combined reward vesting
+pub mod comfort_score; // issue #399 — personalized pool comfort score for a user's risk profile
+pub mod performance_league_table; // issue #373 — cross-pool performance league table
+pub mod xlm_wrapper_integration; // issue #372 — auto-wrap native XLM to wXLM before staking
+pub mod collusion_detector; // issue #406 — coordinated stake/unstake pattern detector
 pub mod commitment; // issue #288 — commit–reveal stake commitments
 pub mod competitive_season; // periodic leaderboard-resetting competitive seasons
+pub mod compliance_report; // issue #409 — regulatory compliance report generator
 pub mod compound_optimizer; // issue #338 — active claim/restake interval optimizer
 pub mod content_curation; // content curation stake-weighted voting
+pub mod daily_token_velocity_limiter; // issue #411 — pool-wide daily reward outflow cap
 pub mod epoch_alignment; // issue #342 — calendar-style epoch boundary alignment
 pub mod epoch_reward_cap; // per-epoch reward outflow cap with deferred overflow claims
 pub mod halving_countdown; // issue #376 — ledgers/days remaining until next reward halving
+pub mod governance_power_decay; // issue #404 — governance vote weight decay for long-inactive voters
 pub mod insurance; // issue #289 — pool health insurance
 pub mod keeper_registry; // approved-keeper registry with performance stats
+pub mod minimum_reserve_ratio; // issue #405 — minimum reward-reserve ratio floor
+pub mod mutual_insurance_pool; // issue #366 — peer mutual insurance pool
 pub mod nft_fractionalize; // NFT receipt fractionalization
+pub mod nft_redeem; // issue #410 — burn-and-redeem NFT-triggered position exit
 pub mod partial_freeze; // issue #337 — partial position freeze
+pub mod pool_clone_factory; // issue #412 — deploy new pool instances from this contract as template
+pub mod pool_presale; // issue #369 — pool pre-sale reserved staking spots
 pub mod position_dna; // deterministic staking position fingerprint (position DNA)
 pub mod position_health_alert; // issue #377 — unified position attention-needed alert
 pub mod price_oracle; // issue #290 — position price oracle
 pub mod proposal_comment_thread; // issue #375 — stake-weighted governance proposal comments
 pub mod qr_metadata; // issue #324 — stake receipt QR metadata
 pub mod reputation_decay; // reputation score time-decay mechanism
+pub mod staking_covenant; // issue #413 — on-chain commitment to pool terms by each staker
+pub mod sub_unit_reward_accumulator; // issue #367 — fractional reward carry-forward below minimum transfer
 pub mod tvl_rate_rebalance; // issue #333 — TVL-tiered pool reward rate rebalancing
+pub mod twa_reward_rate; // issue #400 — time-weighted average reward rate for smoother pending-reward estimates
 pub mod validator_rewards; // validator node reward integration
 pub mod vesting_cliff; // issue #287 — reward vesting cliff
 
@@ -75,3 +93,27 @@ mod test_stake_quota;
 
 #[cfg(test)]
 mod test_slash_dispute;
+
+#[cfg(test)]
+mod test_nft_redeem;
+
+#[cfg(test)]
+mod test_compliance_report;
+
+#[cfg(test)]
+mod test_position_var;
+
+#[cfg(test)]
+mod test_staker_diversity;
+
+#[cfg(test)]
+mod test_comfort_score;
+
+#[cfg(test)]
+mod test_twa_reward_rate;
+
+#[cfg(test)]
+mod test_boost_activation_age;
+
+#[cfg(test)]
+mod test_capacity_forecast;
