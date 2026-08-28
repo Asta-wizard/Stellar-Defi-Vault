@@ -338,8 +338,8 @@ impl VaultContract {
 
     /// Revokes the current emergency admin address.
     pub fn revoke_emergency_admin(env: Env) -> Result<(), VaultError> {
-        let primary_admin = admin::get_admin(&env)?;
-        primary_admin.require_auth();
+        admin::clear_emergency_admin(&env)
+    }
 
     /// Withdraw by burning `shares`. Returns underlying token amount returned.
     pub fn withdraw(env: Env, withdrawer: Address, shares: i128) -> Result<i128, VaultError> {
@@ -1358,32 +1358,6 @@ impl VaultContract {
             .instance()
             .get(&symbol_short!("waitlist"))
             .unwrap_or(Vec::new(&env))
-    }
-}
-
-        Ok(())
-    }
-
-    /// Reads the current waitlist FIFO queue. Empty when nothing has been
-    /// stored yet, matching `join_waitlist`'s own storage key.
-    pub fn get_waitlist(env: Env) -> Vec<WaitlistEntry> {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("waitlist"))
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-}
-
-        Ok(())
-    }
-
-    /// Reads the current waitlist FIFO queue. Empty when nothing has been
-    /// stored yet, matching `join_waitlist`'s own storage key.
-    pub fn get_waitlist(env: Env) -> Vec<WaitlistEntry> {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("waitlist"))
-            .unwrap_or_else(|| Vec::new(&env))
     }
 }
 
