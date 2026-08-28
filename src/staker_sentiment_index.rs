@@ -137,12 +137,7 @@ fn get_pool_average_rating_bps(env: &Env) -> u32 {
 impl VaultContract {
     /// Record a stake inflow or outflow event for the sentiment tracker.
     /// `is_inflow` true for stake, false for unstake.
-    pub fn record_sentiment_inflow(
-        env: Env,
-        user: Address,
-        amount: i128,
-        is_inflow: bool,
-    ) {
+    pub fn record_sentiment_inflow(env: Env, user: Address, amount: i128, is_inflow: bool) {
         user.require_auth();
         let mut entries: Vec<(u32, i128, bool)> = env
             .storage()
@@ -242,11 +237,8 @@ impl VaultContract {
         let rating_bps = get_pool_average_rating_bps(&env);
         let rating_signal = (rating_bps / 400).min(25);
 
-        let score = inflow_signal
-            + claim_signal
-            + governance_signal
-            + message_signal
-            + rating_signal;
+        let score =
+            inflow_signal + claim_signal + governance_signal + message_signal + rating_signal;
         let score = score.min(100);
 
         SentimentReport {

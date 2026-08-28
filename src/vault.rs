@@ -10,21 +10,21 @@ use crate::{
     nft::StakeReceiptNFTClient,
     storage::{
         AccessTier, AdminAction, AdminProposal, AuctionBid, AutoConvertConfig, BoostTierProgress,
-        BootstrapConfig, BrandingConfig, CampaignInfo, CapacityAuction, ChangelogEntry, ClaimWindow,
-        ContractAddresses, ContractMetadata, DataKey, DayBucket, DebtNFT, DelegationChain, DynamicFeeConfig,
-        MatchingProgram,
-        EpochState, FeeRecipient, FlashStakeReceipt, GovernanceProposal, HalvingConfig,
-        InsurancePolicy, InsuranceProduct, InterfaceId, LeaderboardEntry, Loan, LoanConfig,
-        LotteryConfig, MerkleRoot, MigrationExport, Milestone, MilestoneCondition, MultisigConfig,
+        BootstrapConfig, BrandingConfig, CampaignInfo, CapacityAuction, ChangelogEntry,
+        ClaimWindow, ContractAddresses, ContractMetadata, DataKey, DayBucket, DebtNFT,
+        DelegationChain, DynamicFeeConfig, EpochState, FeeRecipient, FlashStakeReceipt,
+        GovernanceProposal, HalvingConfig, InsurancePolicy, InsuranceProduct, InterfaceId,
+        LeaderboardEntry, Loan, LoanConfig, LotteryConfig, MatchingProgram, MerkleRoot,
+        MigrationExport, Milestone, MilestoneCondition, MultisigConfig, OperatorDashboard,
         OptimalClaimAdvice, PauseInfo, PauseReason, PendingAction, PoolComparison, PoolConfig,
-        OperatorDashboard, PoolHealthReport, PoolStats, PredictionMarket, PriceCondition, PriorityBidRecord, ProposableParam,
-        RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode, ReputationScore, RewardTier,
-        RewardMultiplierBreakdown, RevenueShareMerkleRoot, RevenueSharingConfig, RoundingPolicy,
-        Season, SmoothingSchedule, SmoothingStatus,
-        StakeAction, StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate,
-        StakingEfficiencyScore, StorageUsageReport, SunsetState, SwapOffer, TaxReport, Tournament,
-        TriggerDirection, UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary,
-        VestingEntry, YieldComparison,
+        PoolHealthReport, PoolStats, PredictionMarket, PriceCondition, PriorityBidRecord,
+        ProposableParam, RateHistoryEntry, ReferralLeaderboardEntry, ReferralTreeNode,
+        ReputationScore, RevenueShareMerkleRoot, RevenueSharingConfig, RewardMultiplierBreakdown,
+        RewardTier, RoundingPolicy, Season, SmoothingSchedule, SmoothingStatus, StakeAction,
+        StakeHistoryEntry, StakePosition, StakeStreak, StakingCertificate, StakingEfficiencyScore,
+        StorageUsageReport, SunsetState, SwapOffer, TaxReport, Tournament, TriggerDirection,
+        UnbondingPosition, UnstakeCheckResult, UserStats, UserSummary, VestingEntry,
+        YieldComparison,
     },
 };
 
@@ -842,9 +842,7 @@ impl VaultContract {
             let x_i = sorted_rewards.get(i).unwrap();
             total = total.checked_add(x_i).ok_or(VaultError::ArithmeticError)?;
             let rank = (i as i128) + 1;
-            let weighted = rank
-                .checked_mul(x_i)
-                .ok_or(VaultError::ArithmeticError)?;
+            let weighted = rank.checked_mul(x_i).ok_or(VaultError::ArithmeticError)?;
             rank_weighted = rank_weighted
                 .checked_add(weighted)
                 .ok_or(VaultError::ArithmeticError)?;
@@ -1360,4 +1358,3 @@ impl VaultContract {
             .unwrap_or(Vec::new(&env))
     }
 }
-

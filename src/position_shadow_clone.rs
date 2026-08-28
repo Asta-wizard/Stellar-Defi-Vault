@@ -35,15 +35,17 @@ pub struct ShadowClone {
 }
 
 fn get_next_clone_id(env: &Env) -> u32 {
-    let id: u32 = env.storage().instance().get(&CLONE_COUNTER_KEY).unwrap_or(0);
+    let id: u32 = env
+        .storage()
+        .instance()
+        .get(&CLONE_COUNTER_KEY)
+        .unwrap_or(0);
     env.storage().instance().set(&CLONE_COUNTER_KEY, &(id + 1));
     id
 }
 
 fn get_clone(env: &Env, clone_id: u32) -> Option<ShadowClone> {
-    env.storage()
-        .persistent()
-        .get(&(CLONE_KEY, clone_id))
+    env.storage().persistent().get(&(CLONE_KEY, clone_id))
 }
 
 fn set_clone(env: &Env, clone: &ShadowClone) {

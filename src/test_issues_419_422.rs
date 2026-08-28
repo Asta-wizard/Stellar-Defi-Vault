@@ -86,8 +86,7 @@ impl<'a> Fixture<'a> {
 fn test_add_charity_succeeds() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Save the Children");
-    f.vault
-        .add_charity(&f.admin, &f.charity, &name);
+    f.vault.add_charity(&f.admin, &f.charity, &name);
     let charities = f.vault.get_charities();
     assert_eq!(charities.len(), 1);
     assert_eq!(charities.get(0).unwrap().address, f.charity);
@@ -99,9 +98,7 @@ fn test_add_charity_requires_admin() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Test Charity");
     f.env.mock_all_auths();
-    let result = f
-        .vault
-        .try_add_charity(&f.alice, &f.charity, &name);
+    let result = f.vault.try_add_charity(&f.alice, &f.charity, &name);
     assert!(result.is_err());
 }
 
@@ -109,11 +106,8 @@ fn test_add_charity_requires_admin() {
 fn test_add_charity_rejects_duplicate() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Charity");
-    f.vault
-        .add_charity(&f.admin, &f.charity, &name);
-    let result = f
-        .vault
-        .try_add_charity(&f.admin, &f.charity, &name);
+    f.vault.add_charity(&f.admin, &f.charity, &name);
+    let result = f.vault.try_add_charity(&f.admin, &f.charity, &name);
     assert!(result.is_err());
 }
 
@@ -126,9 +120,7 @@ fn test_add_charity_rejects_max() {
         f.vault.add_charity(&f.admin, &addr, &name);
     }
     let extra = Address::generate(&f.env);
-    let result = f
-        .vault
-        .try_add_charity(&f.admin, &extra, &name);
+    let result = f.vault.try_add_charity(&f.admin, &extra, &name);
     assert!(result.is_err());
 }
 
@@ -136,8 +128,7 @@ fn test_add_charity_rejects_max() {
 fn test_remove_charity_succeeds() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Charity");
-    f.vault
-        .add_charity(&f.admin, &f.charity, &name);
+    f.vault.add_charity(&f.admin, &f.charity, &name);
     f.vault.remove_charity(&f.admin, &f.charity);
     let charities = f.vault.get_charities();
     assert_eq!(charities.len(), 0);
@@ -146,9 +137,7 @@ fn test_remove_charity_succeeds() {
 #[test]
 fn test_remove_nonexistent_charity_fails() {
     let f = Fixture::new();
-    let result = f
-        .vault
-        .try_remove_charity(&f.admin, &f.charity);
+    let result = f.vault.try_remove_charity(&f.admin, &f.charity);
     assert!(result.is_err());
 }
 
@@ -156,10 +145,8 @@ fn test_remove_nonexistent_charity_fails() {
 fn test_set_donation_config_succeeds() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Charity");
-    f.vault
-        .add_charity(&f.admin, &f.charity, &name);
-    f.vault
-        .set_donation_config(&f.alice, &f.charity, &1000_u32);
+    f.vault.add_charity(&f.admin, &f.charity, &name);
+    f.vault.set_donation_config(&f.alice, &f.charity, &1000_u32);
     let config = f.vault.get_donation_config(&f.alice).unwrap();
     assert_eq!(config.charity, f.charity);
     assert_eq!(config.donation_bps, 1000);
@@ -178,8 +165,7 @@ fn test_set_donation_config_rejects_unregistered_charity() {
 fn test_set_donation_config_rejects_over_50_percent() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Charity");
-    f.vault
-        .add_charity(&f.admin, &f.charity, &name);
+    f.vault.add_charity(&f.admin, &f.charity, &name);
     let result = f
         .vault
         .try_set_donation_config(&f.alice, &f.charity, &5001_u32);
@@ -190,10 +176,8 @@ fn test_set_donation_config_rejects_over_50_percent() {
 fn test_donation_zero_disables() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Charity");
-    f.vault
-        .add_charity(&f.admin, &f.charity, &name);
-    f.vault
-        .set_donation_config(&f.alice, &f.charity, &0_u32);
+    f.vault.add_charity(&f.admin, &f.charity, &name);
+    f.vault.set_donation_config(&f.alice, &f.charity, &0_u32);
     let config = f.vault.get_donation_config(&f.alice).unwrap();
     assert_eq!(config.donation_bps, 0);
 }
@@ -202,8 +186,7 @@ fn test_donation_zero_disables() {
 fn test_get_total_donated_tracks_accumulation() {
     let f = Fixture::new();
     let name = String::from_str(&f.env, "Charity");
-    f.vault
-        .add_charity(&f.admin, &f.charity, &name);
+    f.vault.add_charity(&f.admin, &f.charity, &name);
     let donated = f.vault.get_total_donated_to_charity(&f.charity);
     assert_eq!(donated, 0);
 }
@@ -303,24 +286,18 @@ fn test_place_buyback_limit_order_succeeds() {
 #[test]
 fn test_place_buyback_limit_order_requires_admin() {
     let f = Fixture::new();
-    let result = f.vault.try_place_buyback_limit_order(
-        &f.alice,
-        &1000_i128,
-        &5000_i128,
-        &1000_u32,
-    );
+    let result = f
+        .vault
+        .try_place_buyback_limit_order(&f.alice, &1000_i128, &5000_i128, &1000_u32);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_place_buyback_limit_order_rejects_zero_amount() {
     let f = Fixture::new();
-    let result = f.vault.try_place_buyback_limit_order(
-        &f.admin,
-        &1000_i128,
-        &0_i128,
-        &1000_u32,
-    );
+    let result = f
+        .vault
+        .try_place_buyback_limit_order(&f.admin, &1000_i128, &0_i128, &1000_u32);
     assert!(result.is_err());
 }
 
@@ -331,12 +308,9 @@ fn test_max_concurrent_orders_enforced() {
         f.vault
             .place_buyback_limit_order(&f.admin, &1000_i128, &1000_i128, &1000_u32);
     }
-    let result = f.vault.try_place_buyback_limit_order(
-        &f.admin,
-        &1000_i128,
-        &1000_i128,
-        &1000_u32,
-    );
+    let result = f
+        .vault
+        .try_place_buyback_limit_order(&f.admin, &1000_i128, &1000_i128, &1000_u32);
     assert!(result.is_err());
 }
 
@@ -357,9 +331,7 @@ fn test_cancel_limit_order_requires_admin() {
     let order_id = f
         .vault
         .place_buyback_limit_order(&f.admin, &1000_i128, &5000_i128, &1000_u32);
-    let result = f
-        .vault
-        .try_cancel_limit_order(&f.alice, &order_id);
+    let result = f.vault.try_cancel_limit_order(&f.alice, &order_id);
     assert!(result.is_err());
 }
 
@@ -400,8 +372,7 @@ fn test_sentiment_rating_signal_capped_at_25() {
 #[test]
 fn test_record_sentiment_inflow_and_message() {
     let f = Fixture::new();
-    f.vault
-        .record_sentiment_inflow(&f.alice, &1000_i128, &true);
+    f.vault.record_sentiment_inflow(&f.alice, &1000_i128, &true);
     f.vault.record_sentiment_message(&f.alice);
     // Even with inflow and message, without stakers in the pool, inflow_signal is 0
     // because total_staked is 0. message_signal: 1 * 5 = 5
@@ -423,7 +394,7 @@ fn test_sentiment_message_capped_at_five_messages() {
 fn test_sentiment_score_capped_at_100() {
     let f = Fixture::new();
     f.vault.set_pool_average_rating_bps(&10000_u32); // 25
-    // message_signal maxed: 25
+                                                     // message_signal maxed: 25
     for _ in 0..6 {
         f.vault.record_sentiment_message(&f.alice);
     }
@@ -446,8 +417,7 @@ fn test_sentiment_computed_at_updates() {
 #[test]
 fn test_record_sentiment_claim_records_event() {
     let f = Fixture::new();
-    f.vault
-        .record_sentiment_claim(&f.alice, &500_i128);
+    f.vault.record_sentiment_claim(&f.alice, &500_i128);
     // Claim velocity is 0 because total_staked is 0
     let report = f.vault.get_sentiment_index();
     assert_eq!(report.claim_signal, 0);

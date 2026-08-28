@@ -36,7 +36,10 @@ pub struct LimitOrder {
 }
 
 fn get_order_counter(env: &Env) -> u32 {
-    env.storage().instance().get(&ORDER_COUNTER_KEY).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&ORDER_COUNTER_KEY)
+        .unwrap_or(0)
 }
 
 fn increment_order_counter(env: &Env) -> u32 {
@@ -46,9 +49,7 @@ fn increment_order_counter(env: &Env) -> u32 {
 }
 
 fn get_order(env: &Env, order_id: u32) -> Option<LimitOrder> {
-    env.storage()
-        .persistent()
-        .get(&(ORDER_KEY, order_id))
+    env.storage().persistent().get(&(ORDER_KEY, order_id))
 }
 
 fn set_order(env: &Env, order: &LimitOrder) {
@@ -123,11 +124,7 @@ impl VaultContract {
 
     /// Cancel an unfilled limit order. Admin only. Returns funds to the
     /// treasury (the contract's reward pool).
-    pub fn cancel_limit_order(
-        env: Env,
-        admin: Address,
-        order_id: u32,
-    ) -> Result<(), VaultError> {
+    pub fn cancel_limit_order(env: Env, admin: Address, order_id: u32) -> Result<(), VaultError> {
         admin.require_auth();
         admin::require_admin(&env)?;
 
@@ -155,11 +152,7 @@ impl VaultContract {
     /// Execute a limit order: the keeper checks the current DEX price and
     /// executes if the price is <= max_price_bps. The keeper earns 0.5% of
     /// the swap output as incentive.
-    pub fn execute_limit_order(
-        env: Env,
-        keeper: Address,
-        order_id: u32,
-    ) -> Result<(), VaultError> {
+    pub fn execute_limit_order(env: Env, keeper: Address, order_id: u32) -> Result<(), VaultError> {
         keeper.require_auth();
 
         let order = get_order(&env, order_id).ok_or(VaultError::PositionNotFound)?;
@@ -178,8 +171,7 @@ impl VaultContract {
         }
 
         // Get the DEX router and perform the swap
-        let router_address =
-            balance::get_dex_router(&env).ok_or(VaultError::NotYieldSource)?;
+        let router_address = balance::get_dex_router(&env).ok_or(VaultError::NotYieldSource)?;
         let router = DexRouterClient::new(&env, &router_address);
         let reward_token = balance::get_reward_token(&env).ok_or(VaultError::NotInitialized)?;
         let stake_token: Address = env
@@ -204,11 +196,7 @@ impl VaultContract {
 
         if keeper_incentive > 0 {
             let token_client = soroban_sdk::token::Client::new(&env, &reward_token);
-            token_client.transfer(
-                &env.current_contract_address(),
-                &keeper,
-                &keeper_incentive,
-            );
+            token_client.transfer(&env.current_contract_address(), &keeper, &keeper_incentive);
             keeper_registry::record_keeper_action(&env, &keeper, keeper_incentive);
         }
 
@@ -222,7 +210,13 @@ impl VaultContract {
 
         env.events().publish(
             (symbol_short!("lo_fill"),),
-            (order_id, order.max_price_bps, tokens_bought, tokens_to_burn, current_ledger),
+            (
+                order_id,
+                order.max_price_bps,
+                tokens_bought,
+                tokens_to_burn,
+                current_ledger,
+            ),
         );
 
         Ok(())
