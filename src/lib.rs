@@ -4,7 +4,7 @@ mod admin;
 pub mod admin_succession; // designated heir admin activated on prolonged inactivity
 pub mod anti_dump_claim_cooldown; // issue #365 — cooldown after large reward claims
 mod balance;
-mod errors;
+pub mod errors;
 mod events;
 pub mod example_consumer;
 pub mod interface;
@@ -54,6 +54,10 @@ pub mod tvl_rate_rebalance; // issue #333 — TVL-tiered pool reward rate rebala
 pub mod twa_reward_rate; // issue #400 — time-weighted average reward rate for smoother pending-reward estimates
 pub mod validator_rewards; // validator node reward integration
 pub mod vesting_cliff; // issue #287 — reward vesting cliff
+pub mod charitable_donation_routing; // issue #419 — charitable donation routing
+pub mod position_shadow_clone; // issue #420 — read-only shadow clone of a position
+pub mod dex_limit_order_buyback; // issue #421 — limit order buyback mechanism
+pub mod staker_sentiment_index; // issue #422 — composite sentiment index
 
 pub use nft::StakeReceiptNFT;
 pub use vault::VaultContract;
@@ -114,3 +118,6 @@ mod test_boost_activation_age;
 
 #[cfg(test)]
 mod test_capacity_forecast;
+
+#[cfg(test)]
+mod test_issues_419_422; // issue #419, #420, #421, #422
