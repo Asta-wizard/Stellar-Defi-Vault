@@ -206,6 +206,16 @@ pub enum VaultError {
     /// (`mutual_insurance_pool.rs`, issue #366).
     AlreadyVotedOrNoWeight = 59,
 
+    // --- Admin action nonce / governance comment thread (issues #374, #375) ---
+
+    /// Returned by `execute_admin_action_with_nonce` when the supplied nonce
+    /// does not match the admin's next expected nonce — either a stale,
+    /// already-consumed value (a replayed transaction) or one issued too far
+    /// ahead. Call `admin_action_nonce()` for the correct value.
+    NonceMismatch = 60,
+    /// Returned by `post_proposal_comment` when the comment text exceeds
+    /// `proposal_comment_thread::MAX_COMMENT_LENGTH`.
+    CommentTooLong = 61,
     // --- Pool pre-sale (issue #369) ---
     /// Returned by `reserve_presale_spot`, `redeem_presale_reservation`, and
     /// `cancel_presale` when no pre-sale has been started, or the active one
