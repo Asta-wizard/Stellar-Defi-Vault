@@ -28,6 +28,7 @@ pub mod position_health_auto_recovery; // issue #459 — position health auto-re
 pub mod lockdrop_campaign; // issue #460 — lockdrop campaign
 pub mod proof_of_humanity_hook; // issue #461 — proof-of-humanity hook
 pub mod roadmap_voting; // issue #462 — roadmap voting
+pub mod staker_region_tag; // issue #430 — voluntary staker region tags
 pub mod staker_network_graph; // issue #456 — staker delegation/referral/mirror network graph
 pub mod staker_favor_rounding; // issue #457 — always round in the staker's favor
 pub mod daily_community_tip; // issue #458 — daily stake-weighted featured tip vote

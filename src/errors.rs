@@ -664,6 +664,16 @@ pub enum VaultCampaignError {
     VoteBudgetExceeded = 31,
     /// Returned by `vote_roadmap_item()` when `weight` alone exceeds 100.
     InvalidVoteWeight = 32,
+
+    // ── Issue #430: staker region tags ───────────────────────────────────
+    /// Returned by `set_region_tag()` when the code exceeds 10 characters.
+    RegionCodeTooLong = 33,
+    /// Returned by `set_region_tag()` when the code is empty or contains a
+    /// non-alphanumeric character.
+    InvalidRegionCode = 34,
+    /// Returned by `set_region_tag()` when a new tag would exceed
+    /// `MAX_REGION_TAGGED_STAKERS`.
+    TooManyRegionTags = 35,
 }
 
 impl From<VaultError> for VaultCampaignError {
