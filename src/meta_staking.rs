@@ -36,7 +36,7 @@
 use soroban_sdk::{contracterror, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol};
 
 use crate::storage::DataKey;
-use crate::vault::STELLAR_LEDGERS_PER_YEAR;
+use crate::vault::{VaultContractClient, STELLAR_LEDGERS_PER_YEAR};
 use crate::VaultContract;
 
 const BPS_DENOMINATOR: i128 = 10_000;

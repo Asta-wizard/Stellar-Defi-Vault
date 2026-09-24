@@ -36,6 +36,16 @@ pub mod meta_staking; // meta-staking layer — restake reward tokens for a bonu
 pub mod batch_vote; // governance batch voting (issue #160)
 pub mod daily_withdrawal_limit; // issue #554 — per-user rolling 24h withdrawal cap
 
+// These five files existed and were already called from vault.rs, but were
+// never added to this module list — an accidental omission that left the
+// whole crate uncompilable on `main` (unrelated to issue #556; fixed here
+// only because vault.rs, which #556's fix touches, can't build without it).
+pub mod claim_fee;
+pub mod community_treasury;
+pub mod mev_claim_protection;
+pub mod peg_stabilization;
+pub mod position_mirroring;
+
 pub use nft::StakeReceiptNFT;
 pub use vault::VaultContract;
 
