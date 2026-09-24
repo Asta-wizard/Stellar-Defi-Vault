@@ -665,13 +665,15 @@ pub enum VaultCampaignError {
     /// Returned by `vote_roadmap_item()` when `weight` alone exceeds 100.
     InvalidVoteWeight = 32,
 
-    // ── Issue #554: per-user daily withdrawal limit ──────────────────────────
-    /// A `withdraw`/`unstake` would push the user's rolling 24-hour total
-    /// above the configured cap. Numbered 51, outside `VaultError`'s 1..=50,
-    /// because it is raised from `VaultError`-returning entrypoints.
-    DailyLimitExceeded = 51,
-    /// `set_daily_withdrawal_limit()` was given a negative amount.
-    InvalidDailyLimit = 52,
+    // ── Issue #430: staker region tags ───────────────────────────────────
+    /// Returned by `set_region_tag()` when the code exceeds 10 characters.
+    RegionCodeTooLong = 33,
+    /// Returned by `set_region_tag()` when the code is empty or contains a
+    /// non-alphanumeric character.
+    InvalidRegionCode = 34,
+    /// Returned by `set_region_tag()` when a new tag would exceed
+    /// `MAX_REGION_TAGGED_STAKERS`.
+    TooManyRegionTags = 35,
 }
 
 impl From<VaultError> for VaultCampaignError {
