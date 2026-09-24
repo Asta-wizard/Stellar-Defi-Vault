@@ -2117,6 +2117,8 @@ impl VaultContract {
             .and_then(|v| v.checked_div(10_000))
             .ok_or(VaultError::ArithmeticError)?;
         let payout = amount.checked_sub(fee).ok_or(VaultError::ArithmeticError)?;
+        // Issue #554: per-user rolling 24h cap on the gross amount withdrawn.
+        crate::daily_withdrawal_limit::enforce_and_record(env, staker, amount);
         let token_addr = Self::token_address(env)?;
         let token_client = token::Client::new(env, &token_addr);
         token_client.transfer(&env.current_contract_address(), staker, &payout);
