@@ -394,7 +394,16 @@ impl VaultContract {
     }
 
     /// Withdraw by burning `shares`. Returns underlying token amount returned.
+    ///
+    /// Rejects the withdrawal with `WithdrawalLimitExceeded` when it would
+    /// push the withdrawer's cumulative withdrawals over the admin-configured
+    /// rolling 24h per-user cap (issue #554).
     pub fn withdraw(env: Env, withdrawer: Address, shares: i128) -> Result<i128, VaultError> {
+        crate::daily_withdrawal_limit::enforce_and_record(
+            &env,
+            &withdrawer,
+            Self::projected_unstake_amount(&env, shares)?,
+        )?;
         Self::do_unstake(&env, &withdrawer, shares)
     }
 
@@ -402,10 +411,18 @@ impl VaultContract {
     ///
     /// Rejects the unstake with `BelowMinimumUnstake` when an admin-configured
     /// minimum unstake amount is active and `shares` is below it, unless this
-    /// is a full position exit (issue #441).
+    /// is a full position exit (issue #441). Rejects with
+    /// `WithdrawalLimitExceeded` when it would push the staker's cumulative
+    /// withdrawals over the admin-configured rolling 24h per-user cap
+    /// (issue #554).
     pub fn unstake(env: Env, staker: Address, shares: i128) -> Result<i128, VaultError> {
         let position_amount = balance::get_shares(&env, &staker);
         crate::minimum_unstake_amount::enforce_min_unstake(&env, shares, position_amount)?;
+        crate::daily_withdrawal_limit::enforce_and_record(
+            &env,
+            &staker,
+            Self::projected_unstake_amount(&env, shares)?,
+        )?;
         Self::do_unstake(&env, &staker, shares)
     }
 
@@ -415,12 +432,31 @@ impl VaultContract {
     /// any pending rewards first (same behaviour as `unstake`).
     /// Returns the total token amount returned to the user.
     /// Reverts with `PositionNotFound` when the user has no active position.
+    /// Subject to the same rolling 24h per-user withdrawal cap as `unstake`
+    /// (issue #554) — a full exit isn't a backdoor around it.
     pub fn unstake_all(env: Env, user: Address) -> Result<i128, VaultError> {
         let shares = balance::get_shares(&env, &user);
         if shares == 0 {
             return Err(VaultError::PositionNotFound);
         }
+        crate::daily_withdrawal_limit::enforce_and_record(
+            &env,
+            &user,
+            Self::projected_unstake_amount(&env, shares)?,
+        )?;
         Self::do_unstake(&env, &user, shares)
+    }
+
+    /// The underlying token amount `shares` would convert to right now,
+    /// matching `do_unstake`'s own (pre-fee) conversion exactly since both
+    /// read the same current `total_shares`/`total_deposited` state.
+    /// Used to check the rolling daily withdrawal cap *before* committing
+    /// to the unstake (issue #554).
+    fn projected_unstake_amount(env: &Env, shares: i128) -> Result<i128, VaultError> {
+        let total_shares = balance::get_total_shares(env);
+        let total_deposited = balance::get_total_deposited(env);
+        balance::shares_to_amount(total_shares, total_deposited, shares)
+            .ok_or(VaultError::ArithmeticError)
     }
 
     /// Split `split_amount` off the caller's primary position into a second,
@@ -2322,8 +2358,8 @@ pub fn user_summary(env: Env, user: Address) -> Result<UserSummary, VaultError> 
     };
     Ok(UserSummary {
         position: match position {
-            Some(p) => OptionalPosition::Some(p),
-            None => OptionalPosition::None,
+            Some(p) => soroban_sdk::vec![&env, p],
+            None => soroban_sdk::vec![&env],
         },
         pending_reward,
         pool_share_bps,
