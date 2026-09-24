@@ -66,3 +66,6 @@ mod test_issues_467_470;
 
 #[cfg(test)]
 mod test_issues_459_462;
+
+#[cfg(test)]
+mod test_daily_withdrawal_limit;
