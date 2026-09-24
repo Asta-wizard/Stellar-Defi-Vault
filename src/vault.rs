@@ -789,9 +789,19 @@ impl VaultContract {
         env.ledger().sequence().saturating_sub(initialized_at)
     }
 
-    /// Returns true when the pool is paused, false otherwise.
+    /// Returns true when the pool is paused, false otherwise. Also lazily
+    /// lifts a `pause_until`-scheduled pause if its target ledger has been
+    /// reached (issue #556), so this reflects the effective state rather
+    /// than a stale flag that a mutating call just hasn't cleared yet.
     pub fn is_paused(env: Env) -> bool {
+        balance::apply_scheduled_unpause_if_due(&env);
         Self::paused(&env)
+    }
+
+    /// Read-only: the ledger at which a `pause_until`-scheduled pause will
+    /// automatically lift, if one is scheduled (issue #556).
+    pub fn get_scheduled_unpause(env: Env) -> Option<u32> {
+        balance::get_scheduled_unpause(&env)
     }
 
     /// Read-only query for the caller's active stake position.
@@ -1482,18 +1492,66 @@ impl VaultContract {
         Ok(())
     }
 
-    /// Resume deposits and withdrawals after a pause (admin only).
+    /// Resume deposits and withdrawals after a pause (admin only). Also
+    /// clears any pending `pause_until` schedule (issue #556) — an early
+    /// manual unpause always wins over a scheduled one.
     pub fn unpause(env: Env) -> Result<(), VaultError> {
         admin::require_admin(&env)?;
         Self::require_not_stopped(&env)?;
         Self::set_paused(&env, false);
         balance::clear_pause_info(&env);
+        balance::clear_scheduled_unpause(&env);
         let admin = admin::get_admin(&env)?;
         events::unpaused(&env, &admin, env.ledger().sequence());
         events::admin_action_unpause(&env, &admin);
         balance::increment_admin_action_count(&env);
         balance::set_last_updated_ledger(&env, env.ledger().sequence());
         Self::append_changelog(&env, &admin, String::from_str(&env, "unpaused"), 1, 0);
+        Ok(())
+    }
+
+    /// Pause all deposits and withdrawals now, scheduling an automatic
+    /// unpause once `target_ledger` is reached (issue #556) — useful for
+    /// planned maintenance windows where the duration is known in advance,
+    /// without a second manual transaction later.
+    ///
+    /// Auto-unpause is lazily evaluated on the next call that checks pause
+    /// state (`is_paused`, or any deposit/withdraw/etc.), since Soroban has
+    /// no native scheduled execution — this is not a background timer. If
+    /// `target_ledger` has already passed by the time this is called, the
+    /// pause takes effect immediately but is eligible to lift on the very
+    /// next call. A manual `unpause()` before `target_ledger` clears the
+    /// schedule and ends the pause immediately, same as any other pause.
+    pub fn pause_until(
+        env: Env,
+        target_ledger: u32,
+        reason: PauseReason,
+        message: soroban_sdk::String,
+    ) -> Result<(), VaultError> {
+        admin::require_admin(&env)?;
+        Self::require_not_stopped(&env)?;
+
+        if message.len() > 200 {
+            return Err(VaultError::DescriptionTooLong);
+        }
+
+        Self::set_paused(&env, true);
+        let admin = admin::get_admin(&env)?;
+        let current_ledger = env.ledger().sequence();
+
+        let pause_info = PauseInfo {
+            reason,
+            message: message.clone(),
+            paused_at: current_ledger,
+        };
+        balance::set_pause_info(&env, &pause_info);
+        balance::set_scheduled_unpause(&env, target_ledger);
+
+        events::paused_with_reason(&env, &admin, &reason, &message, current_ledger);
+        events::admin_action_pause(&env, &admin);
+        balance::increment_admin_action_count(&env);
+        balance::set_last_updated_ledger(&env, current_ledger);
+        Self::append_changelog(&env, &admin, String::from_str(&env, "paused_until"), 0, 1);
         Ok(())
     }
 
@@ -2067,6 +2125,7 @@ impl VaultContract {
     }
 
     fn require_not_paused(env: &Env) -> Result<(), VaultError> {
+        balance::apply_scheduled_unpause_if_due(env);
         if env
             .storage()
             .instance()
@@ -2153,6 +2212,8 @@ impl VaultContract {
             .and_then(|v| v.checked_div(10_000))
             .ok_or(VaultError::ArithmeticError)?;
         let payout = amount.checked_sub(fee).ok_or(VaultError::ArithmeticError)?;
+        // Issue #554: per-user rolling 24h cap on the gross amount withdrawn.
+        crate::daily_withdrawal_limit::enforce_and_record(env, staker, amount);
         let token_addr = Self::token_address(env)?;
         let token_client = token::Client::new(env, &token_addr);
         token_client.transfer(&env.current_contract_address(), staker, &payout);
@@ -2339,7 +2400,7 @@ pub fn reward_per_token_per_ledger(env: Env) -> i128 {
 /// pool-share fraction (in basis points) in a single contract call.
 ///
 /// `pool_share_bps` is `user_shares * 10_000 / total_shares` (0 when no
-/// shares exist globally). Returns `UserSummary { position: None,
+/// shares exist globally). Returns `UserSummary { position: [empty],
 /// pending_reward: 0, pool_share_bps: 0 }` for users with no stake.
 /// No auth required.
 pub fn user_summary(env: Env, user: Address) -> Result<UserSummary, VaultError> {
@@ -2355,6 +2416,10 @@ pub fn user_summary(env: Env, user: Address) -> Result<UserSummary, VaultError> 
             .unwrap_or(0)
             .checked_div(total_shares)
             .unwrap_or(0)
+    };
+    let position_vec = match position {
+        Some(p) => Vec::from_array(&env, [p]),
+        None => Vec::new(&env),
     };
     Ok(UserSummary {
         position: match position {
@@ -2476,11 +2541,17 @@ pub fn is_stopped(env: Env) -> bool {
 /// Mirrors the exact same checks as `do_unstake` in the same order so the
 /// result accurately reflects what would happen on-chain.
 pub fn can_unstake(env: Env, user: Address, amount: i128) -> UnstakeCheckResult {
-    let paused: bool = env
+    let stored_paused: bool = env
         .storage()
         .instance()
         .get(&DataKey::Paused)
         .unwrap_or(false);
+    // Issue #556: reflect a due `pause_until` schedule without mutating
+    // state, per this function's read-only contract.
+    let paused = stored_paused
+        && balance::get_scheduled_unpause(&env)
+            .map(|target| env.ledger().sequence() < target)
+            .unwrap_or(true);
     if paused {
         return UnstakeCheckResult::PoolPaused;
     }
