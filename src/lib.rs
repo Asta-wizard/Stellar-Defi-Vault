@@ -34,6 +34,7 @@ pub mod daily_community_tip; // issue #458 — daily stake-weighted featured tip
 pub mod time_locked_admin_proposal; // issue #455 — time-locked admin config-change announcements
 pub mod meta_staking; // meta-staking layer — restake reward tokens for a bonus meta-reward rate
 pub mod batch_vote; // governance batch voting (issue #160)
+pub mod daily_withdrawal_limit; // issue #554 — per-user rolling 24h withdrawal cap
 
 pub use nft::StakeReceiptNFT;
 pub use vault::VaultContract;
