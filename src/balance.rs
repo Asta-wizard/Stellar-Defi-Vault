@@ -943,6 +943,47 @@ pub fn clear_pause_info(env: &Env) {
     env.storage().instance().remove(&symbol_short!("ps_info"));
 }
 
+// ── Issue #556: scheduled auto-unpause ───────────────────────────────────────
+
+/// Ledger sequence at which a `pause_until`-scheduled pause should be lifted,
+/// if any. Lazily evaluated on the next call that checks pause state —
+/// Soroban has no native scheduled execution, so nothing runs in the
+/// background; this is just the target the next call compares against.
+pub fn get_scheduled_unpause(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&symbol_short!("sch_unp"))
+}
+
+pub fn set_scheduled_unpause(env: &Env, target_ledger: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("sch_unp"), &target_ledger);
+}
+
+pub fn clear_scheduled_unpause(env: &Env) {
+    env.storage().instance().remove(&symbol_short!("sch_unp"));
+}
+
+/// Lazily lifts a `pause_until`-scheduled pause once `target_ledger` is
+/// reached (issue #556). Soroban has no native scheduled execution, so this
+/// only ever runs as a side effect of some other call arriving — if no one
+/// calls the contract after the target ledger, the pause stays in storage
+/// (still correctly reported as paused) until the next call clears it.
+/// `pub(crate)` free function rather than a `VaultContract` method so every
+/// mutating entrypoint that gates on pause state can call it, including
+/// ones outside `vault.rs` (e.g. `xlm_wrapper_integration.rs`).
+pub(crate) fn apply_scheduled_unpause_if_due(env: &Env) {
+    if let Some(target_ledger) = get_scheduled_unpause(env) {
+        if env.ledger().sequence() >= target_ledger {
+            env.storage().instance().set(&DataKey::Paused, &false);
+            clear_pause_info(env);
+            clear_scheduled_unpause(env);
+            let current_ledger = env.ledger().sequence();
+            crate::events::auto_unpaused(env, current_ledger);
+            set_last_updated_ledger(env, current_ledger);
+        }
+    }
+}
+
 // ── Issue #218: migration target ─────────────────────────────────────────────
 
 pub fn get_migration_target(env: &Env) -> Option<Address> {

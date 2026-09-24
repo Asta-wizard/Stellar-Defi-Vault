@@ -35,6 +35,18 @@ pub mod daily_community_tip; // issue #458 — daily stake-weighted featured tip
 pub mod time_locked_admin_proposal; // issue #455 — time-locked admin config-change announcements
 pub mod meta_staking; // meta-staking layer — restake reward tokens for a bonus meta-reward rate
 pub mod batch_vote; // governance batch voting (issue #160)
+pub mod daily_withdrawal_limit; // issue #554 — per-user rolling 24h withdrawal limit
+
+// Pre-existing modules that `vault.rs` already calls into (e.g. `do_unstake`'s
+// `community_treasury::route_fee_revenue` / `position_mirroring::maybe_mirror_action`)
+// but that were never actually declared here, leaving `main` unable to compile
+// before this PR. Wired in as a prerequisite to building/testing #554's change,
+// not part of #554 itself.
+pub mod claim_fee;
+pub mod community_treasury;
+pub mod mev_claim_protection;
+pub mod peg_stabilization;
+pub mod position_mirroring;
 
 pub use nft::StakeReceiptNFT;
 pub use vault::VaultContract;
