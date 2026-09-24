@@ -2303,7 +2303,7 @@ pub fn reward_per_token_per_ledger(env: Env) -> i128 {
 /// pool-share fraction (in basis points) in a single contract call.
 ///
 /// `pool_share_bps` is `user_shares * 10_000 / total_shares` (0 when no
-/// shares exist globally). Returns `UserSummary { position: None,
+/// shares exist globally). Returns `UserSummary { position: [empty],
 /// pending_reward: 0, pool_share_bps: 0 }` for users with no stake.
 /// No auth required.
 pub fn user_summary(env: Env, user: Address) -> Result<UserSummary, VaultError> {
@@ -2320,11 +2320,12 @@ pub fn user_summary(env: Env, user: Address) -> Result<UserSummary, VaultError> 
             .checked_div(total_shares)
             .unwrap_or(0)
     };
+    let position_vec = match position {
+        Some(p) => Vec::from_array(&env, [p]),
+        None => Vec::new(&env),
+    };
     Ok(UserSummary {
-        position: match position {
-            Some(p) => OptionalPosition::Some(p),
-            None => OptionalPosition::None,
-        },
+        position: position_vec,
         pending_reward,
         pool_share_bps,
     })
