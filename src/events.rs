@@ -24,6 +24,16 @@ pub fn unpaused(env: &Env, admin: &Address, ledger: u32) {
     env.events().publish(topics, (ledger,));
 }
 
+/// Emitted when a `pause_until` schedule lazily lifts a pause on some
+/// unrelated call, rather than via an explicit admin `unpause()` (issue
+/// #556) — no admin address is relevant here since no one authorized this
+/// specific transaction to unpause the pool; it just happened to be the
+/// first call after `target_ledger`.
+pub fn auto_unpaused(env: &Env, ledger: u32) {
+    let topics = (symbol_short!("auto_unp"),);
+    env.events().publish(topics, (ledger,));
+}
+
 pub fn yield_added(env: &Env, admin: &Address, amount: i128) {
     let topics = (symbol_short!("yield_add"), admin);
     env.events()
