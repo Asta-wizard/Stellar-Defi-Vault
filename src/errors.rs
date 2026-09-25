@@ -690,3 +690,58 @@ impl From<VaultError> for VaultCampaignError {
         }
     }
 }
+
+/// Seventh error enum, added for the same 50-variant reason the earlier
+/// `Vault*Error` enums exist: every prior `#[contracterror]` enum is at
+/// Soroban's cap. Holds the cases for the pool-insights / runway-guard /
+/// admin-recovery issue batch, plus mirrors of the `VaultError` cases those
+/// functions can hit (via the `From` impl below, so `?` still works).
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VaultOpsError {
+    /// Mirrors `VaultError::Unauthorized`.
+    Unauthorized = 1,
+    /// Mirrors `VaultError::NotInitialized`.
+    NotInitialized = 2,
+    /// Mirrors `VaultError::ZeroAmount`.
+    ZeroAmount = 3,
+    /// Mirrors `VaultError::ArithmeticError`.
+    ArithmeticError = 4,
+    /// Mirrors `VaultError::RateTooHigh` — a reward rate above
+    /// `balance::MAX_RATE_BPS` was supplied.
+    RateTooHigh = 5,
+    /// Returned by `set_reward_rate_bps` when the new rate would exhaust the
+    /// reward pool before the configured minimum runway
+    /// (`set_min_runway_ledgers`).
+    InsufficientRunway = 6,
+    /// Returned by `set_min_runway_ledgers` when `ledgers` is non-zero but
+    /// below the supported floor.
+    InvalidRunway = 7,
+    /// Returned by `propose_admin_recovery` when a recovery proposal is
+    /// already active.
+    RecoveryAlreadyPending = 8,
+    /// Returned by `execute_admin_recovery` / `cancel_admin_recovery` when no
+    /// recovery proposal is active.
+    RecoveryNotPending = 9,
+    /// Returned by `execute_admin_recovery` before the recovery delay has
+    /// elapsed.
+    RecoveryDelayNotElapsed = 10,
+    /// Returned by `propose_admin_recovery` when `new_admin` equals the
+    /// current admin.
+    InvalidRecoveryConfig = 11,
+}
+
+impl From<VaultError> for VaultOpsError {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::Unauthorized => VaultOpsError::Unauthorized,
+            VaultError::NotInitialized => VaultOpsError::NotInitialized,
+            VaultError::ZeroAmount => VaultOpsError::ZeroAmount,
+            VaultError::ArithmeticError => VaultOpsError::ArithmeticError,
+            VaultError::RateTooHigh => VaultOpsError::RateTooHigh,
+            // Any other VaultError reaching here maps to the closest generic case.
+            _ => VaultOpsError::Unauthorized,
+        }
+    }
+}
