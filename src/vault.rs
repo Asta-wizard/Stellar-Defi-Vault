@@ -235,6 +235,9 @@ impl VaultContract {
         balance::set_shares(&env, &user, current_shares + shares_minted);
         balance::set_total_shares(&env, total_shares + shares_minted);
         balance::set_total_deposited(&env, total_deposited + amount);
+        if current_shares == 0 {
+            balance::register_staker(&env, &user);
+        }
 
         // Issue #453: trigger mirroring for followers
         crate::position_mirroring::maybe_mirror_action(&env, &user, symbol_short!("stake"), amount);
@@ -1283,6 +1286,13 @@ impl VaultContract {
             AdminAction::SetRewardRate => {
                 let rate_bps =
                     Self::decode_u32_bytes(params).ok_or(VaultExtError::ActionNotFound)?;
+                // Enforce the reward-pool runway guard on the timelocked path
+                // too, so `queue_action` can't bypass `set_reward_rate_bps`.
+                // `VaultExtError` is at Soroban's 50-variant cap, so the
+                // specific reason can't be surfaced here; the direct setter
+                // reports `InsufficientRunway`.
+                crate::runway_guard::enforce_runway(env, rate_bps)
+                    .map_err(|_| VaultExtError::ActionNotFound)?;
                 balance::set_reward_rate_bps(env, rate_bps);
                 Ok(())
             }
@@ -2191,6 +2201,9 @@ impl VaultContract {
         balance::set_shares(env, user, cur + shares);
         balance::set_total_shares(env, total_shares + shares);
         balance::set_total_deposited(env, total_deposited + amount);
+        if cur == 0 {
+            balance::register_staker(env, user);
+        }
         crate::position_mirroring::maybe_mirror_action(env, user, symbol_short!("stake"), amount);
         Ok(shares)
     }
@@ -2417,15 +2430,12 @@ pub fn user_summary(env: Env, user: Address) -> Result<UserSummary, VaultError> 
             .checked_div(total_shares)
             .unwrap_or(0)
     };
-    let position_vec = match position {
-        Some(p) => Vec::from_array(&env, [p]),
+    let position_vec = match &position {
+        Some(p) => Vec::from_array(&env, [p.clone()]),
         None => Vec::new(&env),
     };
     Ok(UserSummary {
-        position: match position {
-            Some(p) => soroban_sdk::vec![&env, p],
-            None => soroban_sdk::vec![&env],
-        },
+        position: position_vec,
         pending_reward,
         pool_share_bps,
     })

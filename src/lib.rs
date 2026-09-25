@@ -37,6 +37,11 @@ pub mod meta_staking; // meta-staking layer — restake reward tokens for a bonu
 pub mod batch_vote; // governance batch voting (issue #160)
 pub mod daily_withdrawal_limit; // issue #554 — per-user rolling 24h withdrawal limit
 
+// Pool insights, reward-runway guard, and time-delayed admin recovery.
+pub mod pool_insights; // pool summary + rounding-policy transparency
+pub mod runway_guard; // set_reward_rate_bps runway safety rail
+pub mod admin_recovery; // long-delay admin key-loss recovery
+
 // Pre-existing modules that `vault.rs` already calls into (e.g. `do_unstake`'s
 // `community_treasury::route_fee_revenue` / `position_mirroring::maybe_mirror_action`)
 // but that were never actually declared here, leaving `main` unable to compile
@@ -81,3 +86,6 @@ mod test_issues_459_462;
 
 #[cfg(test)]
 mod test_staker_region_tag;
+
+#[cfg(test)]
+mod test_pool_ops_batch;
