@@ -1,6 +1,7 @@
 # Stellar DeFi Vault
 
 [![CI](https://github.com/YOUR_ORG/stellar-defi-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_ORG/stellar-defi-vault/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-%E2%89%A560%25-brightgreen)](https://github.com/YOUR_ORG/stellar-defi-vault/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Stellar Wave](https://img.shields.io/badge/Stellar-Wave%20Program-blue)](https://www.drips.network/wave/stellar)
 
@@ -135,6 +136,25 @@ cargo test --features testutils
 cargo fmt --check
 cargo clippy --features testutils -- -D warnings
 ```
+
+### Coverage, static analysis, and mutation testing
+
+Quality tooling complements the test suite; each has a doc and a `make` target:
+
+```bash
+make coverage   # line coverage summary (cargo-llvm-cov)   — docs/COVERAGE.md
+make scout      # Scout static analysis (Soroban)          — docs/STATIC_ANALYSIS.md
+make mutants    # mutation testing of the accounting core  — docs/MUTATION_TESTING.md
+```
+
+- [docs/COVERAGE.md](docs/COVERAGE.md) — coverage on every PR, the no-regression
+  threshold in `.github/coverage-threshold`, and how to reproduce it locally.
+- [docs/STATIC_ANALYSIS.md](docs/STATIC_ANALYSIS.md) — Scout in CI, how to run it
+  locally, and the finding-triage allowlist.
+- [docs/MUTATION_TESTING.md](docs/MUTATION_TESTING.md) — `cargo-mutants` config,
+  the baseline, and how survivors are triaged.
+- [docs/INVARIANTS.md](docs/INVARIANTS.md) — the precise accounting and
+  share-price invariants that these tools protect, mapped to tests.
 
 ### Deploying to Testnet
 
