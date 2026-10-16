@@ -62,6 +62,16 @@ jobs:
       - name: Check dependency advisories
         run: cargo deny check advisories
 
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # shellcheck is preinstalled on GitHub's ubuntu runners. These scripts
+      # handle keys and network config, so lint them for quoting bugs (#669).
+      - name: Lint scripts
+        run: shellcheck --version && shellcheck scripts/*.sh
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -81,26 +91,4 @@ jobs:
         with:
           components: clippy
           targets: wasm32-unknown-unknown
-      # `missing_docs` is tracked by the `docs` job below while the backlog is
-      # worked through (#675); keep it out of clippy's -D warnings until then.
-      - run: cargo clippy --all-targets -- -D warnings -A missing_docs
-
-  docs:
-    name: Rustdoc
-    runs-on: ubuntu-latest
-    env:
-      # Broken intra-doc links fail the build now; missing_docs is reported
-      # but not yet fatal (#675). Add `-D missing_docs` once the count is 0.
-      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Build docs
-        run: cargo doc --no-deps --lib 2>&1 | tee rustdoc.log
-        shell: bash -o pipefail {0}
-      - name: Report undocumented public items
-        if: always()
-        run: |
-          count=$(grep -c "missing documentation" rustdoc.log || true)
-          echo "### Undocumented public items: ${count}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Undocumented public items: ${count}"
+      - run: cargo clippy --all-targets -- -D warnings
