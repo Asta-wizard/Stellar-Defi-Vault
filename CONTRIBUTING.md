@@ -68,6 +68,28 @@ The compiled `.wasm` file will be at `target/wasm32-unknown-unknown/release/stel
 - Update `COSTS.md` with benchmarked CPU instructions and memory consumption for any new public functions.
 - Keep `CONTRACT_VERSION` in sync with `Cargo.toml` when updating the contract version.
 
+## Documenting public functions (#675)
+
+Every `pub fn` contract entrypoint needs a rustdoc comment in this shape:
+
+```rust
+/// One-line summary of what the entrypoint does.
+///
+/// # Authorization
+/// Who must sign (e.g. "`user` must sign", "the stored admin must sign").
+///
+/// # Errors
+/// - `VariantName`: when it is returned.
+///
+/// # Events
+/// - `event_name` (`events::event_name`), or "None".
+pub fn example(/* … */) -> Result<(), VaultError> { /* … */ }
+```
+
+`#![warn(missing_docs)]` is enabled in `src/lib.rs`. Run `make docs` to build
+the docs and print how many public items are still undocumented; CI's
+**Rustdoc** job reports the same count and fails on broken intra-doc links.
+
 ## PR Checklist
 
 - [ ] Tests pass (`cargo test --features testutils`)
