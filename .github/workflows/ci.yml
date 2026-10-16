@@ -14,13 +14,13 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -35,7 +35,7 @@ jobs:
     name: WASM Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
         with:
@@ -43,7 +43,7 @@ jobs:
       - name: Build optimized vault WASM
         run: cargo build --target wasm32-unknown-unknown --release --features vault-wasm
       - name: Upload optimized vault WASM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stellar-defi-vault-wasm
           path: target/wasm32-unknown-unknown/release/stellar_defi_vault.wasm
@@ -53,7 +53,7 @@ jobs:
     name: Dependency Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -66,7 +66,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt
@@ -76,7 +76,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
@@ -93,7 +93,7 @@ jobs:
       # but not yet fatal (#675). Add `-D missing_docs` once the count is 0.
       RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Build docs
         run: cargo doc --no-deps --lib 2>&1 | tee rustdoc.log
